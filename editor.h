@@ -100,15 +100,6 @@ public:
                 m_crtView->markDirty();
         });
 
-        // 显模式逐帧源：光标闪烁（自驱 2Hz）、足迹圆点随鼠标、滚动条淡出、
-        // 选区/墨水中间态——这些只重绘源组件、不会标脏着色器层，必须由
-        // 这里持续补拍（CrtView 内部 80ms 节流挡住超频上传）
-        m_crtRefreshTimer.setInterval(45);
-        connect(&m_crtRefreshTimer, &QTimer::timeout, this, [this] {
-            if (m_crt && m_crtView)
-                m_crtView->markDirty();
-        });
-
         // 换成自绘滚动条：命中区恒 18px，把手闲置 10px / 悬停 18px
         auto *vsb = new ZenScrollBar(Qt::Vertical);
         auto *hsb = new ZenScrollBar(Qt::Horizontal);
@@ -409,9 +400,10 @@ public:
             viewport()->render(&p, viewport()->pos());
         if (m_canvas && m_canvas->isVisible())
             m_canvas->render(&p, m_canvas->pos());
-        // 行号区：显模式下真实组件已隐藏（防双层），合成仍渲染它——
-        // 行号只存在于光栅内
-        if (m_lineNumberArea)
+        // 行号区：编模式下真实组件已隐藏（防双层），合成仍渲染它——
+        // 行号只存在于光栅内；非编模式不渲染（残留的隐藏组件会在
+        // 旧位置叠在字上）
+        if (m_codeMode && m_lineNumberArea)
             m_lineNumberArea->render(&p, m_lineNumberArea->pos());        if (m_fadeOpacity > 0.02) {
             p.save();
             p.setOpacity(m_fadeOpacity);
@@ -450,14 +442,12 @@ public:
     {
         m_crt = !m_crt;
         if (m_crt) {
-            // B 路线：真光学着色器层（QRhiWidget·Metal），盖住编辑器整面，
-            // 逐像素渲染——CPU 光栅的引擎坑从根上消失
+            // B 路线：真光学着色器层（自有 QRhi·Metal 离屏渲染 + 回读），
+            // 盖住编辑器整面。普通 alien 覆盖层：指针天然穿透、无原生窗口，
+            // 开关即 show/hide，没有任何拆装竞态。
             if (!m_crtView) {
                 m_crtView = new CrtView(this);
             }
-            // 原生 NSView 按需重建：关闭时已摘除（隐藏态原生窗口会在 macOS
-            // 上劫持整窗事件分发），此处重新挂上再合成
-            m_crtView->setAttribute(Qt::WA_NativeWindow, true);
             m_crtView->syncGeometry(); // 整面：文字+行号区+滚动条全被光栅覆盖
             m_crtView->show();
             m_crtView->raise();
@@ -465,12 +455,9 @@ public:
             // 行号只在光栅内存在：真实行号区隐藏（合成仍渲染它，防双层）
             if (m_lineNumberArea)
                 m_lineNumberArea->hide();
-            updateModeCursor(); // 光栅层的系统光标与当前模式一致（涂/擦=隐藏）
-            setFocus(); // 原生子窗口可能扰动首响应者：焦点还给编辑器
+            setFocus();
             activateWindow();
-            m_crtRefreshTimer.start(); // 光标闪烁/足迹圆点/滚动条淡出的逐帧源
-            // 临时取证：开显 1.2 秒后保存纯 CPU 快照（不碰 RHI——
-            // grabFramebuffer/grab 会嵌套 beginOffscreenFrame，本身就是风险源）
+            // 临时取证：开显 1.2 秒后保存纯 CPU 快照
             QTimer::singleShot(1200, this, [this] {
                 if (!m_crt || !m_crtView)
                     return;
@@ -488,22 +475,11 @@ public:
                 f.close();
             });
         } else {
-            // 常驻对象，只隐藏：销毁会把顶层 backing store 的 RHI/swapchain
-            // 拆掉，与在途 paint 竞态 = beginOffscreenFrame 撞上已释放的
-            // 帧槽信号量（SIGSEGV 0x30 崩溃的根因）。
-            // 但隐藏的原生 NSView 仍会劫持整窗指针事件（退出显后触摸板
-            // 全瘫的根源）：显式 destroy() 销毁原生窗口 + 摘除原生属性，
-            // 恢复纯 alien 隐藏子控件 = 完全惰性。延后一拍执行：逃出
-            // 当前键事件嵌套上下文，确保 NSView 销毁生效。
-            m_crtRefreshTimer.stop();
+            // 常驻对象，只隐藏。无原生窗口：隐藏即彻底让位，
+            // 不需要销毁、不需要摘除任何属性——事件分发天然恢复。
+            if (m_crtView)
+                m_crtView->hide();
             viewport()->releaseMouse(); // 防御：抓取会话不跨显模式残留
-            if (m_crtView) {
-                CrtView *v = m_crtView;
-                QTimer::singleShot(0, this, [this, v] {
-                    if (v == m_crtView)
-                        v->tearDownNative();
-                });
-            }
             if (m_lineNumberArea)
                 m_lineNumberArea->show();
             viewport()->update();
@@ -1229,17 +1205,19 @@ public:
             }
             QImage img(e.size(), QImage::Format_ARGB32);
             img.fill(Qt::white);
-            e.render(&img);
+            e.render(&img); // 新架构：覆盖层是普通 QWidget，render 捕获的就是真实 GPU 帧
             const int g = e.viewport()->pos().x();
-            bool amber = false;
-            for (int y = 0; y < e.height() && !amber; ++y)
-                for (int x = g + 2; x < e.width() - 30 && !amber; ++x) {
+            // GPU 输出经 RGB 掩膜：亮磷光 = R/G 子像素点燃、B 熄灭（琥珀文字
+            // 的 R 与 G 分量分别落在 R/G 掩膜上），不再以原始调色板判色
+            bool lit = false;
+            for (int y = 0; y < e.height() && !lit; ++y)
+                for (int x = g + 2; x < e.width() - 30 && !lit; ++x) {
                     const QRgb px = img.pixel(x, y);
-                    if (qRed(px) > 170 && qGreen(px) > 90 && qBlue(px) < 90)
-                        amber = true;
+                    if (qRed(px) + qGreen(px) > 200 && qBlue(px) < 100)
+                        lit = true;
                 }
-            if (!amber) {
-                qWarning("selftest FAIL: no amber phosphor pixels in CRT render");
+            if (!lit) {
+                qWarning("selftest FAIL: no lit phosphor pixels in CRT render");
                 return false;
             }
             const QRgb bgPx = img.pixel(g + 8, e.height() - 20); // 空行区
@@ -1270,9 +1248,11 @@ public:
                     return false;
                 }
             }
-            // 颜色分类取证：绿主导/红主导/蓝主导像素计数（坏液晶 = 绿色块泛滥）
+            // 颜色分类取证：R/G/B 子像素点燃计数。琥珀文字的 R 与 G 分量
+            // 分别落在 R/G 掩膜上——红绿两族都应存在且大致均衡；蓝 = 熄灭。
+            // 坏管线 = 蓝色泛滥（B 掩膜点燃蓝分量 = 本应归零）。
             {
-                int green = 0, red = 0, blue = 0, amber = 0, dark = 0, other = 0;
+                int green = 0, red = 0, blue = 0, dark = 0, other = 0;
                 for (int y = 0; y < e.height(); ++y)
                     for (int x = g; x < e.width() - 30; ++x) {
                         const QRgb px = img.pixel(x, y);
@@ -1280,15 +1260,18 @@ public:
                         if (gr > r + 40 && gr > b + 40 && gr > 100) ++green;
                         else if (r > gr + 40 && r > b + 40 && r > 100) ++red;
                         else if (b > r + 40 && b > gr + 40 && b > 100) ++blue;
-                        else if (r > 150 && gr > 80 && b < 90) ++amber;
                         else if (r < 60 && gr < 60 && b < 60) ++dark;
                         else ++other;
                     }
-                qInfo("CRT-COLORS amber=%d green=%d red=%d blue=%d dark=%d other=%d",
-                      amber, green, red, blue, dark, other);
-                if (green > amber / 10 && green > 500) {
-                    qWarning("selftest FAIL: green-dominant pixels flood the CRT render (%d)",
-                             green);
+                qInfo("CRT-COLORS green=%d red=%d blue=%d dark=%d other=%d",
+                      green, red, blue, dark, other);
+                if (red < 500 || green < 500) {
+                    qWarning("selftest FAIL: RGB mask not lighting (red=%d green=%d)",
+                             red, green);
+                    return false;
+                }
+                if (blue > red / 4 || blue > green / 4) {
+                    qWarning("selftest FAIL: blue flood in CRT render (%d)", blue);
                     return false;
                 }
             }
@@ -1999,14 +1982,10 @@ private:
         QWidget *vp = viewport();
         if (m_mode == Mode::Normal) {
             vp->unsetCursor();
-            if (m_crtView)
-                m_crtView->setCursor(Qt::IBeamCursor);
             m_canvas->setFootprintVisible(false);
             return;
         }
         vp->setCursor(Qt::BlankCursor);
-        if (m_crtView)
-            m_crtView->setCursor(Qt::BlankCursor); // 光栅层的系统光标同样隐藏
         QPointF pos = m_lastMouse;
         if (pos.x() < 0)
             pos = QPointF(vp->width() / 2.0, vp->height() / 2.0);
@@ -2259,7 +2238,6 @@ private:
     QFont m_crtFont;
     static inline QString s_crtFamily;
     QTimer m_crtSettleTimer;
-    QTimer m_crtRefreshTimer;
 
 #ifdef NAUGHT_WITH_HIGHLIGHT
     KSyntaxHighlighting::Repository *m_repo = nullptr;

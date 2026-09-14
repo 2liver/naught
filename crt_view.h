@@ -1,51 +1,59 @@
-// crt_view.h —— 「显」真光学显示层（B 路线·Metal 版）：QRhiWidget + 着色器。
-// mac 上走 Metal 原生合成——QOpenGLWidget 的窗口层不合成（黑屏）坑从根上消失。
+// crt_view.h —— 「显」真光学显示层（自有 QRhi·Metal 离屏渲染 + 回读）。
+// 架构：普通 alien QWidget 覆盖层。GPU 用我们自己的 QRhi 实例离屏渲染，
+// 回读成 QImage 后由 QPainter 绘制——不经过 QRhiWidget、不创建原生窗口、
+// 不参与窗口 backing store 的 RHI 合成。指针事件经 WA_TransparentForMouseEvents
+// 天然穿透到真实组件（画布层同款路径）——输入即原生，无转发、无 teardown。
 #pragma once
 
 #include <QElapsedTimer>
 #include <QImage>
 #include <QPointF>
-#include <QRhiWidget>
+#include <QTimer>
+#include <QWidget>
 
-class QRhiCommandBuffer;
+class QRhi;
 class QRhiBuffer;
 class QRhiGraphicsPipeline;
 class QRhiShaderResourceBindings;
 class QRhiTexture;
-class QMouseEvent;
-class QWheelEvent;
+class QRhiTextureRenderTarget;
+class QRhiRenderPassDescriptor;
 
 class Editor;
 
-class CrtView : public QRhiWidget {
+class CrtView : public QWidget {
 public:
     explicit CrtView(Editor *editor);
+    ~CrtView() override;
     void markDirty(bool force = false);
     void syncGeometry();
-    void tearDownNative();
     QImage frameImage() const { return m_pending; }
 
 protected:
-    void keyPressEvent(QKeyEvent *event) override;
-    void mousePressEvent(QMouseEvent *event) override;
-    void mouseReleaseEvent(QMouseEvent *event) override;
-    void mouseDoubleClickEvent(QMouseEvent *event) override;
-    void mouseMoveEvent(QMouseEvent *event) override;
-    void wheelEvent(QWheelEvent *event) override;
-    void initialize(QRhiCommandBuffer *cb) override;
-    void render(QRhiCommandBuffer *cb) override;
-    void releaseResources() override;
+    void paintEvent(QPaintEvent *) override;
+    void showEvent(QShowEvent *) override;
+    void hideEvent(QHideEvent *) override;
+    void resizeEvent(QResizeEvent *) override;
 
 private:
+    void ensureRhi();
+    void releaseGpu();
+    void renderFrame();
+
     Editor *m_editor = nullptr;
-    QRhiTexture *m_tex = nullptr;
+    QRhi *m_r = nullptr;
+    QRhiTexture *m_colorTex = nullptr;
+    QRhiTextureRenderTarget *m_rt = nullptr;
+    QRhiRenderPassDescriptor *m_rp = nullptr;
+    QRhiGraphicsPipeline *m_ps = nullptr;
+    QRhiShaderResourceBindings *m_srb = nullptr;
     QRhiBuffer *m_pxbuf = nullptr;
     QRhiBuffer *m_ubuf = nullptr;
-    QRhiShaderResourceBindings *m_srb = nullptr;
-    QRhiGraphicsPipeline *m_ps = nullptr;
-    QImage m_pending;
-    bool m_texDirty = true;
+    QImage m_pending; // CPU 合成快照（上传源）
+    QImage m_shown;   // 最近一帧 GPU 输出（paintEvent 绘制）
     bool m_forceNow = false;
+    bool m_readbackInFlight = false;
     QElapsedTimer m_sinceRefresh;
     QSize m_texSize;
+    QTimer m_frameTimer;
 };

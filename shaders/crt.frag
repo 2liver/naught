@@ -23,15 +23,15 @@ vec3 sampleAt(vec2 uv)
 
 vec2 curve(vec2 uv) {
     vec2 c = uv - 0.5;
-    c += ubuf.view * 0.032;
+    c -= ubuf.view * 0.032; // 观察者在鼠标侧：屏幕随之微倾（与直觉同向）
     float r2 = dot(c, c);
     return c * (1.0 + 0.06 * r2) + 0.5;
 }
 
-// 逐像素伪随机（确定性）：磷光颗粒的烧制纹理由它驱动
-float hash2(vec2 p)
+// 栅线亮度：孔径栅格的金属线不是等亮（结构级差异，非噪点）
+float wireShade(float wireIdx)
 {
-    return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+    return 0.97 + 0.03 * fract(sin(wireIdx * 12.9898) * 43758.5453);
 }
 
 void main()
@@ -44,28 +44,36 @@ void main()
         return;
     }
 
-    // 荧光粉三元组竖纹：逐像素相位抖动 + 竖纹随屏微弯——打破纯人工的
-    // 左右对称，颗粒像是烧进玻璃的
     vec2 pxpos = uv * ubuf.texSize;
-    vec2 cell = floor(pxpos);
-    float jitter = (hash2(cell) - 0.5) * 0.38;
-    float wob = sin(cell.y * 0.137 + cell.x * 0.009) * 0.008;
-    float sub = fract(pxpos.x * 3.0 + jitter + wob);
-    float rMask = smoothstep(0.0, 0.333, sub) * (1.0 - smoothstep(0.333, 0.667, sub));
-    float gMask = smoothstep(0.333, 0.667, sub) * (1.0 - smoothstep(0.667, 1.0, sub));
-    float bMask = smoothstep(0.667, 1.0, sub);
+
+    // 栅条随玻璃曲率弯弓（真 CRT 的 mask 与玻壳共曲率）
+    float bow = 1.2 * (uv.y - 0.5) * (uv.y - 0.5);
+
+    // 荧光粉三元组：窗口函数——每个像素位恰属一个子像素（三者和=1）。
+    // 琥珀文字的 R 分量点燃 R 子像素、G 分量点燃 G 子像素，眼合成即磷光。
+    // （旧版乘积掩膜只在 1/3、2/3 处有窄尖峰，输出退化成灰度——真光学修复）
+    float phase = pxpos.x * 3.0 + bow;
+    float sub = fract(phase);
+    float rMask = 1.0 - smoothstep(0.30, 0.34, sub);
+    float gMask = smoothstep(0.30, 0.34, sub) * (1.0 - smoothstep(0.63, 0.67, sub));
+    float bMask = smoothstep(0.63, 0.67, sub);
     vec3 texcol = sampleAt(uv);
     vec3 phos = vec3(texcol.r, texcol.g * 0.69, texcol.b * 0.06);
-    vec3 col = vec3(phos.r * rMask + phos.g * gMask + phos.b * bMask) * 3.0;
+    // 逐通道合成（逗号！）：R 分量只走 R 窗口、G 只走 G——RGB 子像素
+    // 各自独立点燃。旧版是三个标量求和后广播（+），整个光栅被强制成
+    // 灰度 = 所有"底色不对/纹路丑"的根源。
+    vec3 col = vec3(phos.r * rMask, phos.g * gMask, phos.b * bMask) * 3.0;
 
-    // 扫描线：行相位带颗粒抖动，逐行残辉呼吸——暗行不是均匀黑
-    float rowJ = (hash2(cell + vec2(7.0, 3.0)) - 0.5) * 0.3;
-    float row = fract(pxpos.y + rowJ);
-    col *= 1.0 - 0.22 * step(0.5, fract(row * 0.5));
-    col *= 0.955 + 0.045 * hash2(vec2(cell.y, 3.7));
+    // 扫描线：隔行暗带（结构），暗行掺一丝上行残辉
+    float scanline = step(0.5, fract(floor(pxpos.y) * 0.5));
+    col *= 1.0 - 0.2 * scanline;
+    col *= 1.0 - 0.05 * scanline * vec3(0.35, 0.4, 0.25);
+
+    // 栅线亮度（每 3px 一条）
+    col *= wireShade(floor(phase / 3.0) + 0.5);
 
     // 玻璃反光（鼠标即观察者）+ 暗角
-    vec2 n = normalize(vec2(ubuf.view.x * 0.8, 0.6));
+    vec2 n = normalize(vec2(-ubuf.view.x * 0.8, 0.6));
     float refl = pow(max(0.0, 1.0 - abs(dot(n, vec2(0.35, 0.94)) - 0.62) * 3.2), 2.0);
     col += vec3(1.0, 0.88, 0.62) * refl * 0.055;
     float d = length(uv - 0.5) * 1.5;

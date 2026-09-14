@@ -1,13 +1,14 @@
-// crt_view.cpp —— QRhiWidget 实现（Metal 原生合成路径）。
+// crt_view.cpp —— 自有 QRhi（Metal）离屏渲染 + 回读的「显」显示层实现。
 #include "crt_view.h"
 
 #include "editor.h"
 
 #include <QFile>
-#include <QMouseEvent>
-#include <QWheelEvent>
+#include <QPainter>
+#include <QResizeEvent>
 #include <QtGui/rhi/qrhi.h>
 #include <QtGui/rhi/qshader.h>
+#include <QtGui/private/qrhimetal_p.h>
 
 static void shaderLog(const QString &s)
 {
@@ -25,97 +26,30 @@ static QShader loadShader(const QString &name)
     return QShader::fromSerialized(f.readAll());
 }
 
-// 原生子窗口可能截走按键：转发给编辑器兜底
-void CrtView::keyPressEvent(QKeyEvent *event)
-{
-    if (m_editor)
-        QCoreApplication::sendEvent(m_editor, event);
-    else
-        QRhiWidget::keyPressEvent(event);
-}
-
 CrtView::CrtView(Editor *editor)
-    : QRhiWidget(editor)
+    : QWidget(editor)
     , m_editor(editor)
 {
-    // 整面光栅层。原生 NSView 在 macOS 上会吃光指针事件
-    // （WA_TransparentForMouseEvents 对原生子窗口无效，已实测）：
-    // 本层不假装透明，而是把全部指针事件手动转发给真实组件
-    //（滚动条/视口），键盘已由 keyPressEvent 转发。
-    setMouseTracking(true);
-    // 原生子窗口会截走键盘焦点：永不抢焦，输入留在编辑器
-    setFocusPolicy(Qt::NoFocus);
+    // alien 覆盖层：指针/滚轮/手势全部穿透到真实组件（非原生控件上
+    // WA_TransparentForMouseEvents 完全有效——画布层已验证同款路径）。
+    setAttribute(Qt::WA_TransparentForMouseEvents);
+    setAttribute(Qt::WA_NoSystemBackground);
+    setAttribute(Qt::WA_OpaquePaintEvent);
+    setAutoFillBackground(false);
+    // 帧循环：视差/光标闪烁/足迹圆点 30fps；快照上传由 80ms 节流
+    m_frameTimer.setInterval(33);
+    connect(&m_frameTimer, &QTimer::timeout, this, &CrtView::renderFrame);
 }
 
-// 指针事件转发目标：滚动条命中滚动条（拖动/点击），其余给视口——
-// 与真实组件的命中判定完全一致
-static QWidget *crtTarget(Editor *ed, const QPointF &pos)
+CrtView::~CrtView()
 {
-    if (!ed)
-        return nullptr;
-    const QPoint pt = pos.toPoint();
-    if (ed->verticalScrollBar() && ed->verticalScrollBar()->isVisible()
-        && ed->verticalScrollBar()->geometry().contains(pt))
-        return ed->verticalScrollBar();
-    if (ed->horizontalScrollBar() && ed->horizontalScrollBar()->isVisible()
-        && ed->horizontalScrollBar()->geometry().contains(pt))
-        return ed->horizontalScrollBar();
-    return ed->viewport();
-}
-
-template <typename E>
-static bool crtForward(Editor *ed, E *ev)
-{
-    QWidget *t = crtTarget(ed, ev->position());
-    if (!t)
-        return false;
-    // 位置换算：CrtView 坐标（= 编辑器坐标，整面 1:1）→ 目标组件坐标。
-    // 用公开构造函数重建事件（QMutableEventPoint 在私有头，不可靠）。
-    const QPointF local = ev->position() - QPointF(t->mapTo(ed, QPoint(0, 0)));
-    if (auto *me = dynamic_cast<QMouseEvent *>(ev)) {
-        QMouseEvent translated(me->type(), local, me->scenePosition(), me->globalPosition(),
-                               me->button(), me->buttons(), me->modifiers(), me->source());
-        QCoreApplication::sendEvent(t, &translated);
-        return true;
-    }
-    if (auto *we = dynamic_cast<QWheelEvent *>(ev)) {
-        QWheelEvent translated(local, we->globalPosition(), we->pixelDelta(), we->angleDelta(),
-                               we->buttons(), we->modifiers(), we->phase(), we->inverted(),
-                               we->source());
-        QCoreApplication::sendEvent(t, &translated);
-        return true;
-    }
-    return false;
-}
-
-void CrtView::mousePressEvent(QMouseEvent *event)
-{
-    crtForward(m_editor, event);
-}
-
-void CrtView::mouseReleaseEvent(QMouseEvent *event)
-{
-    crtForward(m_editor, event);
-}
-
-void CrtView::mouseDoubleClickEvent(QMouseEvent *event)
-{
-    crtForward(m_editor, event);
-}
-
-void CrtView::mouseMoveEvent(QMouseEvent *event)
-{
-    crtForward(m_editor, event);
-}
-
-void CrtView::wheelEvent(QWheelEvent *event)
-{
-    crtForward(m_editor, event);
+    m_frameTimer.stop();
+    releaseGpu();
+    delete m_r;
 }
 
 void CrtView::markDirty(bool force)
 {
-    m_texDirty = true;
     if (force)
         m_forceNow = true; // 绕过 80ms 节流（缩放等必须立即重拍）
     update();
@@ -128,43 +62,89 @@ void CrtView::syncGeometry()
         setGeometry(m_editor->rect());
 }
 
-void CrtView::tearDownNative()
+void CrtView::showEvent(QShowEvent *)
 {
-    // 关闭显时彻底拆除原生窗口：隐藏的原生 NSView 会在 macOS 上
-    // 劫持整窗指针事件（退出显后触摸板全瘫的根源）。destroy() 是
-    // QWidget 的受保护成员，只能在派生类作用域内调用——这正是它
-    // 作为 CrtView 自身方法存在的原因。
-    hide();
-    setGeometry(0, 0, 1, 1);
-    destroy(false, false);
-    setAttribute(Qt::WA_NativeWindow, false);
+    ensureRhi();
+    m_frameTimer.start();
 }
 
-void CrtView::initialize(QRhiCommandBuffer *)
+void CrtView::hideEvent(QHideEvent *)
 {
-    QRhi *r = rhi();
-    // 输入纹理
-    // 上传 = 传输**写入**：必须 UsedAsTransferDestination（此前误用 Source，
-    // Metal 拒绝写入 → 纹理永远空 → 着色器采不到字）
-    // 初始即按视口尺寸创建：之后不再中途重建（SRB 烙的是创建时的
-    // 原生资源，重建纹理而不重建 SRB = 采样已销毁资源 = 黑屏）
-    const QSize vsz = m_editor->size();
-    // 纹理采样路径在 Metal+RHI 上异常（回读证明上传无误），改用
-    // 存储缓冲 + 着色器手动取素（绑定与上传均为已验证的 buffer 路径）
-    const int pxbytes = qMax(1, vsz.width()) * qMax(1, vsz.height()) * 4;
-    m_pxbuf = r->newBuffer(QRhiBuffer::Static, QRhiBuffer::StorageBuffer, pxbytes);
+    m_frameTimer.stop();
+}
+
+void CrtView::resizeEvent(QResizeEvent *)
+{
+    // 纹理尺寸随窗口：重建推迟到帧边界（在途回读完成之后），
+    // 避免释放正在被 Metal 命令缓冲引用的纹理
+    markDirty(true);
+}
+
+void CrtView::paintEvent(QPaintEvent *)
+{
+    QPainter p(this);
+    p.fillRect(rect(), QColor(12, 9, 3));
+    if (!m_shown.isNull())
+        p.drawImage(rect(), m_shown);
+}
+
+void CrtView::releaseGpu()
+{
+    // 资源归属 m_r：rhi 存活期内销毁即可，下一帧 ensureRhi 全量重建
+    delete m_srb;
+    m_srb = nullptr;
+    delete m_ps;
+    m_ps = nullptr;
+    delete m_rt;
+    m_rt = nullptr;
+    delete m_rp;
+    m_rp = nullptr;
+    delete m_colorTex;
+    m_colorTex = nullptr;
+    delete m_pxbuf;
+    m_pxbuf = nullptr;
+    delete m_ubuf;
+    m_ubuf = nullptr;
+}
+
+void CrtView::ensureRhi()
+{
+    if (m_r)
+        return;
+    QRhiMetalInitParams params;
+    m_r = QRhi::create(QRhi::Metal, &params);
+    if (!m_r) {
+        shaderLog(QStringLiteral("RHI CREATE FAIL"));
+        return;
+    }
+
+    // 颜色目标（离屏，无交换链）
+    m_colorTex = m_r->newTexture(QRhiTexture::RGBA8, size(), 1,
+                                 QRhiTexture::RenderTarget | QRhiTexture::UsedAsTransferSource);
+    if (!m_colorTex->create()) {
+        shaderLog(QStringLiteral("TEX CREATE FAIL"));
+        return;
+    }
+    m_rt = m_r->newTextureRenderTarget({ m_colorTex });
+    m_rp = m_rt->newCompatibleRenderPassDescriptor();
+    m_rt->setRenderPassDescriptor(m_rp);
+
+    // 像素输入：存储缓冲（buffer 路径已在 Metal+RHI 上验证）
+    const int pxbytes = qMax(1, width()) * qMax(1, height()) * 4;
+    m_pxbuf = m_r->newBuffer(QRhiBuffer::Static, QRhiBuffer::StorageBuffer, pxbytes);
     m_pxbuf->create();
     // 常量缓冲：view + texSize（std140：两个 vec2）
-    m_ubuf = r->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, 16);
+    m_ubuf = m_r->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, 16);
     m_ubuf->create();
-    // 管线
-    m_ps = r->newGraphicsPipeline();
+
+    // 管线：全屏三角形
+    m_ps = m_r->newGraphicsPipeline();
     const QShader vs = loadShader(QStringLiteral(":/shaders/crt.vert.qsb"));
     const QShader fs = loadShader(QStringLiteral(":/shaders/crt.frag.qsb"));
     shaderLog(QStringLiteral("shaders: vert valid=%1 frag valid=%2 backend=%3")
                   .arg(vs.isValid())
                   .arg(fs.isValid())
-                  .arg(QString::fromLatin1(r->backendName())));
+                  .arg(QString::fromLatin1(m_r->backendName())));
     m_ps->setShaderStages({
         { QRhiShaderStage::Vertex, vs },
         { QRhiShaderStage::Fragment, fs },
@@ -174,7 +154,7 @@ void CrtView::initialize(QRhiCommandBuffer *)
     m_ps->setVertexInputLayout(vin);
     m_ps->setSampleCount(1);
     m_ps->setTopology(QRhiGraphicsPipeline::Triangles);
-    m_ps->setShaderResourceBindings(m_srb = r->newShaderResourceBindings());
+    m_ps->setShaderResourceBindings(m_srb = m_r->newShaderResourceBindings());
     m_srb->setBindings({
         QRhiShaderResourceBinding::uniformBuffer(0, QRhiShaderResourceBinding::VertexStage
                                                     | QRhiShaderResourceBinding::FragmentStage,
@@ -183,76 +163,61 @@ void CrtView::initialize(QRhiCommandBuffer *)
                                                    m_pxbuf),
     });
     m_srb->create();
-    m_ps->setRenderPassDescriptor(renderTarget()->renderPassDescriptor());
+    m_ps->setRenderPassDescriptor(m_rp);
     if (!m_ps->create())
         shaderLog(QStringLiteral("PS CREATE FAIL"));
     else
         shaderLog(QStringLiteral("PS CREATE OK"));
 
-    m_pending = QImage(2, 2, QImage::Format_ARGB32);
+    m_texSize = size();
+    m_forceNow = true;
+    m_pending = QImage(size(), QImage::Format_ARGB32);
     m_pending.fill(qRgb(12, 9, 3));
-    m_texDirty = true;
 }
 
-void CrtView::releaseResources()
+void CrtView::renderFrame()
 {
-    // 我们自己的资源归属 rhi，rhi 死亡时它们一并销毁：指针置空，
-    // 下次 paint 的 needsInit 路径会经 initialize() 全部重建。
-    m_tex = nullptr;
-    m_pxbuf = nullptr;
-    m_ubuf = nullptr;
-    m_srb = nullptr;
-    m_ps = nullptr;
-    m_texDirty = true;
-}
-
-void CrtView::render(QRhiCommandBuffer *cb)
-{
-    if (!m_ps || !m_srb || !m_pxbuf || !m_ubuf)
-        return; // 资源未就绪（rhi 刚重建）：本帧跳过，下帧 initialize 后自愈
-    QRhiResourceUpdateBatch *u = rhi()->nextResourceUpdateBatch();
-
-    // 节流刷新（80ms）：文字快照自绘 + 上传
-    if (m_texDirty && (m_forceNow || !m_sinceRefresh.isValid() || m_sinceRefresh.elapsed() >= 80)) {
-        m_pending = QImage(m_editor->size(), QImage::Format_ARGB32);
-        m_pending.fill(qRgb(12, 9, 3));
-        m_editor->paintTextSnapshot(m_pending);
-        const QImage up = m_pending.convertToFormat(QImage::Format_RGBA8888);
-        const int nbytes = up.sizeInBytes();
-        if (nbytes > 0 && m_pxbuf && nbytes <= m_pxbuf->size()) {
-            u->uploadStaticBuffer(m_pxbuf, 0, size_t(nbytes), up.constBits());
-            m_texSize = up.size();
-        } else if (m_pxbuf && nbytes > m_pxbuf->size()) {
-            // 窗口变大（罕见）：重建存储缓冲与 SRB
-            m_pxbuf->destroy();
-            m_pxbuf->setSize(nbytes);
-            m_pxbuf->create();
-            m_srb->destroy();
-            m_srb->create();
-            u->uploadStaticBuffer(m_pxbuf, 0, size_t(nbytes), up.constBits());
-            m_texSize = up.size();
-        }
-        m_texDirty = false;
-        m_forceNow = false;
-        m_sinceRefresh.restart();
-        {
-            int amber = 0;
-            for (int y = 0; y < up.height(); ++y)
-                for (int x = 0; x < up.width(); ++x) {
-                    const QRgb px = up.pixel(x, y);
-                    if (qRed(px) > 150 && qGreen(px) > 80 && qBlue(px) < 90)
-                        ++amber;
-                }
-            static int logged = 0;
-            if (logged < 3) {
-                shaderLog(QStringLiteral("snapshot %1x%2 amber=%3")
-                              .arg(up.width()).arg(up.height()).arg(amber));
-                ++logged;
-            }
-        }
+    if (!isVisible())
+        return;
+    ensureRhi();
+    if (!m_r || !m_ps || !m_srb || !m_pxbuf || !m_ubuf || m_readbackInFlight)
+        return;
+    if (size() != m_texSize) {
+        releaseGpu(); // 帧边界安全重建（此刻无在途回读）
+        ensureRhi();
+        if (!m_ps)
+            return;
     }
 
-    // 观察者 = 鼠标
+    QRhiResourceUpdateBatch *u = m_r->nextResourceUpdateBatch();
+
+    // 快照：合成真实组件（80ms 节流；force 立即）。帧循环每拍都标脏，
+    // 由节流决定真实上传节奏——光标闪烁/足迹圆点/滚动条淡出都在其中
+    const bool throttled = m_sinceRefresh.isValid() && m_sinceRefresh.elapsed() < 80;
+    if (m_forceNow || !throttled) {
+        m_pending = QImage(size(), QImage::Format_ARGB32);
+        m_pending.fill(qRgb(12, 9, 3));
+        m_editor->paintTextSnapshot(m_pending);
+        {
+            const QImage up = m_pending.convertToFormat(QImage::Format_RGBA8888);
+            const int nbytes = up.sizeInBytes();
+            if (nbytes > 0 && nbytes <= m_pxbuf->size()) {
+                u->uploadStaticBuffer(m_pxbuf, 0, size_t(nbytes), up.constBits());
+            } else if (nbytes > m_pxbuf->size()) {
+                // 窗口变大（罕见）：重建存储缓冲与 SRB
+                m_pxbuf->destroy();
+                m_pxbuf->setSize(nbytes);
+                m_pxbuf->create();
+                m_srb->destroy();
+                m_srb->create();
+                u->uploadStaticBuffer(m_pxbuf, 0, size_t(nbytes), up.constBits());
+            }
+            m_texSize = up.size();
+        }
+        m_forceNow = false;
+        m_sinceRefresh.restart();
+    }
+    // 观察者 = 鼠标（视差每帧更新，不受快照节流）
     QPointF view = m_editor->lastMouseViewport();
     if (view.x() < 0) {
         view = QPointF(-0.25, -0.12);
@@ -265,12 +230,35 @@ void CrtView::render(QRhiCommandBuffer *cb)
                           float(m_texSize.width()), float(m_texSize.height()) };
     u->updateDynamicBuffer(m_ubuf, 0, sizeof(ub), ub);
 
-    cb->beginPass(renderTarget(), QColor::fromRgbF(0.012, 0.009, 0.004),
+    QRhiCommandBuffer *cb = nullptr;
+    if (m_r->beginOffscreenFrame(&cb) != QRhi::FrameOpSuccess)
+        return;
+    cb->beginPass(m_rt, QColor::fromRgbF(0.012, 0.009, 0.004),
                   QRhiDepthStencilClearValue(), u);
     cb->setGraphicsPipeline(m_ps);
     cb->setShaderResources(m_srb);
-    cb->setViewport(QRhiViewport(0, 0, colorTexture()->pixelSize().width(),
-                                 colorTexture()->pixelSize().height()));
+    cb->setViewport(QRhiViewport(0, 0, float(m_texSize.width()), float(m_texSize.height())));
     cb->draw(3);
     cb->endPass();
+
+    // 回读：GPU 帧 → CPU 图像（Metal 完成回调线程不碰 widget 状态，
+    // 一律排队回主线程处理）
+    QRhiReadbackResult *rb = new QRhiReadbackResult;
+    m_readbackInFlight = true;
+    rb->completed = [this, rb] {
+        QMetaObject::invokeMethod(this, [this, rb] {
+            QImage img(m_texSize, QImage::Format_RGBA8888);
+            if (!img.isNull() && !rb->data.isEmpty())
+                memcpy(img.bits(), rb->data.constData(),
+                       qMin(size_t(img.sizeInBytes()), size_t(rb->data.size())));
+            m_shown = std::move(img);
+            m_readbackInFlight = false;
+            delete rb;
+            update();
+        }, Qt::QueuedConnection);
+    };
+    QRhiResourceUpdateBatch *ru = m_r->nextResourceUpdateBatch();
+    ru->readBackTexture(m_colorTex, rb);
+    cb->resourceUpdate(ru);
+    m_r->endOffscreenFrame();
 }
