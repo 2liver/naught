@@ -74,7 +74,7 @@ public:
                 s_crtFamily = QFontDatabase::applicationFontFamilies(id).first();
         }
         m_crtFont = QFont(s_crtFamily);
-        m_crtFont.setStyleStrategy(QFont::NoAntialias); // 像素栅格，不模糊
+        // 抗锯齿打开：磷粉像素块边缘自然软化（锐利硬边不像玻璃后的光）
 
 #if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
         m_dark = QGuiApplication::styleHints()->colorScheme() == Qt::ColorScheme::Dark;
@@ -124,6 +124,8 @@ public:
             updateGutterWidth();
             if (m_crtBackdrop)
                 m_crtBackdrop->invalidateGlow();
+            if (m_crtOverlay)
+                m_crtOverlay->update(); // 日冕随文字即时刷新
         });
         wakeCaret();
 
@@ -161,6 +163,8 @@ public:
             m_canvas->setScrollOffset(QPointF(horizontalScrollBar()->value(), verticalScrollBar()->value()));
             if (m_crtBackdrop)
                 m_crtBackdrop->update(); // 辉光层随滚动重排
+            if (m_crtOverlay)
+                m_crtOverlay->update(); // 日冕随滚动对齐
         };
         connect(verticalScrollBar(), &QScrollBar::valueChanged, this, syncInkOffset);
         connect(horizontalScrollBar(), &QScrollBar::valueChanged, this, syncInkOffset);
@@ -369,6 +373,8 @@ public:
 
     bool codeMode() const { return m_codeMode; }
     bool crtOn() const { return m_crt; }
+    QImage crtGlowImage() const { return m_crtBackdrop ? m_crtBackdrop->glowImage() : QImage(); }
+    QPoint crtGlowScroll() const { return m_crtBackdrop ? m_crtBackdrop->glowScroll() : QPoint(); }
 
     // 显：单一琥珀磷光模式——零 UI，一键回到过去（与编、阴/阳正交可叠加）
     void toggleCrt()
@@ -1513,6 +1519,8 @@ private:
         setFont(f);
         // 笔刷与字号脱钩：只由 Cmd/Ctrl+Shift+= / - / 0 控制
         updateGutterWidth(); // 行号区宽度随缩放重算（否则放大溢出、打字缩回）
+        if (m_crtBackdrop)
+            m_crtBackdrop->invalidateGlow(); // 光晕必须随缩放重拍（影子不跟缩放就是这个漏了）
     }
 
     void setCodeMode(bool on)

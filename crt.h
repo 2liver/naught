@@ -27,6 +27,8 @@ public:
     explicit CrtBackdrop(Editor *editor);
     void invalidateGlow();
     void refreshGlow();
+    QImage glowImage() const { return m_glow; }
+    QPoint glowScroll() const { return m_glowScroll; }
 
 protected:
     void paintEvent(QPaintEvent *event) override;

@@ -83,10 +83,10 @@ void CrtBackdrop::paintEvent(QPaintEvent *)
             refreshGlow();
     }
     if (!m_glow.isNull()) {
-        // 快照对齐当前滚动（脏快照也照画：差一两个字的辉光不可见）
+        // 环境底光：弱化的快照垫底（日冕由效果层 Plus 叠加在文字上方）
         const QPoint cur(m_editor->horizontalScrollBar()->value(),
                          m_editor->verticalScrollBar()->value());
-        p.setOpacity(0.9);
+        p.setOpacity(0.35);
         p.drawImage(QPointF(vp->pos()) - QPointF(cur - m_glowScroll), m_glow);
     }
 }
@@ -107,18 +107,16 @@ CrtOverlay::CrtOverlay(Editor *editor)
     for (int y = 0; y < Crt::kScanPeriod; ++y)
         m_scanMask.setPixelColor(0, y, QColor(0, 0, 0, rows[y]));
 
-    // 噪声两帧（128×128 稀疏亮点，固定种子 = 每次开机同一台机器）
+    // 噪声两帧：1×256 的行亮度抖动条（真实 CRT 的噪声是扫描线明暗起伏，
+    // 不是撒白点）；拉伸到全屏 = 逐行 ±几级灰度，固定种子 = 同一台机器
     for (int f = 0; f < 2; ++f) {
-        m_noise[f] = QImage(128, 128, QImage::Format_ARGB32);
-        m_noise[f].fill(QColor(0, 0, 0, 0));
-        std::mt19937 rng(0xC0FFEEu + f);
-        for (int i = 0; i < 700; ++i) {
-            const int x = int(rng() % 128);
-            const int y = int(rng() % 128);
-            const int a = 26 + int(rng() % 58);
-            m_noise[f].setPixelColor(x, y, QColor(255, 255, 255, a));
-        }
+        m_noise[f] = QImage(1, 256, QImage::Format_ARGB32);
+        m_noise[f].fill(Qt::transparent);
+        std::mt19937 rng(0x5C4E00u + f);
+        for (int y = 0; y < 256; ++y)
+            m_noise[f].setPixelColor(0, y, QColor(0, 0, 0, int(rng() % 19)));
     }
+
     m_noiseTimer.setInterval(120);
     connect(&m_noiseTimer, &QTimer::timeout, this, [this] {
         m_noiseFrame = 1 - m_noiseFrame;
@@ -155,14 +153,26 @@ void CrtOverlay::paintEvent(QPaintEvent *)
     QPainter p(this);
     if (!p.isActive())
         return;
+    // 磷粉日冕：模糊快照叠在文字上方——表面与光晕同源，锐利的字获得
+    // 真实管子的光晕包络。磷底近黑，alpha 混合与加法混合视觉等价但快数倍
+    const QImage glow = m_editor->crtGlowImage();
+    if (!glow.isNull()) {
+        const QPoint cur(m_editor->horizontalScrollBar()->value(),
+                         m_editor->verticalScrollBar()->value());
+        const QPointF at = QPointF(m_editor->viewport()->pos())
+            - QPointF(cur - m_editor->crtGlowScroll());
+        p.setOpacity(0.42);
+        p.drawImage(at, glow);
+        p.setOpacity(1.0);
+    }
     // 暗角 + 反光 + 扫描线（烘进同一层，一次 blit）
     if (m_glass.size() != size())
         rebuildGlass();
     if (!m_glass.isNull())
         p.drawImage(0, 0, m_glass);
-    // 噪声（两帧交替，机器活着）
-    p.setOpacity(0.5);
-    p.drawTiledPixmap(rect(), QPixmap::fromImage(m_noise[m_noiseFrame]));
+    // 行亮度抖动（两帧交替：扫描线起伏，机器活着）
+    p.setOpacity(0.55);
+    p.drawImage(rect(), m_noise[m_noiseFrame]);
     p.setOpacity(1.0);
     // 暖机：黑幕由暗到亮
     if (m_warm > 0.0)
@@ -176,6 +186,12 @@ void CrtOverlay::rebuildGlass()
     m_glass = QImage(size(), QImage::Format_ARGB32);
     m_glass.fill(Qt::transparent);
     QPainter p(&m_glass);
+    // 管面中央微暖亮（磷粉底光从中心散开）
+    QRadialGradient warm(rect().center(), qMax(width(), height()) * 0.62);
+    warm.setColorAt(0.0, QColor(255, 176, 0, 14));
+    warm.setColorAt(0.75, QColor(255, 176, 0, 4));
+    warm.setColorAt(1.0, QColor(255, 176, 0, 0));
+    p.fillRect(rect(), warm);
     QRadialGradient g(rect().center(), qMax(width(), height()) * 0.75);
     g.setColorAt(0.55, QColor(0, 0, 0, 0));
     g.setColorAt(1.0, QColor(0, 0, 0, 70));
