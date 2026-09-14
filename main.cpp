@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 
 #include <QAction>
 #include <QApplication>
@@ -52,6 +53,27 @@
 // 不随缩放变化（每笔在落笔瞬间锁定自己的笔宽）；颜色随阴/阳；事件全部穿透。
 class Canvas : public QWidget {
 public:
+    struct InkStroke {
+        qreal width = 0;
+        QVector<QPointF> pts;
+        bool operator==(const InkStroke &o) const { return width == o.width && pts == o.pts; }
+    };
+
+    QVector<InkStroke> snapshot() const { return m_strokes; }
+
+    void restore(const QVector<InkStroke> &strokes)
+    {
+        m_strokes = strokes;
+        m_active = InkStroke{};
+        update();
+    }
+
+    void setGutterPaint(std::function<void(QPainter &)> fn)
+    {
+        m_gutterPaint = std::move(fn);
+        update();
+    }
+
     explicit Canvas(QWidget *parent)
         : QWidget(parent)
     {
@@ -96,7 +118,7 @@ public:
 
     void beginStroke(const QPointF &docPos)
     {
-        m_active = Stroke{m_brush, {docPos}};
+        m_active = InkStroke{m_brush, {docPos}};
         update();
     }
 
@@ -115,7 +137,7 @@ public:
         if (m_active.pts.isEmpty())
             return;
         m_strokes.append(m_active);
-        m_active = Stroke{};
+        m_active = InkStroke{};
     }
 
     void clearAll()
@@ -123,16 +145,16 @@ public:
         if (m_strokes.isEmpty() && m_active.pts.isEmpty())
             return;
         m_strokes.clear();
-        m_active = Stroke{};
+        m_active = InkStroke{};
         update();
     }
 
     void eraseAt(const QPointF &c)
     {
-        const qreal r = m_brush * 1.4;
+        const qreal r = m_brush * 0.7; // 擦除直径 = 1.4×笔刷，与足迹一致
         bool changed = false;
         for (int i = m_strokes.size() - 1; i >= 0; --i) {
-            const Stroke &s = m_strokes.at(i);
+            const InkStroke &s = m_strokes.at(i);
             if (s.pts.size() == 1) {
                 if (QLineF(s.pts.at(0), c).length() <= r) {
                     m_strokes.removeAt(i);
@@ -147,8 +169,8 @@ public:
                     keep[j + 1] = false;
                 }
             }
-            QVector<Stroke> pieces;
-            Stroke run{s.width, {}};
+            QVector<InkStroke> pieces;
+            InkStroke run{s.width, {}};
             bool removed = false;
             for (int j = 0; j < s.pts.size(); ++j) {
                 if (keep.at(j)) {
@@ -189,10 +211,13 @@ protected:
         p.setRenderHint(QPainter::Antialiasing);
         p.save();
         p.translate(QPointF(m_vpOffset) - m_offset); // 笔迹：文档坐标（随滚动）
-        for (const Stroke &s : m_strokes)
+        for (const InkStroke &s : m_strokes)
             drawStroke(p, s.pts, s.width);
         drawStroke(p, m_active.pts, m_active.width);
         p.restore();
+
+        if (m_gutterPaint)
+            m_gutterPaint(p);
 
         // 画笔足迹：窗口坐标（不随滚动），尺寸=真实口径，无系统光标尺寸上限
         const QPointF fp = m_fpPos + QPointF(m_vpOffset);
@@ -212,11 +237,6 @@ protected:
     }
 
 private:
-    struct Stroke {
-        qreal width = 0;
-        QVector<QPointF> pts;
-    };
-
     static qreal segDist(const QPointF &a, const QPointF &b, const QPointF &c)
     {
         const QPointF ab = b - a;
@@ -251,8 +271,9 @@ private:
     qreal m_brush = 20.0;
     QPointF m_offset;
     QPoint m_vpOffset;
-    QVector<Stroke> m_strokes;
-    Stroke m_active;
+    QVector<InkStroke> m_strokes;
+    InkStroke m_active;
+    std::function<void(QPainter &)> m_gutterPaint;
     bool m_fpVisible = false;
     bool m_fpErase = false;
     QPointF m_fpPos;
@@ -410,7 +431,10 @@ public:
             }
             setCursorWidth(m_blinkHalf % 2 ? 0 : 2);
         });
-        connect(document(), &QTextDocument::contentsChanged, this, [this] { wakeCaret(); });
+        connect(document(), &QTextDocument::contentsChanged, this, [this] {
+            wakeCaret();
+            m_lastWasInk = false;
+        });
         wakeCaret();
 
         // 滚动条：交互时淡入，闲置 1 秒后淡出；悬停加宽（事件驱动，QSS 的 :hover 改宽度无效）
@@ -488,9 +512,38 @@ public:
 
     void clearInk()
     {
-        if (m_canvas)
-            m_canvas->clearAll();
+        if (!m_canvas)
+            return;
+        beginInkSession();
+        m_canvas->clearAll();
+        endInkSession();
     }
+
+    void undoAll()
+    {
+        if (m_lastWasInk && !m_inkUndo.isEmpty()) {
+            const InkOp op = m_inkUndo.takeLast();
+            m_inkRedo.append(op);
+            m_canvas->restore(op.before);
+            m_undoWasInk = true;
+            return;
+        }
+        m_undoWasInk = false;
+        document()->undo();
+    }
+
+    void redoAll()
+    {
+        if (m_undoWasInk && !m_inkRedo.isEmpty()) {
+            const InkOp op = m_inkRedo.takeLast();
+            m_inkUndo.append(op);
+            m_canvas->restore(op.after);
+            return;
+        }
+        document()->redo();
+    }
+
+    bool inkEmpty() const { return m_canvas && m_canvas->snapshot().isEmpty(); }
 
     void brushUp() { brushStep(+1); }
     void brushDown() { brushStep(-1); }
@@ -852,6 +905,40 @@ public:
             qWarning("selftest FAIL: exiting code mode did not restore layout/font");
             return false;
         }
+        // 笔迹统一撤销：画一笔 → Cmd+Z 撤销 → Cmd+Y 复原
+        e.setPlainText(QStringLiteral("文字\n"));
+        {
+            e.toggleMode(Editor::Mode::Draw);
+            QWidget *vp = e.viewport();
+            const QPointF p1(50, 50);
+            QMouseEvent pr(QEvent::MouseButtonPress, p1, vp->mapToGlobal(p1.toPoint()),
+                           Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(vp, &pr);
+            const QPointF p2(90, 50);
+            QMouseEvent mv(QEvent::MouseMove, p2, vp->mapToGlobal(p2.toPoint()),
+                           Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(vp, &mv);
+            QMouseEvent re(QEvent::MouseButtonRelease, p2, vp->mapToGlobal(p2.toPoint()),
+                           Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(vp, &re);
+            if (e.inkEmpty()) {
+                qWarning("selftest FAIL: stroke not recorded");
+                return false;
+            }
+            QKeyEvent kz(QEvent::KeyPress, Qt::Key_Z, Qt::ControlModifier);
+            QApplication::sendEvent(&e, &kz);
+            if (!e.inkEmpty()) {
+                qWarning("selftest FAIL: Cmd+Z did not undo the stroke");
+                return false;
+            }
+            QKeyEvent ky(QEvent::KeyPress, Qt::Key_Y, Qt::ControlModifier);
+            QApplication::sendEvent(&e, &ky);
+            if (e.inkEmpty()) {
+                qWarning("selftest FAIL: Cmd+Y did not redo the stroke");
+                return false;
+            }
+            e.toggleMode(Editor::Mode::Draw); // 退出模式
+        }
         return true;
     }
 
@@ -950,8 +1037,11 @@ protected:
                 else
                     toggleMode(Mode::Erase);
                 return;
+            case Qt::Key_Z:
+                undoAll();
+                return;
             case Qt::Key_Y:
-                redo();
+                redoAll();
                 return;
             case Qt::Key_Space:
                 if (event->modifiers() & Qt::ShiftModifier) {
@@ -1099,11 +1189,7 @@ protected:
                     return true; // 模式内移动不打扰文本
                 }
             }
-            if (event->type() == QEvent::Leave
-                && (m_mode == Mode::Draw || m_mode == Mode::Erase)) {
-                m_canvas->endStroke(); // 拖出窗口时收笔
-                m_canvas->setFootprintVisible(false);
-            }
+
             // 正常模式下，文字区最右缘窄带内的点击 = 行尾意图（满行时系统
             // 会判给最后一个字的右半格，这里统一为"落行尾"）
             if (m_mode == Mode::Normal && event->type() == QEvent::MouseButtonPress) {
@@ -1122,6 +1208,8 @@ protected:
                 if (event->type() == QEvent::MouseButtonPress) {
                     const auto *me = static_cast<QMouseEvent *>(event);
                     if (me->button() == Qt::LeftButton) {
+                        beginInkSession();
+                        viewport()->grabMouse(); // 拖出窗口不松手也能续画
                         const QPointF doc = viewportPosToDoc(me->position());
                         if (m_mode == Mode::Draw)
                             m_canvas->beginStroke(doc);
@@ -1132,8 +1220,12 @@ protected:
                 } else if (event->type() == QEvent::MouseButtonRelease) {
                     const auto *me = static_cast<QMouseEvent *>(event);
                     if (me->button() == Qt::LeftButton) {
+                        viewport()->releaseMouse();
                         if (m_mode == Mode::Draw)
                             m_canvas->endStroke();
+                        if (!viewport()->rect().contains(me->position().toPoint()))
+                            m_canvas->setFootprintVisible(false);
+                        endInkSession();
                         return true;
                     }
                 }
@@ -1201,14 +1293,16 @@ private:
             // 行号槽：容纳最大行号
             const int digits = QString::number(qMax(1, document()->blockCount())).size();
             const QFontMetricsF fm(activeFont());
-            m_gutterWidth = int(fm.horizontalAdvance(QString(digits, QLatin1Char('8'))) + 16);
+            m_gutterWidth = qMax(20, int(fm.horizontalAdvance(QString(digits, QLatin1Char('8'))) + 12));
             setViewportMargins(m_gutterWidth, 0, 0, 0);
+            m_canvas->setGutterPaint([this](QPainter &p) { paintGutter(p); });
 #ifdef NAUGHT_WITH_HIGHLIGHT
             startHighlight();
 #endif
         } else {
             m_gutterWidth = 0;
             setViewportMargins(0, 0, 0, 0);
+            m_canvas->setGutterPaint({});
 #ifdef NAUGHT_WITH_HIGHLIGHT
             stopHighlight();
 #endif
@@ -1216,13 +1310,10 @@ private:
         viewport()->update();
     }
 
-    void paintEvent(QPaintEvent *event) override
+    void paintGutter(QPainter &p)
     {
-        QPlainTextEdit::paintEvent(event);
         if (!m_codeMode || m_gutterWidth <= 0)
             return;
-        // 行号：跟随滚动，颜色克制
-        QPainter p(this);
         QFont nf = m_codeFont;
         nf.setPointSizeF(m_size * 0.85);
         p.setFont(nf);
@@ -1236,7 +1327,7 @@ private:
                 break;
             if (r.bottom() - vbar >= 0) {
                 const qreal h = qreal(block.layout()->lineAt(0).height());
-                p.drawText(QRectF(0, y, m_gutterWidth - 8, h),
+                p.drawText(QRectF(0, y, m_gutterWidth - 6, h),
                            Qt::AlignRight | Qt::AlignVCenter,
                            QString::number(block.blockNumber() + 1));
             }
@@ -1305,6 +1396,29 @@ private:
         QFont f = m_codeMode ? m_codeFont : m_baseFont;
         f.setPointSizeF(m_size);
         return f;
+    }
+
+    void beginInkSession()
+    {
+        if (m_inkSession)
+            return;
+        m_inkSession = true;
+        m_inkBefore = m_canvas->snapshot();
+    }
+
+    void endInkSession()
+    {
+        if (!m_inkSession)
+            return;
+        m_inkSession = false;
+        const QVector<Canvas::InkStroke> after = m_canvas->snapshot();
+        if (after == m_inkBefore)
+            return;
+        m_inkUndo.append({m_inkBefore, after});
+        if (m_inkUndo.size() > 100)
+            m_inkUndo.removeFirst();
+        m_inkRedo.clear();
+        m_lastWasInk = true;
     }
 
     void startHold(int dir)
@@ -1462,6 +1576,16 @@ private:
     Mode m_mode = Mode::Normal;
     qreal m_brushSize = 20.0;
     QPointF m_lastMouse = QPointF(-1, -1);
+    struct InkOp {
+        QVector<Canvas::InkStroke> before;
+        QVector<Canvas::InkStroke> after;
+    };
+    QVector<InkOp> m_inkUndo;
+    QVector<InkOp> m_inkRedo;
+    QVector<Canvas::InkStroke> m_inkBefore;
+    bool m_inkSession = false;
+    bool m_lastWasInk = false;
+    bool m_undoWasInk = false;
     bool m_codeMode = false;
     int m_gutterWidth = 0;
     QFont m_codeFont;
@@ -1533,6 +1657,8 @@ int main(int argc, char **argv)
         QAction *bBrushOut = fa->addAction(QStringLiteral("笔刷变细 ⇧⌘-"));
         QAction *bBrush0 = fa->addAction(QStringLiteral("笔刷复位 ⇧⌘0"));
         fa->addSeparator();
+        QAction *bUndo = fa->addAction(QStringLiteral("撤销"));
+        bUndo->setShortcut(QKeySequence(QStringLiteral("Ctrl+Z")));
         QAction *bRedo = fa->addAction(QStringLiteral("重做"));
         bRedo->setShortcut(QKeySequence(QStringLiteral("Ctrl+Y")));
         QObject::connect(bMo, &QAction::triggered, &editor, [&editor] { editor.mo(); });
@@ -1549,7 +1675,8 @@ int main(int argc, char **argv)
         QObject::connect(bBrushIn, &QAction::triggered, &editor, [&editor] { editor.brushUp(); });
         QObject::connect(bBrushOut, &QAction::triggered, &editor, [&editor] { editor.brushDown(); });
         QObject::connect(bBrush0, &QAction::triggered, &editor, [&editor] { editor.brushDefault(); });
-        QObject::connect(bRedo, &QAction::triggered, &editor, [&editor] { editor.redo(); });
+        QObject::connect(bUndo, &QAction::triggered, &editor, [&editor] { editor.undoAll(); });
+        QObject::connect(bRedo, &QAction::triggered, &editor, [&editor] { editor.redoAll(); });
         QObject::connect(fa, &QMenu::aboutToShow, &editor, [&editor, bYin, bYang, bTu, bCa, bBian] {
             bYin->setChecked(editor.isDark());
             bYang->setChecked(!editor.isDark());
