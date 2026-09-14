@@ -11,6 +11,7 @@
 #include <QApplication>
 #include <QColor>
 #include <QContextMenuEvent>
+#include <QEnterEvent>
 #include <QEvent>
 #include <QFocusEvent>
 #include <QFont>
@@ -21,6 +22,7 @@
 #include <QKeyEvent>
 #include <QMenu>
 #include <QNativeGestureEvent>
+#include <QPainter>
 #include <QPalette>
 #include <QPlainTextEdit>
 #include <QScrollBar>
@@ -30,6 +32,75 @@
 #include <QTextDocument>
 #include <QTimer>
 #include <QWheelEvent>
+
+// 自绘滚动条：命中区恒为 18px（从任何一侧都容易接近），
+// 闲置时把手 10px、悬停时长满 18px。QSS 无法控制把手宽度（实测），故自绘。
+class ZenScrollBar : public QScrollBar {
+    Q_OBJECT
+public:
+    using QScrollBar::QScrollBar;
+
+    void setDark(bool dark)
+    {
+        if (m_dark == dark)
+            return;
+        m_dark = dark;
+        update();
+    }
+
+signals:
+    void hovered(bool on);
+
+protected:
+    void enterEvent(QEnterEvent *event) override
+    {
+        if (!m_hover) {
+            m_hover = true;
+            update();
+        }
+        emit hovered(true);
+        QScrollBar::enterEvent(event);
+    }
+
+    void leaveEvent(QEvent *event) override
+    {
+        if (m_hover) {
+            m_hover = false;
+            update();
+        }
+        QScrollBar::leaveEvent(event);
+    }
+
+    void paintEvent(QPaintEvent *) override
+    {
+        const bool vert = orientation() == Qt::Vertical;
+        const QRect t = rect();
+        const int L = vert ? t.height() : t.width();
+        const int range = maximum() - minimum();
+        const int page = pageStep();
+        const qreal total = range + page;
+        if (total <= 0)
+            return;
+        const int sliderLen = qMax(32, int(L * page / total));
+        const int pos = int((L - sliderLen) * (value() - minimum()) / qMax(1, range));
+        const int thick = m_hover ? 18 : 10;
+
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+        p.setPen(Qt::NoPen);
+        p.setBrush(m_dark ? QColor(0x4a, 0x4a, 0x4a) : QColor(0xb8, 0xb8, 0xb8));
+        QRect h;
+        if (vert)
+            h = QRect(t.right() - thick + 1, pos, thick, sliderLen);
+        else
+            h = QRect(pos, t.bottom() - thick + 1, sliderLen, thick);
+        p.drawRoundedRect(h, thick / 2, thick / 2);
+    }
+
+private:
+    bool m_dark = false;
+    bool m_hover = false;
+};
 
 class Editor : public QPlainTextEdit {
 public:
@@ -61,6 +132,14 @@ public:
             m_holdInterval = std::max(12, m_holdInterval - 4);
             m_holdTimer.start(m_holdInterval);
         });
+
+        // 换成自绘滚动条：命中区恒 18px，把手闲置 10px / 悬停 18px
+        auto *vsb = new ZenScrollBar(Qt::Vertical);
+        auto *hsb = new ZenScrollBar(Qt::Horizontal);
+        vsb->setFixedWidth(18);
+        hsb->setFixedHeight(18);
+        setVerticalScrollBar(vsb);
+        setHorizontalScrollBar(hsb);
 
         viewport()->installEventFilter(this);
         verticalScrollBar()->installEventFilter(this);
@@ -97,6 +176,8 @@ public:
         });
         connect(verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int) { scrollActivity(); });
         connect(horizontalScrollBar(), &QScrollBar::valueChanged, this, [this](int) { scrollActivity(); });
+        connect(vsb, &ZenScrollBar::hovered, this, [this](bool on) { if (on) scrollActivity(); });
+        connect(hsb, &ZenScrollBar::hovered, this, [this](bool on) { if (on) scrollActivity(); });
         m_scrollHideTimer.start(1500);
 
         applyScheme();
@@ -317,21 +398,6 @@ protected:
             }
             return QPlainTextEdit::eventFilter(watched, event);
         }
-        if (watched == verticalScrollBar() || watched == horizontalScrollBar()) {
-            if (event->type() == QEvent::Enter) {
-                scrollActivity();
-                if (watched == verticalScrollBar())
-                    verticalScrollBar()->setFixedWidth(14);
-                else
-                    horizontalScrollBar()->setFixedHeight(14);
-            } else if (event->type() == QEvent::Leave) {
-                if (watched == verticalScrollBar())
-                    verticalScrollBar()->setFixedWidth(10);
-                else
-                    horizontalScrollBar()->setFixedHeight(10);
-            }
-            return QPlainTextEdit::eventFilter(watched, event);
-        }
         return QPlainTextEdit::eventFilter(watched, event);
     }
 
@@ -350,21 +416,10 @@ private:
         }
         setPalette(pal);
 
-        const QString handle = m_dark ? QStringLiteral("#4a4a4a") : QStringLiteral("#b8b8b8");
-        const QString sheet = QStringLiteral(
-            "QScrollBar:vertical{background:transparent;width:10px;margin:2px;}"
-            "QScrollBar:vertical:hover{width:14px;}"
-            "QScrollBar::handle:vertical{background:%1;border-radius:4px;min-height:32px;}"
-            "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}"
-            "QScrollBar::add-page:vertical,QScrollBar::sub-page:vertical{background:transparent;}"
-            "QScrollBar:horizontal{background:transparent;height:10px;margin:2px;}"
-            "QScrollBar:horizontal:hover{height:14px;}"
-            "QScrollBar::handle:horizontal{background:%1;border-radius:4px;min-width:32px;}"
-            "QScrollBar::add-line:horizontal,QScrollBar::sub-line:horizontal{width:0;}"
-            "QScrollBar::add-page:horizontal,QScrollBar::sub-page:horizontal{background:transparent;}")
-            .arg(handle);
-        verticalScrollBar()->setStyleSheet(sheet);
-        horizontalScrollBar()->setStyleSheet(sheet);
+        if (auto *v = qobject_cast<ZenScrollBar *>(verticalScrollBar()))
+            v->setDark(m_dark);
+        if (auto *h = qobject_cast<ZenScrollBar *>(horizontalScrollBar()))
+            h->setDark(m_dark);
     }
 
     void applyZoom()
