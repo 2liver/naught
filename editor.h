@@ -11,6 +11,7 @@
 #include <QCoreApplication>
 #include <QEvent>
 #include <QEventLoop>
+#include <QFile>
 #include <QFocusEvent>
 #include <QFont>
 #include <QFontDatabase>
@@ -449,7 +450,18 @@ public:
                 if (!m_crt || !m_crtView)
                     return;
                 m_crtView->grabFramebuffer().save(QStringLiteral("/tmp/naught-crt-frame.png"));
-                crtSnapImage().save(QStringLiteral("/tmp/naught-crt-snap.png"));
+                m_crtView->grab().save(QStringLiteral("/tmp/naught-crt-present.png"));
+                QFile f(QStringLiteral("/tmp/naught-crt-geo.log"));
+                f.open(QIODevice::Append);
+                f.write(QStringLiteral("geo=%1 visible=%2 hidden=%3 size=%4x%5 vp=%6\n")
+                            .arg(m_crtView->geometry().x())
+                            .arg(m_crtView->isVisible())
+                            .arg(m_crtView->isHidden())
+                            .arg(m_crtView->width())
+                            .arg(m_crtView->height())
+                            .arg(viewport()->geometry().x())
+                            .toUtf8());
+                f.close();
             });
         } else {
             if (m_crtView)

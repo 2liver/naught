@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets OpenGLWidgets)
+find_package(Qt6 REQUIRED COMPONENTS Widgets ShaderTools)
 
 qt_add_executable(naught WIN32 MACOSX_BUNDLE
     main.cpp
@@ -19,7 +19,19 @@ qt_add_executable(naught WIN32 MACOSX_BUNDLE
     line_number_area.h
     zen_scroll_bar.h
     resources/resources.qrc)
-target_link_libraries(naught PRIVATE Qt6::Widgets Qt6::OpenGLWidgets)
+qt_add_shaders(naught "shaders"
+    PREFIX "/"
+    FILES
+        shaders/crt.vert
+        shaders/crt.frag
+)
+target_link_libraries(naught PRIVATE Qt6::Widgets)
+# aqt 打包缺 RHI 的平铺转发头：补上版本化头目录（仅影响本目标）
+if(APPLE)
+    target_include_directories(naught PRIVATE
+        "${QT6_INSTALL_PREFIX}/lib/QtGui.framework/Versions/A/Headers/${Qt6_VERSION}"
+        "${QT6_INSTALL_PREFIX}/lib/QtGui.framework/Versions/A/Headers/${Qt6_VERSION}/QtGui")
+endif()
 
 # 语法高亮（可选）：未找到时 编 模式退化为 等宽字体 + 行号
 find_package(KF6SyntaxHighlighting QUIET)
