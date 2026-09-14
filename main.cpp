@@ -466,18 +466,7 @@ public:
             m_lastWasInk = false;
             // 行号区：文档一变立即重绘，否则清空/换行不会刷新（假行号）
             m_canvas->update();
-            if (m_lineNumberArea)
-                m_lineNumberArea->update();
-            if (m_codeMode) {
-                const int digits = QString::number(qMax(1, document()->blockCount())).size();
-                const QFontMetricsF fm(activeFont());
-                const int w = qMax(20, int(fm.horizontalAdvance(QString(digits, QLatin1Char('8'))) + 12));
-                if (w != m_gutterWidth) {
-                    m_gutterWidth = w;
-                    setViewportMargins(m_gutterWidth, 0, 0, 0);
-                    updateLineNumberArea();
-                }
-            }
+            updateGutterWidth();
         });
         wakeCaret();
 
@@ -1221,6 +1210,14 @@ protected:
     void keyReleaseEvent(QKeyEvent *event) override
     {
         switch (event->key()) {
+        case Qt::Key_Shift:
+            if (!event->isAutoRepeat() && m_shiftInkActive) {
+                m_shiftInkActive = false;
+                if (m_mode == Mode::Draw)
+                    m_canvas->endStroke();
+                endInkSession();
+            }
+            break;
         case Qt::Key_Equal:
         case Qt::Key_Plus:
         case Qt::Key_Minus:
@@ -1311,7 +1308,16 @@ protected:
                 m_lastMouse = me->position();
                 if (m_mode == Mode::Draw || m_mode == Mode::Erase) {
                     m_canvas->setFootprint(true, m_lastMouse, m_mode == Mode::Erase);
-                    if (me->buttons() & Qt::LeftButton) {
+                    const bool held = (me->buttons() & Qt::LeftButton)
+                        || (me->modifiers() & Qt::ShiftModifier); // Shift=按住键
+                    if (held) {
+                        if (!m_inkSession) {
+                            beginInkSession();
+                            m_shiftInkActive = (me->modifiers() & Qt::ShiftModifier)
+                                && !(me->buttons() & Qt::LeftButton);
+                            if (m_mode == Mode::Draw)
+                                m_canvas->beginStroke(viewportPosToDoc(me->position()));
+                        }
                         const QPointF doc = viewportPosToDoc(me->position());
                         if (m_mode == Mode::Draw)
                             m_canvas->extendStroke(doc);
@@ -1415,6 +1421,7 @@ private:
         document()->markContentsDirty(0, document()->characterCount());
         setFont(f);
         // 笔刷与字号脱钩：只由 Cmd/Ctrl+Shift+= / - / 0 控制
+        updateGutterWidth(); // 行号区宽度随缩放重算（否则放大溢出、打字缩回）
     }
 
     void setCodeMode(bool on)
@@ -1425,10 +1432,8 @@ private:
         applyZoom(); // 等宽/比例字体 + 标脏
         if (on) {
             // 行号槽：容纳最大行号
-            const int digits = QString::number(qMax(1, document()->blockCount())).size();
-            const QFontMetricsF fm(activeFont());
-            m_gutterWidth = qMax(20, int(fm.horizontalAdvance(QString(digits, QLatin1Char('8'))) + 12));
-            setViewportMargins(m_gutterWidth, 0, 0, 0);
+            m_gutterWidth = 0;
+            updateGutterWidth();
             if (!m_lineNumberArea)
                 m_lineNumberArea = new LineNumberArea(this);
             m_lineNumberArea->show();
@@ -1545,6 +1550,22 @@ private:
     {
         if (m_lineNumberArea)
             m_lineNumberArea->setGeometry(0, 0, m_gutterWidth, viewport()->height());
+    }
+
+    void updateGutterWidth()
+    {
+        if (!m_codeMode)
+            return;
+        const int digits = QString::number(qMax(1, document()->blockCount())).size();
+        const QFontMetricsF fm(activeFont());
+        const int w = qMax(20, int(fm.horizontalAdvance(QString(digits, QLatin1Char('8'))) + 12));
+        if (w != m_gutterWidth) {
+            m_gutterWidth = w;
+            setViewportMargins(m_gutterWidth, 0, 0, 0);
+            updateLineNumberArea();
+        }
+        if (m_lineNumberArea)
+            m_lineNumberArea->update();
     }
 
     void startHold(int dir)
@@ -1720,6 +1741,7 @@ private:
     QVector<InkOp> m_inkRedo;
     QVector<Canvas::InkStroke> m_inkBefore;
     bool m_inkSession = false;
+    bool m_shiftInkActive = false;
     bool m_lastWasInk = false;
     bool m_undoWasInk = false;
     bool m_codeMode = false;
@@ -1785,6 +1807,8 @@ int main(int argc, char **argv)
         QAction *bBian = fa->addAction(QStringLiteral("编"));
         bBian->setShortcut(QKeySequence(QStringLiteral("Ctrl+B")));
         bBian->setCheckable(true);
+        QAction *bHold = fa->addAction(QStringLiteral("按住 Shift 拖动＝按住笔"));
+        bHold->setEnabled(false);
         fa->addSeparator();
         // 字号/笔刷不做成真键等效（系统接管会毁掉按住加速），提示内嵌标签
         QAction *bZoomIn = fa->addAction(QStringLiteral("字号放大 ⌘="));
@@ -1854,11 +1878,9 @@ void LineNumberArea::paintEvent(QPaintEvent *event)
                     .translated(m_editor->contentOffsetPub())
                     .top();
     qreal bottom = top + m_editor->blockBoundingRectPub(block).height();
-    const QFontMetricsF fm(m_editor->codeFont());
-    const int shift = int((fm.height() - fm.capHeight()) / 2.0); // 数字墨迹与文字墨迹对齐
     while (block.isValid() && top <= event->rect().bottom()) {
         if (block.isVisible() && bottom >= event->rect().top()) {
-            painter.drawText(0, int(top) - shift, width() - 6,
+            painter.drawText(0, int(top), width() - 6,
                              m_editor->fontMetrics().height(), Qt::AlignRight,
                              QString::number(blockNumber + 1));
         }
