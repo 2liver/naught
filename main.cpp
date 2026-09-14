@@ -1317,7 +1317,7 @@ int main(int argc, char **argv)
     // Windows/Linux 不设菜单栏（无），其右键菜单为 Qt 自绘、自带快捷键列。
     {
         QMenuBar *menuBar = new QMenuBar(nullptr);
-        QMenu *fa = menuBar->addMenu(QStringLiteral("快捷键"));
+        QMenu *fa = menuBar->addMenu(QStringLiteral("项"));
         QAction *bMo = fa->addAction(QStringLiteral("摹"));
         bMo->setShortcut(QKeySequence(QStringLiteral("Ctrl+S")));
         QAction *bKong = fa->addAction(QStringLiteral("空"));
