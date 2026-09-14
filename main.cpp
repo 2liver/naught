@@ -33,6 +33,7 @@
 #include <QTextBlock>
 #include <QTextCursor>
 #include <QTextDocument>
+#include <QTextLayout>
 #include <QTimer>
 #include <QWheelEvent>
 
@@ -778,7 +779,6 @@ private:
     }
 
     // 滚动条轨道上的左键让位给文字：点最右缘 = 光标落行尾，点最下缘 = 光标落文末。
-    // 直接命中文档坐标（hitTest + setTextCursor），不依赖合成事件链。
     void placeCaretAtEdge(bool vertical, const QPoint &pos)
     {
         QWidget *vp = viewport();
@@ -787,13 +787,29 @@ private:
             vpPos = QPointF(qreal(vp->width()) - 1.0, qreal(qMin(pos.y(), vp->height() - 1)));
         else
             vpPos = QPointF(qreal(qMin(pos.x(), vp->width() - 1)), qreal(vp->height()) - 1.0);
-        const int hit = document()->documentLayout()->hitTest(vpPos, Qt::FuzzyHit); // 空白处取最近位置（行尾）
-        if (hit >= 0) {
-            QTextCursor c(document());
-            c.setPosition(hit);
-            setTextCursor(c);
-        }
+        QTextCursor c(document());
+        c.setPosition(positionForPoint(vpPos));
+        setTextCursor(c);
         wakeCaret();
+    }
+
+    // QPlainTextEdit 的流式布局没有可用的 hitTest（实测连文字内部都返回 -1），
+    // 复刻 Qt 内部点击映射：逐块找行，行内 xToCursor（行尾空白自然落行尾）。
+    int positionForPoint(const QPointF &pt) const
+    {
+        QTextBlock block = firstVisibleBlock();
+        QAbstractTextDocumentLayout *layout = document()->documentLayout();
+        while (block.isValid()) {
+            const QRectF r = layout->blockBoundingRect(block);
+            if (pt.y() < r.bottom()) {
+                QTextLayout *tl = block.layout();
+                const QTextLine line = tl->lineForY(pt.y() - r.top());
+                const qreal x = std::clamp<qreal>(pt.x() - r.left(), 0.0, qMax(1.0, r.width()));
+                return block.position() + line.xToCursor(x);
+            }
+            block = block.next();
+        }
+        return document()->characterCount() - 1;
     }
 
     void wakeCaret()
