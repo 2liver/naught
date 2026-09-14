@@ -219,13 +219,21 @@ protected:
         if (m_gutterPaint)
             m_gutterPaint(p);
 
-        // 画笔足迹：窗口坐标（不随滚动）。涂/擦同一实心圆，口径一致由构造保证
+        // 画笔足迹：窗口坐标（不随滚动）。涂=实心墨点，擦=空心圆；
+        // 两者外缘均等于笔刷直径，擦除半径 0.5×笔刷，口径一致。
         const QPointF fp = m_fpPos + QPointF(m_vpOffset);
         if (m_fpVisible) {
-            const qreal d = m_brush; // 擦除直径 = 笔刷直径
-            p.setPen(Qt::NoPen);
-            p.setBrush(m_ink);
-            p.drawEllipse(fp, d / 2, d / 2);
+            const qreal d = m_brush;
+            if (m_fpErase) {
+                const qreal stroke = std::clamp<qreal>(d * 0.08, 1.5, 8.0);
+                p.setPen(QPen(m_ink, stroke));
+                p.setBrush(Qt::NoBrush);
+                p.drawEllipse(fp, d / 2 - stroke / 2, d / 2 - stroke / 2);
+            } else {
+                p.setPen(Qt::NoPen);
+                p.setBrush(m_ink);
+                p.drawEllipse(fp, d / 2, d / 2);
+            }
         }
     }
 
@@ -427,6 +435,17 @@ public:
         connect(document(), &QTextDocument::contentsChanged, this, [this] {
             wakeCaret();
             m_lastWasInk = false;
+            // 行号画在画布层：文档一变立即重绘，否则清空/换行不会刷新（假行号）
+            m_canvas->update();
+            if (m_codeMode) {
+                const int digits = QString::number(qMax(1, document()->blockCount())).size();
+                const QFontMetricsF fm(activeFont());
+                const int w = qMax(20, int(fm.horizontalAdvance(QString(digits, QLatin1Char('8'))) + 12));
+                if (w != m_gutterWidth) {
+                    m_gutterWidth = w;
+                    setViewportMargins(m_gutterWidth, 0, 0, 0);
+                }
+            }
         });
         wakeCaret();
 
