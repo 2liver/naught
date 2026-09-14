@@ -1300,7 +1300,7 @@ protected:
             auto posOf = [&](const QMouseEvent *me) {
                 QPointF p = me->position();
                 if (watched == m_lineNumberArea)
-                    p += QPointF(m_gutterWidth, 0);
+                    p -= QPointF(m_gutterWidth, 0); // 行号区 → 视口坐标
                 return p;
             };
             Q_UNUSED(posOf);
@@ -1861,8 +1861,8 @@ LineNumberArea::LineNumberArea(Editor *editor)
     : QWidget(editor)
     , m_editor(editor)
 {
-    // 透明：足迹与笔迹可以透过行号区（不再被"吃掉"）
-    setAttribute(Qt::WA_TransparentForMouseEvents);
+    // 视觉透明（无背景填充），但接收鼠标事件：过滤器会拦截并换算坐标，
+    // 使足迹与笔迹可以在行号区上作画
     setAttribute(Qt::WA_NoSystemBackground);
     setAutoFillBackground(false);
 }
