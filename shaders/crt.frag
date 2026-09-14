@@ -27,36 +27,30 @@ vec2 curve(vec2 uv) {
     c.x += ubuf.view.x * 0.032;
     c.y -= ubuf.view.y * 0.032;
     float r2 = dot(c, c);
-    return c * (1.0 + 0.06 * r2) + 0.5;
+    return c * (1.0 + 0.05 * r2) + 0.5;
 }
 
 void main()
 {
-    // 曲率 + 视差；输入先内缩 1.75%：曲率外扩后采样留在 [0,1] 内
-    vec2 uv = curve(v_uv * 0.965 + 0.0175);
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
-        frag = vec4(0.012, 0.009, 0.004, 1.0);
-        return;
-    }
-
+    // 曲率 + 视差；输入先内缩 1.75% 防曲率越界，但越界区域钳制采样
+    //（不再填暗色壳边——暗条与滚动条同宽，视觉上像"左边多了一条滚动条"）
+    vec2 uv = clamp(curve(v_uv * 0.965 + 0.0175), 0.0, 1.0);
     vec2 pxpos = uv * ubuf.texSize;
 
-    // 荧光粉竖纹：笔直三尖峰亮度纹理（灰版时代验证过的纹理，无弓弯、
-    // 无漩涡），颜色原样透出——琥珀磷光不再被求和广播压成灰
-    float sub = fract(pxpos.x * 3.0);
-    float rBump = smoothstep(0.0, 0.333, sub) * (1.0 - smoothstep(0.333, 0.667, sub));
-    float gBump = smoothstep(0.333, 0.667, sub) * (1.0 - smoothstep(0.667, 1.0, sub));
-    float bBump = smoothstep(0.667, 1.0, sub);
-    float stripe = rBump + gBump + bBump; // 0.5~1 的竖纹亮度
-    vec3 col = sampleAt(uv) * (0.4 + 1.2 * stripe);
+    // 荧光粉竖纹：1px 周期的细密交替（此前 3px 周期 = 间距太宽），
+    // 颜色原样透出——琥珀磷光
+    float stripe = 0.92 + 0.08 * step(0.5, fract(pxpos.x));
+    vec3 col = sampleAt(uv) * stripe;
 
-    // 扫描线：隔行暗带
-    float scanline = step(0.5, fract(floor(pxpos.y) * 0.5));
-    col *= 1.0 - 0.2 * scanline;
+    // 扫描线：每行一条（密度拉满），暗行掺一丝上行残辉
+    float row = fract(pxpos.y);
+    float scanline = step(0.5, row);
+    col *= 1.0 - 0.14 * scanline;
+    col *= 1.0 - 0.05 * scanline * vec3(0.35, 0.4, 0.25);
 
-    // 暗角
+    // 暗角（克制）
     float d = length(uv - 0.5) * 1.5;
-    col *= 1.0 - 0.32 * smoothstep(0.4, 1.0, d);
+    col *= 1.0 - 0.22 * smoothstep(0.4, 1.0, d);
 
     frag = vec4(clamp(col, 0.0, 1.0), 1.0);
 }
