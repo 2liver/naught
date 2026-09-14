@@ -395,17 +395,39 @@ public:
                 if (tl) {
                     for (int i = 0; i < tl->lineCount(); ++i) {
                         const QTextLine line = tl->lineAt(i);
-                        line.draw(&p, QPointF(xoff, top + line.y() - vscroll));
+                        // 顶部 16px 留白：曲率会把屏幕顶缘推出采样范围，
+                        // 文字贴顶会被整个吃掉（CRT 标准做法：内容在内侧）
+                        line.draw(&p, QPointF(xoff, top + line.y() - vscroll + 16.0));
                     }
                 }
             }
             top += bh;
             block = block.next();
         }
+        // 编模式行号：行号区是独立控件，着色器层盖住它——快照里自绘
+        if (m_codeMode && m_gutterWidth > 0) {
+            p.setPen(Crt::kInkDim);
+            const QFontMetricsF fm(displayFont());
+            QTextBlock nb = document()->firstBlock();
+            int num = 1;
+            qreal ntop = 16.0; // 与文字同款顶部留白
+            QAbstractTextDocumentLayout *nl = document()->documentLayout();
+            while (nb.isValid() && ntop - vscroll <= h) {
+                const qreal bh = nl->blockBoundingRect(nb).height();
+                if (ntop - vscroll + bh >= 0) {
+                    p.drawText(QRectF(4, ntop - vscroll, m_gutterWidth - 8, fm.height()),
+                               Qt::AlignRight, QString::number(num));
+                }
+                ntop += bh;
+                ++num;
+                nb = nb.next();
+            }
+            p.setPen(Crt::kInk);
+        }
         // 打字光标：2px 竖线（有焦点时）
         if (hasFocus()) {
             const QRect cr = cursorRect();
-            p.fillRect(QRect(cr.left(), cr.top(), 2, cr.height()), Crt::kInk);
+            p.fillRect(QRect(cr.left(), cr.top() + 16, 2, cr.height()), Crt::kInk);
         }
     }
     qreal brushSize() const { return m_brushSize; }
@@ -445,6 +467,8 @@ public:
             m_crtView->show();
             m_crtView->raise();
             m_crtView->markDirty();
+            setFocus(); // 原生子窗口可能扰动首响应者：焦点还给编辑器
+            activateWindow();
             // 临时取证：开显 1.2 秒后把着色器帧缓冲与快照存成 PNG
             QTimer::singleShot(1200, this, [this] {
                 if (!m_crt || !m_crtView)
@@ -1757,6 +1781,10 @@ private:
             m_lineNumberArea->show();
             m_lineNumberArea->raise();
             updateLineNumberArea();
+            if (m_crtView) {
+                m_crtView->syncGeometry();
+                m_crtView->markDirty();
+            }
 #ifdef NAUGHT_WITH_HIGHLIGHT
             startHighlight();
 #endif
@@ -1765,6 +1793,10 @@ private:
             setViewportMargins(0, 0, 0, 0);
             if (m_lineNumberArea)
                 m_lineNumberArea->hide();
+            if (m_crtView) {
+                m_crtView->syncGeometry();
+                m_crtView->markDirty();
+            }
 #ifdef NAUGHT_WITH_HIGHLIGHT
             stopHighlight();
 #endif

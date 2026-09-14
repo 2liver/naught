@@ -15,7 +15,7 @@ uint texel(uint x, uint y)
 vec3 sampleAt(vec2 uv)
 {
     uint x = uint(uv.x * ubuf.texSize.x);
-    uint y = uint((1.0 - uv.y) * ubuf.texSize.y); // Metal 的 Y 翻转：屏幕顶=缓冲顶
+    uint y = uint(uv.y * ubuf.texSize.y);
     uint v = texel(x, y);
     // RGBA8888 在 GPU 上按小端解释：R 在低字节
     return vec3(float(v & 255u), float((v >> 8) & 255u), float((v >> 16) & 255u)) / 255.0;
@@ -30,7 +30,7 @@ vec2 curve(vec2 uv) {
 
 void main()
 {
-    vec2 uv = v_uv; // DEBUG: 直通 uv（曲率嫌疑排除测试）
+    vec2 uv = curve(v_uv);
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
         frag = vec4(0.012, 0.009, 0.004, 1.0);
         return;

@@ -21,6 +21,9 @@ qt_add_executable(naught WIN32 MACOSX_BUNDLE
     resources/resources.qrc)
 qt_add_shaders(naught "shaders"
     PREFIX "/"
+    GLSL "330,450"
+    HLSL "50"
+    MSL "12"
     FILES
         shaders/crt.vert
         shaders/crt.frag

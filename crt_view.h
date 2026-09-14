@@ -12,6 +12,7 @@ class QRhiBuffer;
 class QRhiGraphicsPipeline;
 class QRhiShaderResourceBindings;
 class QRhiTexture;
+class QRhiReadbackResult;
 
 class Editor;
 
@@ -23,17 +24,20 @@ public:
     QImage frameImage() const { return m_pending; }
 
 protected:
+    void keyPressEvent(QKeyEvent *event) override;
     void initialize(QRhiCommandBuffer *cb) override;
     void render(QRhiCommandBuffer *cb) override;
 
 private:
     Editor *m_editor = nullptr;
     QRhiTexture *m_tex = nullptr;
+    QRhiBuffer *m_pxbuf = nullptr;
     QRhiBuffer *m_ubuf = nullptr;
     QRhiShaderResourceBindings *m_srb = nullptr;
     QRhiGraphicsPipeline *m_ps = nullptr;
     QImage m_pending;
     bool m_texDirty = true;
+    QRhiReadbackResult *m_rb = nullptr;
     QElapsedTimer m_sinceRefresh;
     QSize m_texSize;
 };

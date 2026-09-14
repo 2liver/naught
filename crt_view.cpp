@@ -23,6 +23,15 @@ static QShader loadShader(const QString &name)
     return QShader::fromSerialized(f.readAll());
 }
 
+// 原生子窗口可能截走按键：转发给编辑器兜底
+void CrtView::keyPressEvent(QKeyEvent *event)
+{
+    if (m_editor)
+        QCoreApplication::sendEvent(m_editor, event);
+    else
+        QRhiWidget::keyPressEvent(event);
+}
+
 CrtView::CrtView(Editor *editor)
     : QRhiWidget(editor)
     , m_editor(editor)
@@ -32,6 +41,8 @@ CrtView::CrtView(Editor *editor)
     setAttribute(Qt::WA_NativeWindow);
     setAttribute(Qt::WA_TransparentForMouseEvents);
     setMouseTracking(true);
+    // 原生子窗口会截走键盘焦点：永不抢焦，输入留在编辑器
+    setFocusPolicy(Qt::NoFocus);
 }
 
 void CrtView::markDirty()
@@ -52,8 +63,14 @@ void CrtView::initialize(QRhiCommandBuffer *)
     // 输入纹理
     // 上传 = 传输**写入**：必须 UsedAsTransferDestination（此前误用 Source，
     // Metal 拒绝写入 → 纹理永远空 → 着色器采不到字）
-    m_tex = r->newTexture(QRhiTexture::RGBA8, QSize(2, 2), 1, QRhiTexture::Flag());
-    m_tex->create();
+    // 初始即按视口尺寸创建：之后不再中途重建（SRB 烙的是创建时的
+    // 原生资源，重建纹理而不重建 SRB = 采样已销毁资源 = 黑屏）
+    const QSize vsz = m_editor->viewport()->size();
+    // 纹理采样路径在 Metal+RHI 上异常（回读证明上传无误），改用
+    // 存储缓冲 + 着色器手动取素（绑定与上传均为已验证的 buffer 路径）
+    const int pxbytes = qMax(1, vsz.width()) * qMax(1, vsz.height()) * 4;
+    m_pxbuf = r->newBuffer(QRhiBuffer::Static, QRhiBuffer::StorageBuffer, pxbytes);
+    m_pxbuf->create();
     // 常量缓冲：view + texSize（std140：两个 vec2）
     m_ubuf = r->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, 16);
     m_ubuf->create();
@@ -79,8 +96,8 @@ void CrtView::initialize(QRhiCommandBuffer *)
         QRhiShaderResourceBinding::uniformBuffer(0, QRhiShaderResourceBinding::VertexStage
                                                     | QRhiShaderResourceBinding::FragmentStage,
                                                  m_ubuf),
-        QRhiShaderResourceBinding::sampledTexture(1, QRhiShaderResourceBinding::FragmentStage,
-                                                  m_tex, nullptr),
+        QRhiShaderResourceBinding::bufferLoadStore(1, QRhiShaderResourceBinding::FragmentStage,
+                                                   m_pxbuf),
     });
     m_srb->create();
     m_ps->setRenderPassDescriptor(renderTarget()->renderPassDescriptor());
@@ -104,12 +121,33 @@ void CrtView::render(QRhiCommandBuffer *cb)
         m_pending.fill(qRgb(12, 9, 3));
         m_editor->paintTextSnapshot(m_pending);
         const QImage up = m_pending.convertToFormat(QImage::Format_RGBA8888);
-        if (m_tex->pixelSize() != up.size()) {
-            m_tex->setPixelSize(up.size());
-            m_tex->create();
+        const int nbytes = up.sizeInBytes();
+        if (nbytes > 0 && m_pxbuf && nbytes <= m_pxbuf->size()) {
+            u->uploadStaticBuffer(m_pxbuf, 0, size_t(nbytes), up.constBits());
+            if (!m_rb) {
+                m_rb = new QRhiReadbackResult;
+                m_rb->completed = [this, rb = m_rb]() {
+                    QImage img(m_texSize, QImage::Format_RGBA8888);
+                    if (!img.isNull() && !rb->data.isEmpty())
+                        memcpy(img.bits(), rb->data.constData(),
+                               qMin(size_t(img.sizeInBytes()), size_t(rb->data.size())));
+                    img.save(QStringLiteral("/tmp/naught-crt-bufreadback.png"));
+                    delete rb;
+                    m_rb = nullptr;
+                };
+                u->readBackBuffer(m_pxbuf, 0, quint32(m_pxbuf->size()), m_rb);
+            }
+            m_texSize = up.size();
+        } else if (m_pxbuf && nbytes > m_pxbuf->size()) {
+            // 窗口变大（罕见）：重建存储缓冲与 SRB
+            m_pxbuf->destroy();
+            m_pxbuf->setSize(nbytes);
+            m_pxbuf->create();
+            m_srb->destroy();
+            m_srb->create();
+            u->uploadStaticBuffer(m_pxbuf, 0, size_t(nbytes), up.constBits());
+            m_texSize = up.size();
         }
-        u->uploadTexture(m_tex, up);
-        m_texSize = up.size();
         m_texDirty = false;
         m_sinceRefresh.restart();
         // 取证：输入纹理原图落盘（每次刷新覆盖）
