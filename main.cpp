@@ -66,12 +66,20 @@ public:
         verticalScrollBar()->installEventFilter(this);
         horizontalScrollBar()->installEventFilter(this);
 
-        // 光标：缓慢闪烁（main 里 setCursorFlashTime(1500)），交互时现身，空闲 1.5 秒后隐去
+        // 光标：闪烁由我们自己驱动（原生闪烁器已关，见 main），保证完整对称——
+        // 亮 BLINK_HALF_MS / 灭 BLINK_HALF_MS 为一拍，完成 SLEEP_BLINKS 次后恰好休眠，无残拍
         setCursorWidth(2);
-        m_caretTimer.setSingleShot(true);
-        connect(&m_caretTimer, &QTimer::timeout, this, [this] { setCursorWidth(0); });
+        m_blinkTimer.setSingleShot(true);
+        connect(&m_blinkTimer, &QTimer::timeout, this, [this] {
+            if (++m_blinkHalf >= SLEEP_BLINKS * 2) {
+                setCursorWidth(0); // 第 N 次闪烁的“灭”拍即休眠
+                m_blinkTimer.stop();
+                return;
+            }
+            setCursorWidth(m_blinkHalf % 2 ? 0 : 2);
+        });
         connect(document(), &QTextDocument::contentsChanged, this, [this] { wakeCaret(); });
-        m_caretTimer.start(1500);
+        wakeCaret();
 
         // 滚动条：交互时淡入，闲置 1 秒后淡出；悬停加宽（事件驱动，QSS 的 :hover 改宽度无效）
         m_vFade = new QGraphicsOpacityEffect(verticalScrollBar());
@@ -374,7 +382,8 @@ private:
     void wakeCaret()
     {
         setCursorWidth(2);
-        m_caretTimer.start(1500);
+        m_blinkHalf = 0;
+        m_blinkTimer.start(BLINK_HALF_MS);
     }
 
     void scrollActivity()
@@ -401,12 +410,16 @@ private:
     int m_holdDir = 1;
     int m_holdInterval = 70;
     int m_wheelAccum = 0;
-    QTimer m_caretTimer;
+    QTimer m_blinkTimer;
+    int m_blinkHalf = 0;
     QTimer m_scrollHideTimer;
     QTimer m_fadeTimer;
     QGraphicsOpacityEffect *m_vFade = nullptr;
     QGraphicsOpacityEffect *m_hFade = nullptr;
     qreal m_fadeOpacity = 1.0;
+
+    static constexpr int BLINK_HALF_MS = 750; // 亮/灭各 750ms，一次“长闪烁”1.5s
+    static constexpr int SLEEP_BLINKS = 1;    // 完整闪烁次数；改成 2 则休眠前闪两次
 };
 
 int main(int argc, char **argv)
@@ -415,7 +428,7 @@ int main(int argc, char **argv)
     app.setApplicationName(QStringLiteral("無"));
     app.setApplicationDisplayName(QStringLiteral("無"));
     app.setWindowIcon(QIcon(QStringLiteral(":/icons/naught.png")));
-    app.setCursorFlashTime(1500); // 光标缓慢闪烁（系统默认节奏对静心来说太快）
+    app.setCursorFlashTime(0); // 关闭原生闪烁器：闪烁与休眠由 Editor 自驱，保证完整对称无残拍
 
     if (argc > 1 && QString::fromLocal8Bit(argv[1]) == QLatin1String("--selftest"))
         return Editor::selftest() ? 0 : 1;
