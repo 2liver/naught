@@ -548,6 +548,39 @@ public:
                 }
             }
         }
+        // 满行换行场景：点最右缘应落在该视觉行行尾（而非最后一个字之前）
+        e.zoomReset();
+        QString longLine;
+        for (int i = 0; i < 40; ++i)
+            longLine += QStringLiteral("無");
+        QString wrapped = longLine + QStringLiteral("\n");
+        for (int i = 0; i < 20; ++i)
+            wrapped += QStringLiteral("短行\n");
+        e.setPlainText(wrapped);
+        e.resize(400, 300);
+        e.show();
+        QApplication::processEvents();
+        {
+            QTextBlock blk = e.document()->firstBlock();
+            QTextLayout *tl = blk.layout();
+            if (tl->lineCount() >= 2) {
+                const QTextLine line0 = tl->lineAt(0);
+                const int want = blk.position() + line0.textStart() + line0.textLength();
+                e.moveCursor(QTextCursor::Start);
+                bar = qobject_cast<ZenScrollBar *>(e.verticalScrollBar());
+                if (bar && bar->isVisible()) {
+                    const QPoint tp(5, 5);
+                    QMouseEvent tpress(QEvent::MouseButtonPress, QPointF(tp), bar->mapToGlobal(tp),
+                                       Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                    QApplication::sendEvent(bar, &tpress);
+                    if (e.textCursor().position() != want) {
+                        qWarning("selftest FAIL: wrapped track click lands at %d, want %d",
+                                 e.textCursor().position(), want);
+                        return false;
+                    }
+                }
+            }
+        }
         return true;
     }
 
@@ -884,25 +917,28 @@ private:
         return p + QPointF(horizontalScrollBar()->value(), verticalScrollBar()->value());
     }
 
-    // 滚动条轨道上的左键让位给文字：点最右缘 = 光标落行尾，点最下缘 = 光标落文末。
+    // 滚动条轨道上的左键让位给文字：点最右缘 = 光标落该视觉行行尾，点最下缘 = 光标落文末。
     void placeCaretAtEdge(bool vertical, const QPoint &pos)
     {
         QWidget *vp = viewport();
-        QPointF vpPos;
-        if (vertical)
-            vpPos = QPointF(qreal(vp->width()) - 1.0, qreal(qMin(pos.y(), vp->height() - 1)));
-        else
-            vpPos = QPointF(qreal(qMin(pos.x(), vp->width() - 1)), qreal(vp->height()) - 1.0);
+        if (!vertical) {
+            QTextCursor c(document());
+            c.setPosition(document()->characterCount() - 1);
+            setTextCursor(c);
+            wakeCaret();
+            return;
+        }
+        const QPointF vpPos(qreal(vp->width()) - 1.0, qreal(qMin(pos.y(), vp->height() - 1)));
         QTextCursor c(document());
-        c.setPosition(positionForPoint(vpPos));
+        c.setPosition(lineEndForY(vpPos));
         setTextCursor(c);
         wakeCaret();
     }
 
-    // QPlainTextEdit 的流式布局没有可用的 hitTest（实测连文字内部都返回 -1），
-    // 复刻 Qt 内部点击映射：先把视口坐标换算成文档坐标（含横纵滚动偏移），
-    // 再逐块找行，行内 xToCursor（行尾空白自然落行尾）。
-    int positionForPoint(const QPointF &pt) const
+    // 视口点所在视觉行的行尾位置（文档坐标）。
+    // 不经过 xToCursor：满行换行时行尾像素属于最后一个字，x 映射会落在字前；
+    // 直接返回行首偏移 + 行长，满行/空行/换行块都精确落在行尾。
+    int lineEndForY(const QPointF &pt) const
     {
         const QPointF docPt = pt + QPointF(horizontalScrollBar()->value(), verticalScrollBar()->value());
         QTextBlock block = firstVisibleBlock();
@@ -920,8 +956,7 @@ private:
                     else
                         break;
                 }
-                const qreal x = std::clamp<qreal>(docPt.x() - r.left(), 0.0, qMax(1.0, r.width()));
-                return block.position() + line.xToCursor(x);
+                return block.position() + line.textStart() + line.textLength();
             }
             block = block.next();
         }
