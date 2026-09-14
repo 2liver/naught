@@ -6,13 +6,141 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QElapsedTimer>
 #include <QIcon>
+#include <QImage>
 #include <QKeySequence>
 #include <QMenu>
 #include <QMenuBar>
+#include <QMouseEvent>
+#include <QScrollBar>
 #include <QString>
+#include <QTextCursor>
 
 #include "editor.h"
+
+// 性能基准（--bench）：大文档装载 / 行尾·行中打字 / 缩放 / 滚动 / 行号重绘 / 笔迹。
+// 离屏为软件光栅（真机走 GPU 合成），数值作回归基线，不直接代表真机帧时间。
+static bool benchmark()
+{
+    Editor e;
+    e.resize(900, 600);
+    e.show();
+    QApplication::processEvents();
+
+    QElapsedTimer c;
+    const auto ms = [&c] { return c.nsecsElapsed() / 1e6; };
+
+    // 1) 装载：10 万字符（2000 行 × 50 字）
+    QString big;
+    for (int i = 0; i < 2000; ++i)
+        big += QStringLiteral("一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十\n");
+    c.start();
+    e.setPlainText(big);
+    qInfo("BENCH load-100k: %.1f ms (%d chars, %d blocks)", ms(),
+          e.document()->characterCount(), e.document()->blockCount());
+
+    // 2) 行尾打字：单行 10 万字（强制整块重排换行）末尾追加
+    QString longLine(100000, QChar(0x7121)); // 無
+    e.setPlainText(longLine);
+    QApplication::processEvents();
+    c.start();
+    for (int i = 0; i < 500; ++i) {
+        e.moveCursor(QTextCursor::End);
+        e.insertPlainText(QStringLiteral("無"));
+    }
+    qInfo("BENCH type-end-long-line x500: %.3f ms/op", ms() / 500.0);
+
+    // 3) 行中打字：同文档中段插入
+    c.start();
+    for (int i = 0; i < 500; ++i) {
+        QTextCursor cc = e.textCursor();
+        cc.setPosition(50000);
+        e.setTextCursor(cc);
+        e.insertPlainText(QStringLiteral("無"));
+    }
+    qInfo("BENCH type-middle-long-line x500: %.3f ms/op", ms() / 500.0);
+
+    // 3b) 对照：禁换行后同一文档（整块无需换行重排）
+    e.setLineWrapMode(QPlainTextEdit::NoWrap);
+    QApplication::processEvents();
+    c.restart();
+    for (int i = 0; i < 500; ++i) {
+        QTextCursor cc = e.textCursor();
+        cc.setPosition(50000);
+        e.setTextCursor(cc);
+        e.insertPlainText(QStringLiteral("無"));
+    }
+    qInfo("BENCH type-middle-long-line-nowrap x500: %.3f ms/op", ms() / 500.0);
+    e.setLineWrapMode(QPlainTextEdit::WidgetWidth);
+
+    // 4) 多行文档行尾追加
+    e.setPlainText(big);
+    QApplication::processEvents();
+    c.start();
+    for (int i = 0; i < 500; ++i) {
+        e.moveCursor(QTextCursor::End);
+        e.insertPlainText(QStringLiteral("無"));
+    }
+    qInfo("BENCH type-end-multiline x500: %.3f ms/op", ms() / 500.0);
+
+    // 5) 缩放：O(1) 字号重排 ×100（大字←→小字交替）
+    c.start();
+    for (int i = 0; i < 100; ++i)
+        e.zoomTo(i % 2 ? 12.0 : 96.0);
+    QApplication::processEvents();
+    qInfo("BENCH zoom x100: %.3f ms/op", ms() / 100.0);
+
+    // 6) 滚动：竖向全行程 200 步 + 每步结算重绘
+    QScrollBar *vb = e.verticalScrollBar();
+    c.start();
+    for (int i = 0; i <= 200; ++i) {
+        vb->setValue(vb->maximum() * i / 200);
+        QApplication::processEvents();
+    }
+    qInfo("BENCH scroll-v x200: %.3f ms/step", ms() / 200.0);
+
+    // 7) 编模式行号重绘：滚到中段（行号 1000+）后整窗渲染
+    e.toggleCodeMode();
+    QApplication::processEvents();
+    vb->setValue(vb->maximum() / 2);
+    QApplication::processEvents();
+    QImage img(e.size(), QImage::Format_ARGB32);
+    c.start();
+    e.render(&img);
+    qInfo("BENCH gutter-render-2000lines: %.1f ms", ms());
+    e.toggleCodeMode();
+    QApplication::processEvents();
+
+    // 8) 笔迹：100 笔 × 10 点真实事件管道，再整窗渲染
+    e.setPlainText(QString());
+    e.toggleMode(Editor::Mode::Draw);
+    QWidget *vp = e.viewport();
+    c.start();
+    for (int s = 0; s < 100; ++s) {
+        const QPointF p0(30.0 + s * 4.0, 40.0 + (s % 8) * 30.0);
+        QMouseEvent pr(QEvent::MouseButtonPress, p0, vp->mapToGlobal(p0.toPoint()),
+                       Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(vp, &pr);
+        for (int k = 1; k <= 10; ++k) {
+            const QPointF p2 = p0 + QPointF(k * 12.0, k * 2.0);
+            QMouseEvent mv(QEvent::MouseMove, p2, vp->mapToGlobal(p2.toPoint()),
+                           Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(vp, &mv);
+        }
+        const QPointF pEnd = p0 + QPointF(120.0, 20.0);
+        QMouseEvent re(QEvent::MouseButtonRelease, pEnd, vp->mapToGlobal(pEnd.toPoint()),
+                       Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(vp, &re);
+    }
+    qInfo("BENCH ink-build-100-strokes: %.1f ms", ms());
+    c.start();
+    e.render(&img);
+    qInfo("BENCH ink-render-100-strokes: %.1f ms", ms());
+    e.toggleMode(Editor::Mode::Normal);
+    e.clearInk();
+    return true;
+}
 
 int main(int argc, char **argv)
 {
@@ -24,6 +152,8 @@ int main(int argc, char **argv)
 
     if (argc > 1 && QString::fromLocal8Bit(argv[1]) == QLatin1String("--selftest"))
         return Editor::selftest() ? 0 : 1;
+    if (argc > 1 && QString::fromLocal8Bit(argv[1]) == QLatin1String("--bench"))
+        return benchmark() ? 0 : 1;
 
     Editor editor;
     editor.setWindowTitle(QString());
