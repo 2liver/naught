@@ -1207,6 +1207,7 @@ protected:
         case Qt::Key_Shift:
             if (!event->isAutoRepeat() && m_shiftInkActive) {
                 m_shiftInkActive = false;
+                viewport()->releaseMouse();
                 if (m_mode == Mode::Draw)
                     m_canvas->endStroke();
                 endInkSession();
@@ -1317,6 +1318,8 @@ protected:
                             beginInkSession();
                             m_shiftInkActive = (me->modifiers() & Qt::ShiftModifier)
                                 && !(me->buttons() & Qt::LeftButton);
+                            if (m_shiftInkActive)
+                                viewport()->grabMouse(); // Shift 会话同样抓取
                             if (m_mode == Mode::Draw)
                                 m_canvas->beginStroke(viewportPosToDoc(posOf(me)));
                         }
@@ -1865,6 +1868,7 @@ LineNumberArea::LineNumberArea(Editor *editor)
     // 使足迹与笔迹可以在行号区上作画
     setAttribute(Qt::WA_NoSystemBackground);
     setAutoFillBackground(false);
+    setMouseTracking(true); // 无按键移动也派发（Shift 拖动路径依赖）
 }
 
 QSize LineNumberArea::sizeHint() const
