@@ -42,6 +42,11 @@ private:
     QElapsedTimer m_sinceRefresh;
     bool m_dirty = true;
     bool m_forceRefresh = false;
+    // 残影：旧光晕留在原屏幕位置渐暗熄灭（灯泡慢慢灭，不是开关）
+    QImage m_ghost;
+    QPointF m_ghostPos;
+    qreal m_ghostAlpha = 0.0;
+    QTimer m_fadeTimer;
 };
 
 // 效果层：扫描线 + 噪声 + 暗角玻璃 + 暖机脉冲。事件穿透。

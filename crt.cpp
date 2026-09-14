@@ -18,6 +18,17 @@ CrtBackdrop::CrtBackdrop(Editor *editor)
     setAttribute(Qt::WA_NoSystemBackground);
     setAttribute(Qt::WA_TransparentForMouseEvents);
     setAutoFillBackground(false);
+    // 残影渐暗：30ms 一拍，约 250ms 熄灭——渐变包络，不是开关
+    m_fadeTimer.setInterval(30);
+    connect(&m_fadeTimer, &QTimer::timeout, this, [this] {
+        if (m_ghostAlpha <= 0.0) {
+            m_fadeTimer.stop();
+            m_ghost = QImage();
+            return;
+        }
+        m_ghostAlpha -= 0.06;
+        update();
+    });
 }
 
 // 内容/缩放变化：标记脏，等间隔过后重拍
@@ -54,13 +65,18 @@ void CrtBackdrop::refreshGlow()
     QImage glow = snap.scaled(small, Qt::IgnoreAspectRatio, Qt::SmoothTransformation)
                       .scaled(vp->size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
     // 磷粉余晖：同一滚动位置下，旧帧 15% 混入（打字/编辑留下短暂残影）；
-    // 滚动位置变化时不混，避免错位鬼影
+    // 滚动位置变化时晋升为屏幕固定的残影（渐暗熄灭，不跟着内容跑）
     const QPoint cur(m_editor->horizontalScrollBar()->value(),
                      m_editor->verticalScrollBar()->value());
     if (!m_glow.isNull() && cur == m_glowScroll) {
         QPainter pg(&glow);
         pg.setOpacity(0.15);
         pg.drawImage(0, 0, m_glow);
+    } else if (!m_glow.isNull() && cur != m_glowScroll) {
+        m_ghost = m_glow;
+        m_ghostPos = QPointF(vp->pos()) - QPointF(cur - m_glowScroll);
+        m_ghostAlpha = qMin(0.5, m_ghostAlpha + 0.45);
+        m_fadeTimer.start();
     }
     m_glow = glow;
     m_glowScroll = cur;
@@ -92,8 +108,14 @@ void CrtBackdrop::paintEvent(QPaintEvent *)
         else if (m_dirty && m_sinceRefresh.elapsed() > Crt::kGlowMinIntervalMs)
             refreshGlow();
     }
+    // 残影：屏幕固定、渐暗熄灭（滚动时光慢慢消散在玻璃上）
+    if (!m_ghost.isNull() && m_ghostAlpha > 0.01) {
+        p.setOpacity(m_ghostAlpha);
+        p.drawImage(m_ghostPos, m_ghost);
+        p.setOpacity(1.0);
+    }
     if (!m_glow.isNull()) {
-        // 环境底光：弱化的快照垫底（日冕由效果层 Plus 叠加在文字上方）
+        // 环境底光：弱化的快照垫底（日冕由效果层叠加在文字上方）
         const QPoint cur(m_editor->horizontalScrollBar()->value(),
                          m_editor->verticalScrollBar()->value());
         p.setOpacity(0.35);
