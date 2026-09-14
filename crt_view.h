@@ -38,7 +38,6 @@ private:
     QImage m_pending;
     bool m_texDirty = true;
     bool m_forceNow = false;
-    QRhiReadbackResult *m_rb = nullptr;
     QElapsedTimer m_sinceRefresh;
     QSize m_texSize;
 };

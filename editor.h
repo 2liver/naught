@@ -443,7 +443,7 @@ public:
     {
         m_crt = !m_crt;
         if (m_crt) {
-            // B 路线：真光学着色器层（QOpenGLWidget），盖在视口之上，
+            // B 路线：真光学着色器层（QRhiWidget·Metal），盖在视口之上，
             // 逐像素渲染——CPU 光栅的引擎坑从根上消失
             if (!m_crtView) {
                 m_crtView = new CrtView(this);
@@ -456,12 +456,12 @@ public:
                 m_lineNumberArea->hide(); // 行号由快照自绘，避免两套
             setFocus(); // 原生子窗口可能扰动首响应者：焦点还给编辑器
             activateWindow();
-            // 临时取证：开显 1.2 秒后把着色器帧缓冲与快照存成 PNG
+            // 临时取证：开显 1.2 秒后保存纯 CPU 快照（不碰 RHI——
+            // grabFramebuffer/grab 会嵌套 beginOffscreenFrame，本身就是风险源）
             QTimer::singleShot(1200, this, [this] {
                 if (!m_crt || !m_crtView)
                     return;
-                m_crtView->grabFramebuffer().save(QStringLiteral("/tmp/naught-crt-frame.png"));
-                m_crtView->grab().save(QStringLiteral("/tmp/naught-crt-present.png"));
+                m_crtView->frameImage().save(QStringLiteral("/tmp/naught-crt-frame.png"));
                 QFile f(QStringLiteral("/tmp/naught-crt-geo.log"));
                 f.open(QIODevice::Append);
                 f.write(QStringLiteral("geo=%1 visible=%2 hidden=%3 size=%4x%5 vp=%6\n")
@@ -475,13 +475,19 @@ public:
                 f.close();
             });
         } else {
-            // 原生子窗口即使隐藏也持续干扰（滚动栏/滚轮/鼠标点击全失效）：
-            // 关闭即彻底销毁，恢复原生状态的编辑器
-            m_crtView->deleteLater(); // 事件处理中途销毁原生窗口会死锁 RHI
-            m_crtView = nullptr;
+            // 常驻，只隐藏，绝不销毁：销毁会把顶层 backing store 的
+            // RHI/swapchain 拆掉，与在途 paint 竞态 = beginOffscreenFrame
+            // 撞上已释放的帧槽信号量（SIGSEGV 0x30 崩溃的根因）。
+            // 原生子窗口隐藏后仍需彻底让位（滚轮/点击曾受干扰）：
+            // 缩成 1×1 再隐藏，事件分发与合成都不再碰到它。
+            if (m_crtView) {
+                m_crtView->hide();
+                m_crtView->setGeometry(0, 0, 1, 1);
+            }
             if (m_lineNumberArea)
                 m_lineNumberArea->show();
             viewport()->update();
+            setFocus();
         }
         applyScheme();
         applyZoom();

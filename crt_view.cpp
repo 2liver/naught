@@ -126,19 +126,6 @@ void CrtView::render(QRhiCommandBuffer *cb)
         const int nbytes = up.sizeInBytes();
         if (nbytes > 0 && m_pxbuf && nbytes <= m_pxbuf->size()) {
             u->uploadStaticBuffer(m_pxbuf, 0, size_t(nbytes), up.constBits());
-            if (!m_rb) {
-                m_rb = new QRhiReadbackResult;
-                m_rb->completed = [this, rb = m_rb]() {
-                    QImage img(m_texSize, QImage::Format_RGBA8888);
-                    if (!img.isNull() && !rb->data.isEmpty())
-                        memcpy(img.bits(), rb->data.constData(),
-                               qMin(size_t(img.sizeInBytes()), size_t(rb->data.size())));
-                    img.save(QStringLiteral("/tmp/naught-crt-bufreadback.png"));
-                    delete rb;
-                    m_rb = nullptr;
-                };
-                u->readBackBuffer(m_pxbuf, 0, quint32(m_pxbuf->size()), m_rb);
-            }
             m_texSize = up.size();
         } else if (m_pxbuf && nbytes > m_pxbuf->size()) {
             // 窗口变大（罕见）：重建存储缓冲与 SRB
@@ -153,8 +140,6 @@ void CrtView::render(QRhiCommandBuffer *cb)
         m_texDirty = false;
         m_forceNow = false;
         m_sinceRefresh.restart();
-        // 取证：输入纹理原图落盘（每次刷新覆盖）
-        up.save(QStringLiteral("/tmp/naught-crt-snap2.png"));
         {
             int amber = 0;
             for (int y = 0; y < up.height(); ++y)
