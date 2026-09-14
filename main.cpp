@@ -502,3 +502,5 @@ int main(int argc, char **argv)
     editor.show();
     return app.exec();
 }
+
+#include "main.moc"
