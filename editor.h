@@ -132,8 +132,10 @@ public:
             if (m_crtOverlay) {
                 m_crtOverlay->invalidateGlow();
                 m_crtOverlay->update(); // 日冕随文字即时刷新
-                if (m_crt)
+                if (m_crt) {
                     m_crtOverlay->excite(cursorRect()); // 磷粉激发：新字符短暂更亮
+                    m_crtSettleTimer.start(400); // 打字停顿后半拍重拍背景纹理（痕迹自愈）
+                }
             }
         });
         wakeCaret();
@@ -427,6 +429,8 @@ public:
     {
         return m_crtOverlay ? m_crtOverlay->snapImage() : QImage();
     }
+    // 人眼代理：鼠标在视口内的位置（反光视差追踪用）
+    QPointF lastMouseViewport() const { return m_lastMouse; }
     // 辉光背景纹理：视口背景画刷（字永远实心压在上面——辉光在文字之下）
     void setCrtGlowTexture(const QImage &tex)
     {
@@ -1611,7 +1615,10 @@ protected:
                     p -= QPointF(m_gutterWidth, 0); // 行号区 → 视口坐标
                 return p;
             };
-            // 记录指针位置（画笔足迹用，所有模式都跟踪）
+            // 记录指针位置（画笔足迹用，所有模式都跟踪）；鼠标即人眼——
+            // 移动时反光视差随动
+            if (event->type() == QEvent::MouseMove && m_crtOverlay && m_crt)
+                m_crtOverlay->update();
             // 离开视口（非作画会话）：清足迹并重置缩放锚点，避免锚在陈旧位置
             if (event->type() == QEvent::Leave && !m_inkSession) {
                 m_lastMouse = QPointF(-1, -1);

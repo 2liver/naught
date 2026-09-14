@@ -192,11 +192,18 @@ void CrtOverlay::paintEvent(QPaintEvent *)
         rebuildGlass();
     if (!m_glass.isNull())
         p.drawImage(0, 0, m_glass);
-    // 玻璃反光带：随刷新带相位缓慢漂移（光源在呼吸，不是死贴图）
+    // 玻璃反光带：人眼（鼠标）视差追踪——CRT-Royale 的解析模型在 CPU
+    // 上的近似：曲面玻璃的镜面反射随观察者位置移动（视点动、反光动；
+    // 视点不动、反光不动——不是自主漂移）
     {
-        const qreal drift = qSin(m_bandPhase * 2.0 * 3.14159265) * 0.12;
-        QLinearGradient sheen(rect().topLeft() + QPointF(int(drift * width()), 0),
-                              rect().bottomRight() + QPointF(int(drift * width()), 0));
+        const QPointF view = m_editor->lastMouseViewport();
+        QPointF v(-0.25, -0.12); // 无鼠标时：略偏左上的自然视角
+        if (view.x() >= 0) {
+            v = QPointF((view.x() / qMax(1.0, qreal(vp->width())) - 0.5) * 2.0,
+                        (view.y() / qMax(1.0, qreal(vp->height())) - 0.5) * 2.0);
+        }
+        const QPointF off(v.x() * width() * 0.07, v.y() * height() * 0.07);
+        QLinearGradient sheen(rect().topLeft() + off, rect().bottomRight() + off);
         sheen.setColorAt(0.42, QColor(255, 255, 255, 0));
         sheen.setColorAt(0.5, QColor(255, 255, 255, 12));
         sheen.setColorAt(0.58, QColor(255, 255, 255, 0));
