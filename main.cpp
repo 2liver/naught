@@ -32,6 +32,7 @@
 #include <QPainterPath>
 #include <QPalette>
 #include <QPlainTextEdit>
+#include <QResizeEvent>
 #include <QScrollBar>
 #include <QStyleHints>
 #include <QTextBlock>
@@ -51,47 +52,43 @@
 
 // 画布层：独立于文本，浮于文字之上。笔迹存文档坐标——随滚动平移、
 // 不随缩放变化（每笔在落笔瞬间锁定自己的笔宽）；颜色随阴/阳；事件全部穿透。
+class Editor;
+
+// 行号区：Qt 官方 CodeEditor 模式（声明在前，定义在 Editor 之后）
+class LineNumberArea : public QWidget {
+public:
+    explicit LineNumberArea(Editor *editor);
+    QSize sizeHint() const override;
+
+protected:
+    void paintEvent(QPaintEvent *event) override;
+
+private:
+    Editor *m_editor;
+};
+
 class Canvas : public QWidget {
 public:
     struct InkStroke {
         qreal width = 0;
-        QVector<QPointF> pts;
-        bool operator==(const InkStroke &o) const { return width == o.width && pts == o.pts; }
+        QPainterPath path; // 描边后的轮廓（QPainterPathStroker）
+        bool operator==(const InkStroke &o) const { return width == o.width && path == o.path; }
     };
 
-    // 线段与圆的交点（靠近 a 侧），用于擦除边界精确切开
-    static QPointF circleCross(const QPointF &a, const QPointF &b, const QPointF &c, qreal r)
-    {
-        const QPointF d = b - a;
-        const QPointF f = a - c;
-        const qreal A = QPointF::dotProduct(d, d);
-        const qreal B = 2.0 * QPointF::dotProduct(f, d);
-        const qreal C = QPointF::dotProduct(f, f) - r * r;
-        if (A <= 0)
-            return a;
-        qreal disc = B * B - 4.0 * A * C;
-        if (disc < 0)
-            return a;
-        disc = std::sqrt(disc);
-        qreal t = (-B - disc) / (2.0 * A);
-        if (t < 0.0 || t > 1.0)
-            t = (-B + disc) / (2.0 * A);
-        t = std::clamp<qreal>(t, 0.0, 1.0);
-        return a + t * d;
-    }
-
     QVector<InkStroke> snapshot() const { return m_strokes; }
+
+    QVector<QPainterPath> inkPaths() const
+    {
+        QVector<QPainterPath> paths;
+        for (const InkStroke &s : m_strokes)
+            paths.append(s.path);
+        return paths;
+    }
 
     void restore(const QVector<InkStroke> &strokes)
     {
         m_strokes = strokes;
-        m_active = InkStroke{};
-        update();
-    }
-
-    void setGutterPaint(std::function<void(QPainter &)> fn)
-    {
-        m_gutterPaint = std::move(fn);
+        m_activePts.clear();
         update();
     }
 
@@ -139,78 +136,104 @@ public:
 
     void beginStroke(const QPointF &docPos)
     {
-        m_active = InkStroke{m_brush, {docPos}};
+        m_activePts.clear();
+        m_activePts.append(docPos);
         update();
     }
 
     void extendStroke(const QPointF &docPos)
     {
-        if (m_active.pts.isEmpty())
+        if (m_activePts.isEmpty())
             return;
-        if (QLineF(m_active.pts.last(), docPos).length() >= 2.0) {
-            m_active.pts.append(docPos);
+        if (QLineF(m_activePts.last(), docPos).length() >= 2.0) {
+            m_activePts.append(docPos);
             update();
         }
     }
 
     void endStroke()
     {
-        if (m_active.pts.isEmpty())
+        if (m_activePts.isEmpty())
             return;
-        m_strokes.append(m_active);
-        m_active = InkStroke{};
+        m_strokes.append(outlineOf(m_activePts, m_brush));
+        m_activePts.clear();
     }
 
     void clearAll()
     {
-        if (m_strokes.isEmpty() && m_active.pts.isEmpty())
+        if (m_strokes.isEmpty() && m_activePts.isEmpty())
             return;
         m_strokes.clear();
-        m_active = InkStroke{};
+        m_activePts.clear();
         update();
+    }
+
+    // 点列 → 描边轮廓（圆头圆角，与笔刷口径一致）
+    static InkStroke outlineOf(const QVector<QPointF> &pts, qreal width)
+    {
+        InkStroke s{width, {}};
+        if (pts.size() == 1) {
+            s.path.addEllipse(pts.at(0), width / 2.0, width / 2.0);
+            return s;
+        }
+        QPainterPath line;
+        line.moveTo(pts.at(0));
+        for (int i = 1; i < pts.size(); ++i)
+            line.lineTo(pts.at(i));
+        QPainterPathStroker stroker;
+        stroker.setWidth(width);
+        stroker.setCapStyle(Qt::RoundCap);
+        stroker.setJoinStyle(Qt::RoundJoin);
+        s.path = stroker.createStroke(line);
+        return s;
     }
 
     void eraseAt(const QPointF &c)
     {
-        const qreal r = m_brush * 0.5; // 擦除直径 = 笔刷直径，与足迹一致
+        // Qt 自带几何引擎：轮廓布尔相减，所见即所得，小口径也精确
+        const qreal r = m_brush * 0.5;
+        QPainterPath tube;
+        tube.addEllipse(c, r, r);
         bool changed = false;
         for (int i = m_strokes.size() - 1; i >= 0; --i) {
-            const InkStroke &s = m_strokes.at(i);
-            // 边界段在圆周处精确切开：通道像素级等于 2r = 笔刷
-            QVector<InkStroke> pieces;
-            QVector<QPointF> cur;
-            bool removed = false;
-            bool inPrev = false;
-            for (int j = 0; j < s.pts.size(); ++j) {
-                const bool inNow = QLineF(s.pts.at(j), c).length() <= r;
-                if (inNow) {
-                    removed = true;
-                    if (!cur.isEmpty()) {
-                        // 外→内：当前段收于圆周切口
-                        cur.append(circleCross(s.pts.at(j - 1), s.pts.at(j), c, r));
-                        pieces.append(InkStroke{s.width, cur});
-                        cur.clear();
-                    }
-                } else {
-                    if (cur.isEmpty() && j > 0 && inPrev) {
-                        // 内→外：新段始于圆周切口
-                        cur.append(circleCross(s.pts.at(j - 1), s.pts.at(j), c, r));
-                    }
-                    cur.append(s.pts.at(j));
-                }
-                inPrev = inNow;
-            }
-            if (!cur.isEmpty())
-                pieces.append(InkStroke{s.width, cur});
-            if (!removed)
+            const qreal width = m_strokes.at(i).width;
+            const QPainterPath before = m_strokes.at(i).path;
+            const QPainterPath after = before.subtracted(tube);
+            if (after == before)
                 continue;
             changed = true;
+            const QVector<QPainterPath> subs = splitSubpaths(after);
             m_strokes.removeAt(i);
-            for (int k = int(pieces.size()) - 1; k >= 0; --k)
-                m_strokes.insert(i, pieces.at(k));
+            for (int k = subs.size() - 1; k >= 0; --k)
+                m_strokes.insert(i, InkStroke{width, subs.at(k)});
         }
         if (changed)
             update();
+    }
+
+    // 保留曲线元素地把路径拆成子路径
+    static QVector<QPainterPath> splitSubpaths(const QPainterPath &p)
+    {
+        QVector<QPainterPath> out;
+        QPainterPath cur;
+        for (int i = 0; i < p.elementCount(); ++i) {
+            const QPainterPath::Element &e = p.elementAt(i);
+            if (e.isMoveTo()) {
+                if (cur.elementCount() > 0)
+                    out.append(cur);
+                cur = QPainterPath();
+                cur.moveTo(e.x, e.y);
+            } else if (e.isLineTo()) {
+                cur.lineTo(e.x, e.y);
+            } else if (e.isCurveTo() && i + 2 < p.elementCount()) {
+                cur.cubicTo(e.x, e.y, p.elementAt(i + 1).x, p.elementAt(i + 1).y,
+                            p.elementAt(i + 2).x, p.elementAt(i + 2).y);
+                i += 2;
+            }
+        }
+        if (cur.elementCount() > 0)
+            out.append(cur);
+        return out;
     }
 
 protected:
@@ -228,13 +251,13 @@ protected:
         p.setRenderHint(QPainter::Antialiasing);
         p.save();
         p.translate(QPointF(m_vpOffset) - m_offset); // 笔迹：文档坐标（随滚动）
-        for (const InkStroke &s : m_strokes)
-            drawStroke(p, s.pts, s.width);
-        drawStroke(p, m_active.pts, m_active.width);
+        for (const InkStroke &s : m_strokes) {
+            p.setPen(Qt::NoPen);
+            p.setBrush(m_ink);
+            p.drawPath(s.path);
+        }
+        drawStroke(p, m_activePts, m_brush);
         p.restore();
-
-        if (m_gutterPaint)
-            m_gutterPaint(p);
 
         // 画笔足迹：窗口坐标（不随滚动）。涂=实心墨点，擦=空心圆；
         // 两者外缘均等于笔刷直径，擦除半径 0.5×笔刷，口径一致。
@@ -280,8 +303,7 @@ private:
     QPointF m_offset;
     QPoint m_vpOffset;
     QVector<InkStroke> m_strokes;
-    InkStroke m_active;
-    std::function<void(QPainter &)> m_gutterPaint;
+    QVector<QPointF> m_activePts;
     bool m_fpVisible = false;
     bool m_fpErase = false;
     QPointF m_fpPos;
@@ -442,8 +464,10 @@ public:
         connect(document(), &QTextDocument::contentsChanged, this, [this] {
             wakeCaret();
             m_lastWasInk = false;
-            // 行号画在画布层：文档一变立即重绘，否则清空/换行不会刷新（假行号）
+            // 行号区：文档一变立即重绘，否则清空/换行不会刷新（假行号）
             m_canvas->update();
+            if (m_lineNumberArea)
+                m_lineNumberArea->update();
             if (m_codeMode) {
                 const int digits = QString::number(qMax(1, document()->blockCount())).size();
                 const QFontMetricsF fm(activeFont());
@@ -451,6 +475,7 @@ public:
                 if (w != m_gutterWidth) {
                     m_gutterWidth = w;
                     setViewportMargins(m_gutterWidth, 0, 0, 0);
+                    updateLineNumberArea();
                 }
             }
         });
@@ -563,7 +588,20 @@ public:
     }
 
     bool inkEmpty() const { return m_canvas && m_canvas->snapshot().isEmpty(); }
-    QVector<Canvas::InkStroke> inkSnapshot() const { return m_canvas ? m_canvas->snapshot() : QVector<Canvas::InkStroke>{}; }
+    QVector<QPainterPath> inkPaths() const { return m_canvas ? m_canvas->inkPaths() : QVector<QPainterPath>{}; }
+    int gutterWidth() const { return m_gutterWidth; }
+
+    // 供行号区使用的公开包装（Qt 的原生接口是 protected）
+    QTextBlock firstVisibleBlockPub() const { return firstVisibleBlock(); }
+    QRectF blockBoundingGeometryPub(const QTextBlock &b) const { return blockBoundingGeometry(b); }
+    QRectF blockBoundingRectPub(const QTextBlock &b) const { return blockBoundingRect(b); }
+    QPointF contentOffsetPub() const { return contentOffset(); }
+    QFont codeFont() const
+    {
+        QFont f = m_codeFont;
+        f.setPointSizeF(m_size);
+        return f;
+    }
     qreal brushSize() const { return m_brushSize; }
 
     void brushUp() { brushStep(+1); }
@@ -1011,16 +1049,16 @@ public:
             }
             e.toggleMode(Editor::Mode::Normal);
             // 数据级验证：残余两段笔迹之间的空隙 = 擦除通道 = 笔刷宽度
-            const auto pieces = e.inkSnapshot();
+            const auto paths = e.inkPaths();
             int bestGap = 0;
-            if (pieces.size() >= 2) {
-                const qreal leftEnd = pieces.first().pts.last().x();
-                const qreal rightStart = pieces.last().pts.first().x();
+            if (paths.size() >= 2) {
+                const qreal leftEnd = paths.first().boundingRect().right();
+                const qreal rightStart = paths.last().boundingRect().left();
                 if (rightStart > leftEnd)
                     bestGap = int(rightStart - leftEnd);
             }
-            qInfo("ERASE-CHANNEL gap=%d brush=%f pieces=%d", bestGap, brush, int(pieces.size()));
-            if (pieces.size() >= 2 && qAbs(bestGap - brush) > 6.0) {
+            qInfo("ERASE-CHANNEL gap=%d brush=%f paths=%d", bestGap, brush, int(paths.size()));
+            if (paths.size() >= 2 && qAbs(bestGap - brush) > 6.0) {
                 qWarning("selftest FAIL: erase channel %dpx vs brush %fpx", bestGap, brush);
             }
             e.brushDefault();
@@ -1358,6 +1396,8 @@ private:
             m_canvas->setInk(m_dark ? QColor(255, 255, 255) : QColor(0, 0, 0));
         if (m_mode != Mode::Normal)
             updateModeCursor(); // 光标跟随墨色与当前笔刷
+        if (m_lineNumberArea)
+            m_lineNumberArea->update();
 #ifdef NAUGHT_WITH_HIGHLIGHT
         if (m_codeMode && m_hl && m_repo) {
             m_hl->setTheme(m_repo->defaultTheme(m_dark ? KSyntaxHighlighting::Repository::DarkTheme
@@ -1389,50 +1429,24 @@ private:
             const QFontMetricsF fm(activeFont());
             m_gutterWidth = qMax(20, int(fm.horizontalAdvance(QString(digits, QLatin1Char('8'))) + 12));
             setViewportMargins(m_gutterWidth, 0, 0, 0);
-            m_canvas->setGutterPaint([this](QPainter &p) { paintGutter(p); });
+            if (!m_lineNumberArea)
+                m_lineNumberArea = new LineNumberArea(this);
+            m_lineNumberArea->show();
+            m_lineNumberArea->raise();
+            updateLineNumberArea();
 #ifdef NAUGHT_WITH_HIGHLIGHT
             startHighlight();
 #endif
         } else {
             m_gutterWidth = 0;
             setViewportMargins(0, 0, 0, 0);
-            m_canvas->setGutterPaint({});
+            if (m_lineNumberArea)
+                m_lineNumberArea->hide();
 #ifdef NAUGHT_WITH_HIGHLIGHT
             stopHighlight();
 #endif
         }
         viewport()->update();
-    }
-
-    void paintGutter(QPainter &p)
-    {
-        if (!m_codeMode || m_gutterWidth <= 0)
-            return;
-        QFont nf = m_codeFont;
-        nf.setPointSizeF(m_size);
-        nf.setHintingPreference(QFont::PreferNoHinting); // 对齐与渲染路径无关
-        p.setFont(nf);
-        p.setPen(m_dark ? QColor(0x6a, 0x6a, 0x6a) : QColor(0xb0, 0xb0, 0xb0));
-        // 块映射只存尺寸不存位置（top 恒 0），按 Qt 官方画法从滚动值逐块累积
-        const int vbar = verticalScrollBar()->value();
-        QTextBlock block = firstVisibleBlock();
-        qreal top = vbar;
-        while (block.isValid() && top <= vbar + height()) {
-            const QRectF r = document()->documentLayout()->blockBoundingRect(block);
-            const qreal y = top - vbar;
-            if (top + r.height() > vbar) {
-                // 真基线对齐：数字与代码文字共享同一基线（所有编辑器行号的标准做法）
-                QTextLayout *tl = block.layout();
-                const QTextLine line0 = tl->lineAt(0);
-                const qreal baseline = y + line0.y() + line0.ascent();
-                const QString num = QString::number(block.blockNumber() + 1);
-                const QFontMetricsF fm(p.font());
-                const qreal w = fm.horizontalAdvance(num);
-                p.drawText(QPointF(m_gutterWidth - 6 - w, baseline), num);
-            }
-            top += r.height();
-            block = block.next();
-        }
     }
 
 #ifdef NAUGHT_WITH_HIGHLIGHT
@@ -1519,6 +1533,18 @@ private:
             m_inkUndo.removeFirst();
         m_inkRedo.clear();
         m_lastWasInk = true;
+    }
+
+    void resizeEvent(QResizeEvent *event) override
+    {
+        QPlainTextEdit::resizeEvent(event);
+        updateLineNumberArea();
+    }
+
+    void updateLineNumberArea()
+    {
+        if (m_lineNumberArea)
+            m_lineNumberArea->setGeometry(0, 0, m_gutterWidth, viewport()->height());
     }
 
     void startHold(int dir)
@@ -1699,6 +1725,7 @@ private:
     bool m_codeMode = false;
     int m_gutterWidth = 0;
     QFont m_codeFont;
+    LineNumberArea *m_lineNumberArea = nullptr;
 #ifdef NAUGHT_WITH_HIGHLIGHT
     KSyntaxHighlighting::Repository *m_repo = nullptr;
     KSyntaxHighlighting::SyntaxHighlighter *m_hl = nullptr;
@@ -1798,6 +1825,48 @@ int main(int argc, char **argv)
 #endif
 
     return app.exec();
+}
+
+// LineNumberArea 定义：独立子控件，用 blockBoundingGeometry 与 contentOffset
+// 走查，与文字共享同一几何，对齐由构造保证
+LineNumberArea::LineNumberArea(Editor *editor)
+    : QWidget(editor)
+    , m_editor(editor)
+{
+}
+
+QSize LineNumberArea::sizeHint() const
+{
+    return QSize(m_editor->gutterWidth(), 0);
+}
+
+void LineNumberArea::paintEvent(QPaintEvent *event)
+{
+    QPainter painter(this);
+    painter.fillRect(event->rect(),
+                     m_editor->isDark() ? QColor(0, 0, 0) : QColor(255, 255, 255));
+    painter.setPen(m_editor->isDark() ? QColor(0x6a, 0x6a, 0x6a) : QColor(0xb0, 0xb0, 0xb0));
+    painter.setFont(m_editor->codeFont());
+
+    QTextBlock block = m_editor->firstVisibleBlockPub();
+    int blockNumber = block.blockNumber();
+    qreal top = m_editor->blockBoundingGeometryPub(block)
+                    .translated(m_editor->contentOffsetPub())
+                    .top();
+    qreal bottom = top + m_editor->blockBoundingRectPub(block).height();
+    const QFontMetricsF fm(m_editor->codeFont());
+    const int shift = int((fm.height() - fm.capHeight()) / 2.0); // 数字墨迹与文字墨迹对齐
+    while (block.isValid() && top <= event->rect().bottom()) {
+        if (block.isVisible() && bottom >= event->rect().top()) {
+            painter.drawText(0, int(top) - shift, width() - 6,
+                             m_editor->fontMetrics().height(), Qt::AlignRight,
+                             QString::number(blockNumber + 1));
+        }
+        block = block.next();
+        top = bottom;
+        bottom = top + m_editor->blockBoundingRectPub(block).height();
+        ++blockNumber;
+    }
 }
 
 #include "main.moc"
