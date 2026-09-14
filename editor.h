@@ -400,38 +400,14 @@ public:
         while (block.isValid() && top - vscroll <= h) {
             const qreal bh = layout->blockBoundingRect(block).height();
             if (top - vscroll + bh >= 0) {
-                QTextLayout *tl = block.layout();
-                if (tl) {
-                    for (int i = 0; i < tl->lineCount(); ++i) {
-                        const QTextLine line = tl->lineAt(i);
-                        // 顶部 16px 留白：曲率会把屏幕顶缘推出采样范围，
-                        // 文字贴顶会被整个吃掉（CRT 标准做法：内容在内侧）
-                        line.draw(&p, QPointF(xoff, top + line.y() - vscroll + 16.0));
-                    }
-                }
+                // 规范画法：QTextLayout::draw 在给定原点自行处理内部行位
+                //（逐行 line.y 会与内部线位重复叠加 = 叠行的根源）。
+                // 顶部 16px 留白：曲率会把屏幕顶缘推出采样范围
+                if (QTextLayout *tl = block.layout())
+                    tl->draw(&p, QPointF(xoff, top - vscroll + 16.0));
             }
             top += bh;
             block = block.next();
-        }
-        // 编模式行号：行号区是独立控件，着色器层盖住它——快照里自绘
-        if (m_codeMode && m_gutterWidth > 0) {
-            p.setPen(Crt::kInkDim);
-            const QFontMetricsF fm(displayFont());
-            QTextBlock nb = document()->firstBlock();
-            int num = 1;
-            qreal ntop = 16.0; // 与文字同款顶部留白
-            QAbstractTextDocumentLayout *nl = document()->documentLayout();
-            while (nb.isValid() && ntop - vscroll <= h) {
-                const qreal bh = nl->blockBoundingRect(nb).height();
-                if (ntop - vscroll + bh >= 0) {
-                    p.drawText(QRectF(4, ntop - vscroll, m_gutterWidth - 8, fm.height()),
-                               Qt::AlignRight, QString::number(num));
-                }
-                ntop += bh;
-                ++num;
-                nb = nb.next();
-            }
-            p.setPen(Crt::kInk);
         }
         // 打字光标：2px 竖线（有焦点时）
         if (hasFocus()) {
