@@ -742,13 +742,8 @@ private:
             h->setDark(m_dark);
         if (m_canvas)
             m_canvas->setInk(m_dark ? QColor(255, 255, 255) : QColor(0, 0, 0));
-        // 模式光标跟随墨色（阳=黑，阴=白）
-        const QColor ink = m_dark ? QColor(255, 255, 255) : QColor(0, 0, 0);
-        const qreal dpr = viewport()->devicePixelRatioF();
-        m_dotCursor = makeDotCursor(ink, dpr);
-        m_ringCursor = makeRingCursor(ink, dpr);
         if (m_mode != Mode::Normal)
-            updateModeCursor();
+            updateModeCursor(); // 光标跟随墨色与当前笔刷
     }
 
     void applyZoom()
@@ -774,57 +769,66 @@ private:
         const int step = std::max(1, int(std::lround(m_brushSize * 0.1)));
         m_brushSize = std::clamp<qreal>(m_brushSize + dir * step, 2, 1024);
         m_canvas->setBrushWidth(m_brushSize);
+        if (m_mode != Mode::Normal)
+            updateModeCursor();
     }
 
     void brushReset()
     {
         m_brushSize = m_baseSize * BRUSH_SCALE;
         m_canvas->setBrushWidth(m_brushSize);
+        if (m_mode != Mode::Normal)
+            updateModeCursor();
     }
 
-    // 模式光标：打字 I 形；涂 = 实心墨点；擦 = 空心圆（实/虚，与阴/阳同构）
+    // 模式光标：打字 I 形；涂 = 实心墨点；擦 = 空心圆（实/虚，与阴/阳同构）。
+    // 尺寸随笔刷：涂 = 笔刷直径，擦 = 擦除直径（1.4×），上限受系统光标尺寸约束。
     void updateModeCursor()
     {
         QWidget *vp = viewport();
-        switch (m_mode) {
-        case Mode::Draw:
-            vp->setCursor(m_dotCursor);
-            break;
-        case Mode::Erase:
-            vp->setCursor(m_ringCursor);
-            break;
-        default:
+        if (m_mode == Mode::Normal) {
             vp->unsetCursor();
-            break;
+            return;
         }
+        const QColor ink = m_dark ? QColor(255, 255, 255) : QColor(0, 0, 0);
+        const qreal dpr = vp->devicePixelRatioF();
+        if (m_mode == Mode::Draw)
+            vp->setCursor(makeDotCursor(ink, dpr, m_brushSize));
+        else
+            vp->setCursor(makeRingCursor(ink, dpr, m_brushSize * 1.4));
     }
 
-    static QCursor makeDotCursor(const QColor &ink, qreal dpr)
+    static qreal cursorMax(qreal dpr) { return qMin(200.0, 256.0 / dpr); }
+
+    static QCursor makeDotCursor(const QColor &ink, qreal dpr, qreal diameter)
     {
-        const qreal d = 14;
-        QPixmap pm(qRound(d * dpr), qRound(d * dpr));
+        const qreal d = std::clamp<qreal>(diameter, 6.0, cursorMax(dpr));
+        const qreal W = d + 4;
+        QPixmap pm(qMax(12, qRound(W * dpr)), qMax(12, qRound(W * dpr)));
         pm.setDevicePixelRatio(dpr);
         pm.fill(Qt::transparent);
         QPainter p(&pm);
         p.setRenderHint(QPainter::Antialiasing);
         p.setPen(Qt::NoPen);
         p.setBrush(ink);
-        p.drawEllipse(QRectF(1, 1, d - 2, d - 2));
-        return QCursor(pm, qRound(d / 2), qRound(d / 2));
+        p.drawEllipse(QPointF(W / 2, W / 2), d / 2, d / 2);
+        return QCursor(pm, qRound(W / 2), qRound(W / 2));
     }
 
-    static QCursor makeRingCursor(const QColor &ink, qreal dpr)
+    static QCursor makeRingCursor(const QColor &ink, qreal dpr, qreal diameter)
     {
-        const qreal d = 18;
-        QPixmap pm(qRound(d * dpr), qRound(d * dpr));
+        const qreal d = std::clamp<qreal>(diameter, 8.0, cursorMax(dpr));
+        const qreal stroke = std::clamp<qreal>(d * 0.08, 1.5, 8.0);
+        const qreal W = d + 8;
+        QPixmap pm(qMax(16, qRound(W * dpr)), qMax(16, qRound(W * dpr)));
         pm.setDevicePixelRatio(dpr);
         pm.fill(Qt::transparent);
         QPainter p(&pm);
         p.setRenderHint(QPainter::Antialiasing);
         p.setBrush(Qt::NoBrush);
-        p.setPen(QPen(ink, 2.0));
-        p.drawEllipse(QPointF(d / 2, d / 2), d / 2 - 1.5, d / 2 - 1.5);
-        return QCursor(pm, qRound(d / 2), qRound(d / 2));
+        p.setPen(QPen(ink, stroke));
+        p.drawEllipse(QPointF(W / 2, W / 2), d / 2 - 1, d / 2 - 1);
+        return QCursor(pm, qRound(W / 2), qRound(W / 2));
     }
 
     QPointF viewportPosToDoc(const QPointF &p) const
@@ -916,8 +920,6 @@ private:
     Canvas *m_canvas = nullptr;
     Mode m_mode = Mode::Normal;
     qreal m_brushSize = 20.0;
-    QCursor m_dotCursor;
-    QCursor m_ringCursor;
 
     static constexpr int BLINK_HALF_MS = 750; // 亮/灭各 750ms，一次“长闪烁”1.5s
     static constexpr int SLEEP_BLINKS = 1;    // 完整闪烁次数；改成 2 则休眠前闪两次
