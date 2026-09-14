@@ -27,6 +27,8 @@ public:
     explicit CrtBackdrop(Editor *editor);
     void invalidateGlow();
     void refreshGlow();
+    // 缩放等必须立即重拍的场景：绕过打字节流
+    void forceGlow();
     QImage glowImage() const { return m_glow; }
     QPoint glowScroll() const { return m_glowScroll; }
 
@@ -39,6 +41,7 @@ private:
     QPoint m_glowScroll;
     QElapsedTimer m_sinceRefresh;
     bool m_dirty = true;
+    bool m_forceRefresh = false;
 };
 
 // 效果层：扫描线 + 噪声 + 暗角玻璃 + 暖机脉冲。事件穿透。

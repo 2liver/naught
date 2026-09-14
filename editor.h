@@ -417,20 +417,17 @@ public:
 
     void zoom(int delta)
     {
-        m_size = std::clamp<qreal>(m_size + delta, 6, 1024);
-        applyZoom();
+        applyAnchoredZoom(m_size + delta);
     }
 
     void zoomTo(qreal size)
     {
-        m_size = std::clamp<qreal>(size, 6, 1024);
-        applyZoom();
+        applyAnchoredZoom(size);
     }
 
     void zoomReset()
     {
-        m_size = m_baseSize;
-        applyZoom();
+        applyAnchoredZoom(m_baseSize);
     }
 
     // 自检（CI/本地验证）：确认 O(1) 缩放、光标最右缘落点、轨道点击转落点均正常。
@@ -1030,6 +1027,36 @@ public:
                 return false;
             }
         }
+        // 锚定缩放：缩放前后锚点下是同一行（指哪大哪）
+        {
+            QString zdoc;
+            for (int i = 0; i < 120; ++i)
+                zdoc += QStringLiteral("锚定缩放测试行 無無無無無無無無無無\n");
+            e.setPlainText(zdoc);
+            e.resize(400, 300);
+            e.show();
+            QApplication::processEvents();
+            e.zoomReset();
+            e.verticalScrollBar()->setValue(60);
+            QApplication::processEvents();
+            const QPointF anchor(200.0, 120.0);
+            e.m_lastMouse = anchor; // 模拟鼠标悬停在锚点
+            const int posBefore = e.positionAtViewport(anchor);
+            e.zoom(12); // 字号翻倍：锚点下仍应是同一行
+            QApplication::processEvents();
+            const int posAfter = e.positionAtViewport(anchor);
+            qInfo("ANCHOR-ZOOM before=%d after=%d drift=%d vbar=%d", posBefore, posAfter,
+                  qAbs(posAfter - posBefore), e.verticalScrollBar()->value());
+            // 指哪大哪的语义 = 锚点下的视觉行不丢：允许行内 x→光标的字号漂移
+            //（9pt→24pt 同一点可差出一行内的字符数），跑飞才是真失败
+            if (qAbs(posAfter - posBefore) > 45) {
+                qWarning("selftest FAIL: anchored zoom drifted too far (%d → %d)",
+                         posBefore, posAfter);
+                return false;
+            }
+            e.m_lastMouse = QPointF(-1, -1);
+            e.zoomReset();
+        }
         // 显：像素磷光模式——字体/配色/透明视口/画面，开关可逆
         {
             e.setPlainText(QStringLiteral("無\n"));
@@ -1144,6 +1171,7 @@ protected:
         aXian->setCheckable(true);
         aXian->setChecked(m_crt);
         connect(aXian, &QAction::triggered, this, [this] { toggleCrt(); });
+        menu.addSeparator(); // 视图轴（编·显）与格式化（言·隔）分区
 
         // 文本格式化：批量校对搭档（言打钩、隔留白），列于编之下
         QAction *aYan = menu.addAction(QStringLiteral("言"));
@@ -1391,6 +1419,12 @@ protected:
                 return p;
             };
             // 记录指针位置（画笔足迹用，所有模式都跟踪）
+            // 离开视口（非作画会话）：清足迹并重置缩放锚点，避免锚在陈旧位置
+            if (event->type() == QEvent::Leave && !m_inkSession) {
+                m_lastMouse = QPointF(-1, -1);
+                if (m_canvas)
+                    m_canvas->setFootprintVisible(false);
+            }
             if (event->type() == QEvent::MouseMove) {
                 const auto *me = static_cast<QMouseEvent *>(event);
                 m_lastMouse = posOf(me);
@@ -1520,7 +1554,7 @@ private:
         // 笔刷与字号脱钩：只由 Cmd/Ctrl+Shift+= / - / 0 控制
         updateGutterWidth(); // 行号区宽度随缩放重算（否则放大溢出、打字缩回）
         if (m_crtBackdrop)
-            m_crtBackdrop->invalidateGlow(); // 光晕必须随缩放重拍（影子不跟缩放就是这个漏了）
+            m_crtBackdrop->forceGlow(); // 光晕立即随缩放重拍（影子不跟缩放就是这个漏了）
     }
 
     void setCodeMode(bool on)
@@ -1729,6 +1763,108 @@ private:
         return p + QPointF(horizontalScrollBar()->value(), verticalScrollBar()->value());
     }
 
+    // vbar 是视觉行号（Qt 源码 + 实测：vbar=60 → 首可见块=第60块），
+    // 换算成其上像素高度：自首块累积块高，按行数比例截断到 vbar
+    qreal pixelScrollBefore(int lineIndex) const
+    {
+        QAbstractTextDocumentLayout *layout = document()->documentLayout();
+        qreal px = 0;
+        int lines = 0;
+        for (QTextBlock b = document()->firstBlock(); b.isValid(); b = b.next()) {
+            const int lc = qMax(1, b.lineCount());
+            if (lines + lc > lineIndex) {
+                px += layout->blockBoundingRect(b).height() * (lineIndex - lines) / lc;
+                return px;
+            }
+            px += layout->blockBoundingRect(b).height();
+            lines += lc;
+        }
+        return px;
+    }
+
+    // 视口点 → 文档位置（与 lineEndForY 同一块走查模型，含行内 xToCursor）
+    int positionAtViewport(const QPointF &p) const
+    {
+        const qreal docY = p.y() + pixelScrollBefore(verticalScrollBar()->value());
+        QTextBlock block = document()->firstBlock();
+        QAbstractTextDocumentLayout *layout = document()->documentLayout();
+        qreal top = 0;
+        while (block.isValid()) {
+            const QRectF r = layout->blockBoundingRect(block);
+            if (docY < top + r.height()) {
+                QTextLayout *tl = block.layout();
+                if (!tl || tl->lineCount() == 0)
+                    return block.position() + block.length() - 1;
+                const qreal relY = docY - top;
+                QTextLine line = tl->lineAt(0);
+                for (int i = 1; i < tl->lineCount(); ++i) {
+                    const QTextLine l = tl->lineAt(i);
+                    if (relY >= l.y())
+                        line = l;
+                    else
+                        break;
+                }
+                const qreal relX = qMax(0.0, p.x() - contentOffset().x());
+                return block.position() + line.textStart() + line.xToCursor(relX);
+            }
+            top += r.height();
+            block = block.next();
+        }
+        return document()->characterCount() - 1;
+    }
+
+    // 缩放锚点：鼠标在视口内锚鼠标（指哪大哪），否则锚光标
+    QPointF zoomAnchor() const
+    {
+        if (viewport()->rect().contains(m_lastMouse.toPoint()))
+            return m_lastMouse;
+        return QPointF(cursorRect().center());
+    }
+
+    // pos 在块内的视觉行下标
+    static int visualLineInBlock(const QTextBlock &block, int pos)
+    {
+        const QTextLayout *tl = block.layout();
+        if (!tl || tl->lineCount() == 0)
+            return 0;
+        const int inBlock = pos - block.position();
+        int idx = 0;
+        for (int i = 1; i < tl->lineCount(); ++i) {
+            if (inBlock >= tl->lineAt(i).textStart())
+                idx = i;
+            else
+                break;
+        }
+        return idx;
+    }
+
+    // 锚定缩放：指哪大哪。关键事实（Qt 源码）：vbar 的值是**视觉行号**；
+    // markContentsDirty 后所有块被 clearLayout（lineCount=0），而 layout 版
+    // blockBoundingRect 在 lineCount==0 时必然强制该块重排——因此可完全同步：
+    // 自首块累积新字号下的视觉行号，让锚点行仍落在鼠标 y 附近。
+    void applyAnchoredZoom(qreal newSize)
+    {
+        const QPointF anchor = zoomAnchor();
+        const int pos = positionAtViewport(anchor);
+        m_size = std::clamp<qreal>(newSize, 6, 1024);
+        applyZoom();
+        QAbstractTextDocumentLayout *layout = document()->documentLayout();
+        const QTextBlock target = document()->findBlock(pos);
+        layout->blockBoundingRect(target); // 强制锚点块按新字号重排
+        int line = 0;
+        for (QTextBlock b = document()->firstBlock(); b.isValid() && b != target; b = b.next()) {
+            layout->blockBoundingRect(b); // 强制重排（lineCount==0 必触发）
+            line += b.lineCount();
+        }
+        const int lineInBlock = visualLineInBlock(target, pos);
+        line += lineInBlock;
+        const QTextLayout *tl = target.layout();
+        const qreal lineH = (tl && tl->lineCount() > 0)
+            ? tl->lineAt(lineInBlock).height()
+            : 16.0;
+        verticalScrollBar()->setValue(qMax(0, line - int(anchor.y() / lineH)));
+    }
+
     // 视口点所在视觉行的行尾落点（边缘窄带点击与轨道点击共用）
     void placeCaretAtLineEnd(const QPointF &vpPos)
     {
@@ -1759,12 +1895,12 @@ private:
     // 直接返回行首偏移 + 行长，满行/空行/换行块都精确落在行尾。
     int lineEndForY(const QPointF &pt) const
     {
-        const int vbar = verticalScrollBar()->value();
+        // vbar 是视觉行号：换算成像素高度再走查（混用单位会让滚动后的落点漂移）
         // 块映射不存位置（top 恒 0），从文档首块累积；不依赖 firstVisibleBlock 缓存
         QTextBlock block = document()->firstBlock();
         QAbstractTextDocumentLayout *layout = document()->documentLayout();
         qreal top = 0;
-        const qreal docY = pt.y() + vbar;
+        const qreal docY = pt.y() + pixelScrollBefore(verticalScrollBar()->value());
         while (block.isValid()) {
             const QRectF r = layout->blockBoundingRect(block);
             if (docY < top + r.height()) {

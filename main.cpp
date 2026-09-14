@@ -219,6 +219,7 @@ int main(int argc, char **argv)
         QAction *bXian = fa->addAction(QStringLiteral("显"));
         bXian->setShortcut(QKeySequence(QStringLiteral("Ctrl+T")));
         bXian->setCheckable(true);
+        fa->addSeparator(); // 视图轴（编·显）与格式化（言·隔）分区
         QAction *bYan = fa->addAction(QStringLiteral("言"));
         bYan->setShortcut(QKeySequence(QStringLiteral("Ctrl+L")));
         QAction *bGe = fa->addAction(QStringLiteral("隔"));

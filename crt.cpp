@@ -27,13 +27,23 @@ void CrtBackdrop::invalidateGlow()
     update();
 }
 
+// 缩放等场景：下一次绘制立即重拍（光晕必须与当前字号严格一致，
+// 否则旧字号的光晕会残留在新文字之外——"影子"）
+void CrtBackdrop::forceGlow()
+{
+    m_forceRefresh = true;
+    m_dirty = true;
+    update();
+}
+
 void CrtBackdrop::refreshGlow()
 {
-    if (m_sinceRefresh.isValid()
+    if (!m_forceRefresh && m_sinceRefresh.isValid()
         && m_sinceRefresh.elapsed() < Crt::kGlowMinIntervalMs) {
         m_dirty = true; // 打字连发时别每键重拍：漏掉的内容由脏标记兜底
         return;
     }
+    m_forceRefresh = false;
     QWidget *vp = m_editor->viewport();
     if (!vp || vp->width() <= 0 || vp->height() <= 0)
         return;
@@ -77,7 +87,7 @@ void CrtBackdrop::paintEvent(QPaintEvent *)
         const QPoint cur(m_editor->horizontalScrollBar()->value(),
                          m_editor->verticalScrollBar()->value());
         const QPoint delta = cur - m_glowScroll;
-        if (delta.manhattanLength() >= Crt::kGlowMinScroll)
+        if (m_forceRefresh || delta.manhattanLength() >= Crt::kGlowMinScroll)
             refreshGlow();
         else if (m_dirty && m_sinceRefresh.elapsed() > Crt::kGlowMinIntervalMs)
             refreshGlow();
@@ -161,8 +171,13 @@ void CrtOverlay::paintEvent(QPaintEvent *)
                          m_editor->verticalScrollBar()->value());
         const QPointF at = QPointF(m_editor->viewport()->pos())
             - QPointF(cur - m_editor->crtGlowScroll());
+        // 裁剪到视口：滚动滞后时旧快照的边缘不许溢出到行号区/边界之外
+        // （否则文字外面会残留一圈影子）
+        p.save();
+        p.setClipRect(m_editor->viewport()->geometry());
         p.setOpacity(0.42);
         p.drawImage(at, glow);
+        p.restore();
         p.setOpacity(1.0);
     }
     // 暗角 + 反光 + 扫描线（烘进同一层，一次 blit）
