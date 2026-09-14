@@ -124,8 +124,11 @@ public:
             updateGutterWidth();
             if (m_crtBackdrop)
                 m_crtBackdrop->invalidateGlow();
-            if (m_crtOverlay)
+            if (m_crtOverlay) {
                 m_crtOverlay->update(); // 日冕随文字即时刷新
+                if (m_crt)
+                    m_crtOverlay->excite(cursorRect()); // 磷粉激发：新字符短暂更亮
+            }
         });
         wakeCaret();
 
@@ -379,6 +382,10 @@ public:
     bool crtOn() const { return m_crt; }
     QImage crtGlowImage() const { return m_crtBackdrop ? m_crtBackdrop->glowImage() : QImage(); }
     QPoint crtGlowScroll() const { return m_crtBackdrop ? m_crtBackdrop->glowScroll() : QPoint(); }
+    QImage crtEdgeImage(bool right) const
+    {
+        return m_crtBackdrop ? m_crtBackdrop->edgeImage(right) : QImage();
+    }
     // 光晕快照与当前滚动之间的**像素位移**（vbar 是行号单位，不能直接相减）
     QPointF crtGlowShift() const
     {
@@ -1178,6 +1185,36 @@ public:
                 || e.document()->defaultFont().family()
                     != QFontDatabase::systemFont(QFontDatabase::GeneralFont).family()) {
                 qWarning("selftest FAIL: CRT toggle-off did not restore font/viewport");
+                return false;
+            }
+        }
+        // 真衍射的边差分：合成白块的左右竖直边界各产出一条彩边掩膜
+        {
+            QImage synth(40, 20, QImage::Format_ARGB32);
+            synth.fill(Qt::transparent);
+            QPainter sp(&synth);
+            sp.fillRect(QRect(10, 4, 12, 10), QColor(255, 255, 255, 255));
+            sp.end();
+            const QImage eR = Crt::edgeDiff(synth, +1);
+            const QImage eB = Crt::edgeDiff(synth, -1);
+            int rCols = 0, bCols = 0, rWrong = 0, bWrong = 0;
+            for (int y = 0; y < eR.height(); ++y) {
+                const uchar *rRow = eR.constScanLine(y);
+                const uchar *bRow = eB.constScanLine(y);
+                for (int x = 0; x < eR.width(); ++x) {
+                    if (rRow[x] > 0) {
+                        if (x == 21) ++rCols; else ++rWrong;
+                    }
+                    if (bRow[x] > 0) {
+                        if (x == 10) ++bCols; else ++bWrong;
+                    }
+                }
+            }
+            qInfo("DIFF-EDGE rightCol=%d wrong=%d leftCol=%d wrong=%d",
+                  rCols, rWrong, bCols, bWrong);
+            if (rCols < 8 || bCols < 8 || rWrong > 0 || bWrong > 0) {
+                qWarning("selftest FAIL: edgeDiff columns wrong (R:%d/%d B:%d/%d)",
+                         rCols, rWrong, bCols, bWrong);
                 return false;
             }
         }

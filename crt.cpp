@@ -61,9 +61,27 @@ void CrtBackdrop::refreshGlow()
     QImage snap(vp->size(), QImage::Format_ARGB32);
     snap.fill(Qt::transparent);
     vp->render(&snap);
-    const QSize small(qMax(1, vp->width() / 4), qMax(1, vp->height() / 4));
-    QImage glow = snap.scaled(small, Qt::IgnoreAspectRatio, Qt::SmoothTransformation)
+    // 真高斯辉光：半分辨率三轮盒式模糊（真高斯形状；降采样保持宽光晕，
+    // 平滑放大回原尺寸）
+    const QSize half(qMax(1, vp->width() / 2), qMax(1, vp->height() / 2));
+    QImage glow = Crt::gaussianBlur(
+                      snap.scaled(half, Qt::IgnoreAspectRatio, Qt::SmoothTransformation),
+                      4, 3)
                       .scaled(vp->size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    // 二期真衍射：锐快照差分的竖直亮边，R 在右缘、B 在左缘（±1px、色相相反）
+    {
+        const auto tintEdge = [](const QImage &mask, const QColor &c) {
+            QImage out(mask.size(), QImage::Format_ARGB32);
+            out.fill(c);
+            QPainter p(&out);
+            p.setCompositionMode(QPainter::CompositionMode_DestinationIn);
+            p.drawImage(0, 0, mask);
+            p.end();
+            return out;
+        };
+        m_edgeR = tintEdge(Crt::edgeDiff(snap, +1), QColor(255, 70, 20, int(255 * Crt::kDiffAlpha)));
+        m_edgeB = tintEdge(Crt::edgeDiff(snap, -1), QColor(50, 90, 255, int(255 * Crt::kDiffAlpha)));
+    }
     // 磷粉余晖：同一滚动位置下，旧帧 15% 混入（打字/编辑留下短暂残影）；
     // 滚动位置变化（像素位移 > 0）时晋升为屏幕固定的残影（渐暗熄灭）
     const QPointF shift = m_editor->crtGlowShift(); // 基于旧快照的像素位移
@@ -151,6 +169,7 @@ CrtOverlay::CrtOverlay(Editor *editor)
         m_bandPhase += 0.04; // 120ms / 3000ms：刷新带 3 秒扫一周
         if (m_bandPhase >= 1.0)
             m_bandPhase -= 1.0;
+        m_exciteAge *= 0.76; // 磷粉激发回落（约 500ms 衰减包络）
         update();
     });
     m_warmTimer.setInterval(24);
@@ -172,8 +191,19 @@ void CrtOverlay::warmUp()
 void CrtOverlay::stop()
 {
     m_warm = 0.0;
+    m_exciteAge = 0.0;
     m_warmTimer.stop();
     m_noiseTimer.stop();
+}
+
+// 磷粉激发：新敲入字符所在矩形（视口坐标）
+void CrtOverlay::excite(const QRect &viewportRect)
+{
+    if (viewportRect.isNull())
+        return;
+    m_exciteRect = viewportRect;
+    m_exciteAge = 1.0;
+    update();
 }
 
 void CrtOverlay::paintEvent(QPaintEvent *)
@@ -198,6 +228,33 @@ void CrtOverlay::paintEvent(QPaintEvent *)
         p.drawImage(at, glow);
         p.restore();
         p.setOpacity(1.0);
+    }
+    // 真衍射彩边：锐快照的竖直亮边 R 在右、B 在左（±1px、色相相反，
+    // 随内容同一位移；裁剪到视口）
+    const QImage edgeR = m_editor->crtEdgeImage(true);
+    const QImage edgeB = m_editor->crtEdgeImage(false);
+    if (!edgeR.isNull() || !edgeB.isNull()) {
+        const QPointF eat = QPointF(m_editor->viewport()->pos()) - m_editor->crtGlowShift();
+        p.save();
+        p.setClipRect(m_editor->viewport()->geometry());
+        if (!edgeR.isNull())
+            p.drawImage(eat, edgeR);
+        if (!edgeB.isNull())
+            p.drawImage(eat, edgeB);
+        p.restore();
+    }
+    // 磷粉激发：新敲入的字符短暂更亮（软边 blob ×3 圈近似辉光），随时间回落
+    if (m_exciteAge > 0.02 && !m_exciteRect.isNull()) {
+        const QPointF base = QPointF(m_editor->viewport()->pos()) + m_exciteRect.topLeft();
+        const qreal a = 0.16 * m_exciteAge;
+        p.setPen(Qt::NoPen);
+        for (int ring = 2; ring >= 0; --ring) {
+            const QRectF r = QRectF(base.x() - ring * 3, base.y() - ring * 3,
+                                    m_exciteRect.width() + ring * 6,
+                                    m_exciteRect.height() + ring * 6);
+            p.setBrush(QColor(255, 176, 0, int(255 * a / 3.0)));
+            p.drawRoundedRect(r, ring * 2 + 1, ring * 2 + 1);
+        }
     }
     // 暗角 + 反光 + 扫描线（烘进同一层，一次 blit）
     if (m_glass.size() != size())
