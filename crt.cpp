@@ -41,10 +41,19 @@ void CrtBackdrop::refreshGlow()
     snap.fill(Qt::transparent);
     vp->render(&snap);
     const QSize small(qMax(1, vp->width() / 4), qMax(1, vp->height() / 4));
-    m_glow = snap.scaled(small, Qt::IgnoreAspectRatio, Qt::SmoothTransformation)
-                 .scaled(vp->size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-    m_glowScroll = QPoint(m_editor->horizontalScrollBar()->value(),
-                          m_editor->verticalScrollBar()->value());
+    QImage glow = snap.scaled(small, Qt::IgnoreAspectRatio, Qt::SmoothTransformation)
+                      .scaled(vp->size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    // 磷粉余晖：同一滚动位置下，旧帧 15% 混入（打字/编辑留下短暂残影）；
+    // 滚动位置变化时不混，避免错位鬼影
+    const QPoint cur(m_editor->horizontalScrollBar()->value(),
+                     m_editor->verticalScrollBar()->value());
+    if (!m_glow.isNull() && cur == m_glowScroll) {
+        QPainter pg(&glow);
+        pg.setOpacity(0.15);
+        pg.drawImage(0, 0, m_glow);
+    }
+    m_glow = glow;
+    m_glowScroll = cur;
     m_sinceRefresh.restart();
     m_dirty = false;
     update();
