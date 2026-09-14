@@ -6,19 +6,20 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets)
+find_package(Qt6 REQUIRED COMPONENTS Widgets OpenGLWidgets)
 
 qt_add_executable(naught WIN32 MACOSX_BUNDLE
     main.cpp
-    crt.cpp
+    crt_view.cpp
     line_number_area.cpp
     canvas.h
     crt.h
+    crt_view.h
     editor.h
     line_number_area.h
     zen_scroll_bar.h
     resources/resources.qrc)
-target_link_libraries(naught PRIVATE Qt6::Widgets)
+target_link_libraries(naught PRIVATE Qt6::Widgets Qt6::OpenGLWidgets)
 
 # 语法高亮（可选）：未找到时 编 模式退化为 等宽字体 + 行号
 find_package(KF6SyntaxHighlighting QUIET)
