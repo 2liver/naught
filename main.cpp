@@ -219,20 +219,13 @@ protected:
         if (m_gutterPaint)
             m_gutterPaint(p);
 
-        // 画笔足迹：窗口坐标（不随滚动），尺寸=真实口径，无系统光标尺寸上限
+        // 画笔足迹：窗口坐标（不随滚动）。涂/擦同一实心圆，口径一致由构造保证
         const QPointF fp = m_fpPos + QPointF(m_vpOffset);
         if (m_fpVisible) {
-            const qreal d = m_brush; // 涂/擦足迹直径一致（实心/空心区分）
-            if (m_fpErase) {
-                const qreal stroke = std::clamp<qreal>(d * 0.08, 1.5, 8.0);
-                p.setPen(QPen(m_ink, stroke));
-                p.setBrush(Qt::NoBrush);
-                p.drawEllipse(fp, d / 2 - stroke / 2, d / 2 - stroke / 2); // 外缘恰为笔刷直径，与擦除范围一致
-            } else {
-                p.setPen(Qt::NoPen);
-                p.setBrush(m_ink);
-                p.drawEllipse(fp, d / 2, d / 2);
-            }
+            const qreal d = m_brush; // 擦除直径 = 笔刷直径
+            p.setPen(Qt::NoPen);
+            p.setBrush(m_ink);
+            p.drawEllipse(fp, d / 2, d / 2);
         }
     }
 
@@ -867,6 +860,32 @@ public:
             qWarning("selftest FAIL: code mode gutter missing");
             return false;
         }
+        // 像素级对齐验证：把编模式渲染成图像，比较数字与文字的像素行范围
+        {
+            QImage img(e.size(), QImage::Format_ARGB32);
+            img.fill(Qt::white);
+            e.render(&img);
+            const int g = e.viewport()->pos().x();
+            auto darkRange = [&](int x0, int x1, int y0, int y1) {
+                int lo = -1, hi = -1;
+                for (int y = y0; y < y1; ++y)
+                    for (int x = x0; x < x1; ++x)
+                        if (qGray(img.pixel(x, y)) < 200) { // 行号为浅灰
+                            if (lo < 0)
+                                lo = y;
+                            hi = y;
+                        }
+                return qMakePair(lo, hi);
+            };
+            const auto num = darkRange(2, qMax(3, g - 2), 0, 60);
+            const auto txt = darkRange(g + 4, g + 80, 0, 60);
+            qInfo("PIXEL gutter=%d num_y=[%d,%d] text_y=[%d,%d]", g,
+                  num.first, num.second, txt.first, txt.second);
+            if (num.first >= 0 && txt.first >= 0 && qAbs(num.first - txt.first) > 3)
+                qWarning("selftest FAIL: number/text pixel rows differ (%d vs %d)",
+                         num.first, txt.first);
+            e.zoomReset();
+        }
         e.toggleCodeMode();
         QApplication::processEvents();
         if (e.viewport()->pos().x() != 0
@@ -1293,7 +1312,8 @@ private:
         if (!m_codeMode || m_gutterWidth <= 0)
             return;
         QFont nf = m_codeFont;
-        nf.setPointSizeF(m_size); // 与文字同字号：同基线即像素级对齐
+        nf.setPointSizeF(m_size);
+        nf.setHintingPreference(QFont::PreferNoHinting); // 对齐与渲染路径无关
         p.setFont(nf);
         p.setPen(m_dark ? QColor(0x6a, 0x6a, 0x6a) : QColor(0xb0, 0xb0, 0xb0));
         // 块映射只存尺寸不存位置（top 恒 0），按 Qt 官方画法从滚动值逐块累积
@@ -1304,14 +1324,15 @@ private:
             const QRectF r = document()->documentLayout()->blockBoundingRect(block);
             const qreal y = top - vbar;
             if (top + r.height() > vbar) {
-                // 与文字同字号、同基线：像素级对齐
+                // 数字字形中心 = 行框中心：纯字体度量，与 hinting/渲染路径无关
                 QTextLayout *tl = block.layout();
                 const QTextLine line0 = tl->lineAt(0);
-                const qreal baseline = y + line0.y() + line0.ascent();
-                const QString num = QString::number(block.blockNumber() + 1);
+                const qreal lineCenter = y + line0.y() + line0.height() / 2.0;
                 const QFontMetricsF fm(p.font());
+                const qreal glyphCenter = (fm.ascent() - fm.descent()) / 2.0;
+                const QString num = QString::number(block.blockNumber() + 1);
                 const qreal w = fm.horizontalAdvance(num);
-                p.drawText(QPointF(m_gutterWidth - 6 - w, baseline), num);
+                p.drawText(QPointF(m_gutterWidth - 6 - w, lineCenter + glyphCenter), num);
             }
             top += r.height();
             block = block.next();
