@@ -113,6 +113,16 @@ public:
         update();
     }
 
+    // 圆头圆角描边轮廓：口径 + 路径 → 填充用轮廓（画/擦/显示三处共用同一几何）
+    static QPainterPath strokeOutline(const QPainterPath &line, qreal width)
+    {
+        QPainterPathStroker stroker;
+        stroker.setWidth(width);
+        stroker.setCapStyle(Qt::RoundCap);
+        stroker.setJoinStyle(Qt::RoundJoin);
+        return stroker.createStroke(line);
+    }
+
     // 点列 → 描边轮廓（圆头圆角，与笔刷口径一致）
     static InkStroke outlineOf(const QVector<QPointF> &pts, qreal width)
     {
@@ -125,11 +135,7 @@ public:
         line.moveTo(pts.at(0));
         for (int i = 1; i < pts.size(); ++i)
             line.lineTo(pts.at(i));
-        QPainterPathStroker stroker;
-        stroker.setWidth(width);
-        stroker.setCapStyle(Qt::RoundCap);
-        stroker.setJoinStyle(Qt::RoundJoin);
-        s.path = stroker.createStroke(line);
+        s.path = strokeOutline(line, width);
         return s;
     }
 
@@ -141,11 +147,7 @@ public:
             QPainterPath seg;
             seg.moveTo(m_eraseLast);
             seg.lineTo(c);
-            QPainterPathStroker stroker;
-            stroker.setWidth(m_brush);
-            stroker.setCapStyle(Qt::RoundCap);
-            stroker.setJoinStyle(Qt::RoundJoin);
-            tube = stroker.createStroke(seg);
+            tube = strokeOutline(seg, m_brush);
         } else {
             tube.addEllipse(c, m_brush / 2.0, m_brush / 2.0);
         }
@@ -258,20 +260,10 @@ private:
     {
         if (pts.isEmpty())
             return;
-        if (pts.size() == 1) {
-            p.setPen(Qt::NoPen);
-            p.setBrush(m_ink);
-            p.drawEllipse(pts.at(0), width / 2.0, width / 2.0);
-            return;
-        }
-        QPainterPath path;
-        path.moveTo(pts.at(0));
-        for (int i = 1; i < pts.size(); ++i)
-            path.lineTo(pts.at(i));
-        QPen pen(m_ink, width, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
-        p.setPen(pen);
-        p.setBrush(Qt::NoBrush);
-        p.drawPath(path);
+        // 与 outlineOf 同一轮廓：作画过程所见 = 松手后所提交，几何唯一
+        p.setPen(Qt::NoPen);
+        p.setBrush(m_ink);
+        p.drawPath(outlineOf(pts, width).path);
     }
 
     QColor m_ink = QColor(0, 0, 0);

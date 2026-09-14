@@ -192,6 +192,10 @@ int main(int argc, char **argv)
         QAction *bBian = fa->addAction(QStringLiteral("编"));
         bBian->setShortcut(QKeySequence(QStringLiteral("Ctrl+B")));
         bBian->setCheckable(true);
+        QAction *bYan = fa->addAction(QStringLiteral("言"));
+        bYan->setShortcut(QKeySequence(QStringLiteral("Ctrl+L")));
+        QAction *bGe = fa->addAction(QStringLiteral("隔"));
+        bGe->setShortcut(QKeySequence(QStringLiteral("Ctrl+G")));
         fa->addSeparator();
         // 字号/笔刷不做成真键等效（系统接管会毁掉按住加速），提示内嵌标签
         QAction *bZoomIn = fa->addAction(QStringLiteral("字号放大 ⌘="));
@@ -213,6 +217,8 @@ int main(int argc, char **argv)
         QObject::connect(bCa, &QAction::triggered, &editor, [&editor] { editor.toggleMode(Editor::Mode::Erase); });
         QObject::connect(bXiao, &QAction::triggered, &editor, [&editor] { editor.clearInk(); });
         QObject::connect(bBian, &QAction::triggered, &editor, [&editor] { editor.toggleCodeMode(); });
+        QObject::connect(bYan, &QAction::triggered, &editor, [&editor] { editor.yan(); });
+        QObject::connect(bGe, &QAction::triggered, &editor, [&editor] { editor.ge(); });
         QObject::connect(bZoomIn, &QAction::triggered, &editor, [&editor] { editor.zoom(1); });
         QObject::connect(bZoomOut, &QAction::triggered, &editor, [&editor] { editor.zoom(-1); });
         QObject::connect(bZoom0, &QAction::triggered, &editor, [&editor] { editor.zoomReset(); });

@@ -144,12 +144,11 @@ public:
         m_canvas->setInk(m_dark ? QColor(255, 255, 255) : QColor(0, 0, 0));
         m_brushSize = m_baseSize * BRUSH_SCALE;
         m_canvas->setBrushWidth(m_brushSize);
-        connect(verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int) {
+        const auto syncInkOffset = [this](int) {
             m_canvas->setScrollOffset(QPointF(horizontalScrollBar()->value(), verticalScrollBar()->value()));
-        });
-        connect(horizontalScrollBar(), &QScrollBar::valueChanged, this, [this](int) {
-            m_canvas->setScrollOffset(QPointF(horizontalScrollBar()->value(), verticalScrollBar()->value()));
-        });
+        };
+        connect(verticalScrollBar(), &QScrollBar::valueChanged, this, syncInkOffset);
+        connect(horizontalScrollBar(), &QScrollBar::valueChanged, this, syncInkOffset);
 
         applyScheme();
         applyZoom();
@@ -194,6 +193,88 @@ public:
         beginInkSession();
         m_canvas->clearAll();
         endInkSession();
+    }
+
+    // 言：选中（或当前）每一行头尾加「」，批量校对打钩；空行跳过；
+    // 一次编辑块 = 一步撤销；之后整段保持选中（配合「隔」连续操作）。
+    void yan()
+    {
+        QTextDocument *doc = document();
+        if (doc->isEmpty())
+            return;
+        QTextCursor c = textCursor();
+        const int selStart = c.selectionStart();
+        const int selEnd = c.selectionEnd();
+        QTextBlock first = doc->findBlock(selStart);
+        QTextBlock last = doc->findBlock(selEnd);
+        if (last.position() == selEnd && last != first)
+            last = last.previous(); // 选区恰在行首结束：上一行才是最后受影响行
+        // 先收集行头尾，再自下而上插入（位置恒有效）
+        struct Span {
+            int start;
+            int end; // 行尾换行符的位置（在其前插入」）
+            bool empty;
+        };
+        QVector<Span> spans;
+        for (QTextBlock b = first;; b = b.next()) {
+            spans.append({b.position(), b.position() + b.length() - 1, b.length() <= 1});
+            if (b == last)
+                break;
+        }
+        int wrapped = 0;
+        c.beginEditBlock();
+        for (int i = spans.size() - 1; i >= 0; --i) {
+            if (spans.at(i).empty)
+                continue;
+            c.setPosition(spans.at(i).end);
+            c.insertText(QStringLiteral("」"));
+            c.setPosition(spans.at(i).start);
+            c.insertText(QStringLiteral("「"));
+            ++wrapped;
+        }
+        c.endEditBlock();
+        if (wrapped == 0)
+            return;
+        c.setPosition(spans.first().start);
+        c.setPosition(spans.last().end + 2 * wrapped, QTextCursor::KeepAnchor);
+        setTextCursor(c);
+        wakeCaret();
+    }
+
+    // 隔：选中（或当前）块的上、下一行各补一个空行；已是空行则不补（幂等）；
+    // 一步撤销；之后内容块保持选中。
+    void ge()
+    {
+        QTextDocument *doc = document();
+        if (doc->isEmpty())
+            return;
+        QTextCursor c = textCursor();
+        const int selStart = c.selectionStart();
+        const int selEnd = c.selectionEnd();
+        QTextBlock first = doc->findBlock(selStart);
+        QTextBlock last = doc->findBlock(selEnd);
+        if (last.position() == selEnd && last != first)
+            last = last.previous();
+        const bool aboveNeeds = first.position() > 0 && first.previous().length() > 1;
+        const bool belowNeeds = last.next().isValid() && last.next().length() > 1;
+        if (!aboveNeeds && !belowNeeds)
+            return;
+        c.beginEditBlock();
+        if (belowNeeds) { // 先下后上：低位置不受高位插入影响
+            c.setPosition(last.position() + last.length() - 1);
+            c.insertText(QStringLiteral("\n"));
+        }
+        if (aboveNeeds) {
+            // 插在上一行的换行符处：若插在本块首会分裂本块，QTextBlock 句柄
+            // 随之指向新空块（选区漂移）；插上行尾则本块句柄全程有效
+            c.setPosition(first.position() - 1);
+            c.insertText(QStringLiteral("\n"));
+        }
+        c.endEditBlock();
+        c.setPosition(first.position());
+        c.setPosition(last.position() + last.length() - 1, QTextCursor::KeepAnchor);
+        setTextCursor(c);
+        wakeCaret();
     }
 
     void undoAll()
@@ -711,6 +792,95 @@ public:
             }
             e.brushDefault();
         }
+        // 言：选中多行头尾批量加「」（空行跳过），一步撤销，整段保持选中
+        {
+            e.setPlainText(QStringLiteral("甲一\n乙二\n\n丙三\n"));
+            e.selectAll();
+            e.yan();
+            if (e.toPlainText() != QStringLiteral("「甲一」\n「乙二」\n\n「丙三」\n")) {
+                qWarning("selftest FAIL: yan() got [%s]", qPrintable(e.toPlainText()));
+                return false;
+            }
+            if (e.textCursor().selectionStart() != 0
+                || e.textCursor().selectionEnd() != 15) { // 「丙三」」之后、末行换行之前
+                qWarning("selftest FAIL: yan() selection not covering wrapped region (%d,%d)",
+                         e.textCursor().selectionStart(), e.textCursor().selectionEnd());
+                return false;
+            }
+            QKeyEvent kz(QEvent::KeyPress, Qt::Key_Z, Qt::ControlModifier);
+            QApplication::sendEvent(&e, &kz);
+            if (e.toPlainText() != QStringLiteral("甲一\n乙二\n\n丙三\n")) {
+                qWarning("selftest FAIL: yan() not undone in one step");
+                return false;
+            }
+        }
+        // 隔：选中块上下补空行（幂等），一步撤销，文档头尾不越界
+        {
+            e.setPlainText(QStringLiteral("甲一\n乙二\n丙三\n"));
+            QTextBlock bMid = e.document()->findBlockByNumber(1);
+            QTextCursor cc(e.document());
+            cc.setPosition(bMid.position());
+            cc.setPosition(bMid.position() + bMid.length() - 1, QTextCursor::KeepAnchor);
+            e.setTextCursor(cc);
+            e.ge();
+            if (e.toPlainText() != QStringLiteral("甲一\n\n乙二\n\n丙三\n")) {
+                qWarning("selftest FAIL: ge() got [%s]", qPrintable(e.toPlainText()));
+                return false;
+            }
+            e.ge(); // 幂等：已是空行，不再加
+            if (e.toPlainText() != QStringLiteral("甲一\n\n乙二\n\n丙三\n")) {
+                qWarning("selftest FAIL: ge() not idempotent, got [%s]", qPrintable(e.toPlainText()));
+                return false;
+            }
+            if (e.textCursor().selectionStart() != 4
+                || e.textCursor().selectionEnd() != 6) {
+                qWarning("selftest FAIL: ge() selection lost the block (%d,%d)",
+                         e.textCursor().selectionStart(), e.textCursor().selectionEnd());
+                return false;
+            }
+            QKeyEvent kz(QEvent::KeyPress, Qt::Key_Z, Qt::ControlModifier);
+            QApplication::sendEvent(&e, &kz);
+            if (e.toPlainText() != QStringLiteral("甲一\n乙二\n丙三\n")) {
+                qWarning("selftest FAIL: ge() not undone in one step");
+                return false;
+            }
+            e.selectAll();
+            e.ge(); // 全选：文首无上行、文末空块已空 → 不越界不新增
+            if (e.toPlainText() != QStringLiteral("甲一\n乙二\n丙三\n")) {
+                qWarning("selftest FAIL: ge() at document edges changed text");
+                return false;
+            }
+        }
+        // 言/隔 快捷键通道（Ctrl+L / Ctrl+G）
+        {
+            e.setPlainText(QStringLiteral("丁四\n"));
+            e.moveCursor(QTextCursor::Start);
+            QKeyEvent kl(QEvent::KeyPress, Qt::Key_L, Qt::ControlModifier);
+            QApplication::sendEvent(&e, &kl);
+            if (e.toPlainText() != QStringLiteral("「丁四」\n")) {
+                qWarning("selftest FAIL: Ctrl+L did not call yan()");
+                return false;
+            }
+            // Ctrl+G：文首无上行、文末空块已空 → 语义正确的不动（且不崩溃）
+            QKeyEvent kg(QEvent::KeyPress, Qt::Key_G, Qt::ControlModifier);
+            QApplication::sendEvent(&e, &kg);
+            if (e.toPlainText() != QStringLiteral("「丁四」\n")) {
+                qWarning("selftest FAIL: Ctrl+G at document edge changed text");
+                return false;
+            }
+            // 中间行的 Ctrl+G 才补空行
+            e.setPlainText(QStringLiteral("甲\n乙\n丙\n"));
+            const QTextBlock bm = e.document()->findBlockByNumber(1);
+            QTextCursor cc2(e.document());
+            cc2.setPosition(bm.position());
+            e.setTextCursor(cc2);
+            QKeyEvent kg2(QEvent::KeyPress, Qt::Key_G, Qt::ControlModifier);
+            QApplication::sendEvent(&e, &kg2);
+            if (e.toPlainText() != QStringLiteral("甲\n\n乙\n\n丙\n")) {
+                qWarning("selftest FAIL: Ctrl+G on middle line got [%s]", qPrintable(e.toPlainText()));
+                return false;
+            }
+        }
         return true;
     }
 
@@ -750,6 +920,12 @@ protected:
         aBian->setCheckable(true);
         aBian->setChecked(m_codeMode);
         connect(aBian, &QAction::triggered, this, [this] { toggleCodeMode(); });
+
+        // 文本格式化：批量校对搭档（言打钩、隔留白），列于编之下
+        QAction *aYan = menu.addAction(QStringLiteral("言"));
+        QAction *aGe = menu.addAction(QStringLiteral("隔"));
+        connect(aYan, &QAction::triggered, this, [this] { yan(); });
+        connect(aGe, &QAction::triggered, this, [this] { ge(); });
 
         menu.exec(event->globalPos());
     }
@@ -819,6 +995,12 @@ protected:
                 return;
             case Qt::Key_B:
                 toggleCodeMode(); // 编：编织代码（与涂/擦可叠加）
+                return;
+            case Qt::Key_L:
+                yan(); // 言：L 是「」折角；行头尾批量加「」
+                return;
+            case Qt::Key_G:
+                ge(); // 隔：G 即 gap（隔/间距）；选中块上下补空行
                 return;
             case Qt::Key_I:
                 setDark(true); // 阴：I 如冰（阴冷）
@@ -1015,10 +1197,7 @@ protected:
                 const auto *me = static_cast<QMouseEvent *>(event);
                 if (me->button() == Qt::LeftButton
                     && posOf(me).x() >= qreal(viewport()->width()) - EDGE_CLICK_ZONE) {
-                    QTextCursor c(document());
-                    c.setPosition(lineEndForY(posOf(me)));
-                    setTextCursor(c);
-                    wakeCaret();
+                    placeCaretAtLineEnd(posOf(me));
                     return true;
                 }
             }
@@ -1260,28 +1439,28 @@ private:
         m_holdTimer.start(m_holdInterval);
     }
 
+    // 笔刷口径唯一入口：钳制 + 画布同步 + 足迹随动
+    void setBrushSize(qreal w)
+    {
+        m_brushSize = std::clamp<qreal>(w, 2, 1024);
+        m_canvas->setBrushWidth(m_brushSize);
+        updateModeCursor();
+    }
+
     void brushStep(int dir)
     {
         const int step = std::max(1, int(std::lround(m_brushSize * 0.1)));
-        m_brushSize = std::clamp<qreal>(m_brushSize + dir * step, 2, 1024);
-        m_canvas->setBrushWidth(m_brushSize);
-        if (m_mode == Mode::Draw || m_mode == Mode::Erase)
-            updateModeCursor();
+        setBrushSize(m_brushSize + dir * step);
     }
 
     void brushScale(qreal factor)
     {
-        m_brushSize = std::clamp<qreal>(m_brushSize * factor, 2, 1024);
-        m_canvas->setBrushWidth(m_brushSize);
-        updateModeCursor(); // 足迹随动
+        setBrushSize(m_brushSize * factor);
     }
 
     void brushReset()
     {
-        m_brushSize = m_baseSize * BRUSH_SCALE;
-        m_canvas->setBrushWidth(m_brushSize);
-        if (m_mode == Mode::Draw || m_mode == Mode::Erase)
-            updateModeCursor();
+        setBrushSize(m_baseSize * BRUSH_SCALE);
     }
 
     // 模式光标：打字 I 形；涂/擦模式隐藏系统光标，
@@ -1307,6 +1486,15 @@ private:
         return p + QPointF(horizontalScrollBar()->value(), verticalScrollBar()->value());
     }
 
+    // 视口点所在视觉行的行尾落点（边缘窄带点击与轨道点击共用）
+    void placeCaretAtLineEnd(const QPointF &vpPos)
+    {
+        QTextCursor c(document());
+        c.setPosition(lineEndForY(vpPos));
+        setTextCursor(c);
+        wakeCaret();
+    }
+
     // 滚动条轨道上的左键让位给文字：点最右缘 = 光标落该视觉行行尾，点最下缘 = 光标落文末。
     void placeCaretAtEdge(bool vertical, const QPoint &pos)
     {
@@ -1320,11 +1508,7 @@ private:
             wakeCaret();
             return;
         }
-        const QPointF vpPos(qreal(vp->width()) - 1.0, qreal(qMin(pos.y(), vp->height() - 1)));
-        QTextCursor c(document());
-        c.setPosition(lineEndForY(vpPos));
-        setTextCursor(c);
-        wakeCaret();
+        placeCaretAtLineEnd(QPointF(qreal(vp->width()) - 1.0, qreal(qMin(pos.y(), vp->height() - 1))));
     }
 
     // 视口点所在视觉行的行尾位置（文档坐标）。
