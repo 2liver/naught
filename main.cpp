@@ -20,6 +20,7 @@
 #include <QGraphicsOpacityEffect>
 #include <QIcon>
 #include <QKeyEvent>
+#include <QKeySequence>
 #include <QLineF>
 #include <QMenu>
 #include <QMouseEvent>
@@ -589,7 +590,9 @@ protected:
     {
         QMenu menu(this);
         QAction *aMo = menu.addAction(QStringLiteral("摹"));
+        aMo->setShortcut(QKeySequence(QStringLiteral("Ctrl+S")));
         QAction *aKong = menu.addAction(QStringLiteral("空"));
+        aKong->setShortcut(QKeySequence(QStringLiteral("Ctrl+N")));
         menu.addSeparator();
         QAction *aYin = menu.addAction(QStringLiteral("阴"));
         QAction *aYang = menu.addAction(QStringLiteral("阳"));
@@ -605,8 +608,11 @@ protected:
 
         menu.addSeparator();
         QAction *aTu = menu.addAction(QStringLiteral("涂"));
+        aTu->setShortcut(QKeySequence(QStringLiteral("Ctrl+D")));
         QAction *aCa = menu.addAction(QStringLiteral("擦"));
+        aCa->setShortcut(QKeySequence(QStringLiteral("Ctrl+E")));
         QAction *aXiao = menu.addAction(QStringLiteral("消"));
+        aXiao->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+E")));
         aTu->setCheckable(true);
         aCa->setCheckable(true);
         aTu->setChecked(m_mode == Mode::Draw);
