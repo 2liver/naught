@@ -55,7 +55,27 @@ public:
         update();
     }
 
-    void setBrushWidth(qreal w) { m_brush = w; }
+    void setBrushWidth(qreal w)
+    {
+        m_brush = w;
+        update(); // 足迹圆随笔刷实时刷新
+    }
+
+    void setFootprint(bool visible, const QPointF &pos, bool erase)
+    {
+        m_fpVisible = visible;
+        m_fpPos = pos;
+        m_fpErase = erase;
+        update();
+    }
+
+    void setFootprintVisible(bool visible)
+    {
+        if (m_fpVisible == visible)
+            return;
+        m_fpVisible = visible;
+        update();
+    }
 
     void setScrollOffset(const QPointF &o)
     {
@@ -152,10 +172,27 @@ protected:
 
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
+        p.save();
         p.translate(-m_offset);
         for (const Stroke &s : m_strokes)
             drawStroke(p, s.pts, s.width);
         drawStroke(p, m_active.pts, m_active.width);
+        p.restore();
+
+        // 画笔足迹：视口坐标（不随滚动），尺寸=真实口径，无系统光标尺寸上限
+        if (m_fpVisible) {
+            const qreal d = m_fpErase ? m_brush * 1.4 : m_brush;
+            if (m_fpErase) {
+                const qreal stroke = std::clamp<qreal>(d * 0.08, 1.5, 8.0);
+                p.setPen(QPen(m_ink, stroke));
+                p.setBrush(Qt::NoBrush);
+                p.drawEllipse(m_fpPos, d / 2 - 1, d / 2 - 1);
+            } else {
+                p.setPen(Qt::NoPen);
+                p.setBrush(m_ink);
+                p.drawEllipse(m_fpPos, d / 2, d / 2);
+            }
+        }
     }
 
 private:
@@ -199,6 +236,9 @@ private:
     QPointF m_offset;
     QVector<Stroke> m_strokes;
     Stroke m_active;
+    bool m_fpVisible = false;
+    bool m_fpErase = false;
+    QPointF m_fpPos;
 };
 
 // 自绘滚动条：命中区恒为 18px（从任何一侧都容易接近），
@@ -325,6 +365,7 @@ public:
         setHorizontalScrollBar(hsb);
 
         viewport()->installEventFilter(this);
+        viewport()->setMouseTracking(true);
         verticalScrollBar()->installEventFilter(this);
         horizontalScrollBar()->installEventFilter(this);
 
@@ -708,6 +749,26 @@ protected:
             return true;
         }
         if (watched == viewport()) {
+            // 记录指针位置（画笔足迹用，所有模式都跟踪）
+            if (event->type() == QEvent::MouseMove) {
+                const auto *me = static_cast<QMouseEvent *>(event);
+                m_lastMouse = me->position();
+                if (m_mode != Mode::Normal) {
+                    m_canvas->setFootprint(true, m_lastMouse, m_mode == Mode::Erase);
+                    if (me->buttons() & Qt::LeftButton) {
+                        const QPointF doc = viewportPosToDoc(me->position());
+                        if (m_mode == Mode::Draw)
+                            m_canvas->extendStroke(doc);
+                        else
+                            m_canvas->eraseAt(doc);
+                    }
+                    return true; // 模式内移动不打扰文本
+                }
+            }
+            if (event->type() == QEvent::Leave && m_mode != Mode::Normal) {
+                m_canvas->endStroke(); // 拖出窗口时收笔
+                m_canvas->setFootprintVisible(false);
+            }
             // 涂/擦模式：左键在画布层作画或擦除，文本光标不随点击移动
             if (m_mode != Mode::Normal) {
                 if (event->type() == QEvent::MouseButtonPress) {
@@ -716,16 +777,6 @@ protected:
                         const QPointF doc = viewportPosToDoc(me->position());
                         if (m_mode == Mode::Draw)
                             m_canvas->beginStroke(doc);
-                        else
-                            m_canvas->eraseAt(doc);
-                        return true;
-                    }
-                } else if (event->type() == QEvent::MouseMove) {
-                    const auto *me = static_cast<QMouseEvent *>(event);
-                    if (me->buttons() & Qt::LeftButton) {
-                        const QPointF doc = viewportPosToDoc(me->position());
-                        if (m_mode == Mode::Draw)
-                            m_canvas->extendStroke(doc);
                         else
                             m_canvas->eraseAt(doc);
                         return true;
@@ -810,54 +861,22 @@ private:
             updateModeCursor();
     }
 
-    // 模式光标：打字 I 形；涂 = 实心墨点；擦 = 空心圆（实/虚，与阴/阳同构）。
-    // 尺寸随笔刷：涂 = 笔刷直径，擦 = 擦除直径（1.4×），上限受系统光标尺寸约束。
+    // 模式光标：打字 I 形；涂/擦模式隐藏系统光标，
+    // 由画布层绘制足迹圆（实心墨点=笔刷直径 / 空心圆=擦除直径），
+    // 不受系统光标尺寸上限约束，任何缩放下口径都真实可见。
     void updateModeCursor()
     {
         QWidget *vp = viewport();
         if (m_mode == Mode::Normal) {
             vp->unsetCursor();
+            m_canvas->setFootprintVisible(false);
             return;
         }
-        const QColor ink = m_dark ? QColor(255, 255, 255) : QColor(0, 0, 0);
-        const qreal dpr = vp->devicePixelRatioF();
-        if (m_mode == Mode::Draw)
-            vp->setCursor(makeDotCursor(ink, dpr, m_brushSize));
-        else
-            vp->setCursor(makeRingCursor(ink, dpr, m_brushSize * 1.4));
-    }
-
-    static qreal cursorMax(qreal dpr) { return qMin(200.0, 256.0 / dpr); }
-
-    static QCursor makeDotCursor(const QColor &ink, qreal dpr, qreal diameter)
-    {
-        const qreal d = std::clamp<qreal>(diameter, 6.0, cursorMax(dpr));
-        const qreal W = d + 4;
-        QPixmap pm(qMax(12, qRound(W * dpr)), qMax(12, qRound(W * dpr)));
-        pm.setDevicePixelRatio(dpr);
-        pm.fill(Qt::transparent);
-        QPainter p(&pm);
-        p.setRenderHint(QPainter::Antialiasing);
-        p.setPen(Qt::NoPen);
-        p.setBrush(ink);
-        p.drawEllipse(QPointF(W / 2, W / 2), d / 2, d / 2);
-        return QCursor(pm, qRound(W / 2), qRound(W / 2));
-    }
-
-    static QCursor makeRingCursor(const QColor &ink, qreal dpr, qreal diameter)
-    {
-        const qreal d = std::clamp<qreal>(diameter, 8.0, cursorMax(dpr));
-        const qreal stroke = std::clamp<qreal>(d * 0.08, 1.5, 8.0);
-        const qreal W = d + 8;
-        QPixmap pm(qMax(16, qRound(W * dpr)), qMax(16, qRound(W * dpr)));
-        pm.setDevicePixelRatio(dpr);
-        pm.fill(Qt::transparent);
-        QPainter p(&pm);
-        p.setRenderHint(QPainter::Antialiasing);
-        p.setBrush(Qt::NoBrush);
-        p.setPen(QPen(ink, stroke));
-        p.drawEllipse(QPointF(W / 2, W / 2), d / 2 - 1, d / 2 - 1);
-        return QCursor(pm, qRound(W / 2), qRound(W / 2));
+        vp->setCursor(Qt::BlankCursor);
+        QPointF pos = m_lastMouse;
+        if (pos.x() < 0)
+            pos = QPointF(vp->width() / 2.0, vp->height() / 2.0);
+        m_canvas->setFootprint(true, pos, m_mode == Mode::Erase);
     }
 
     QPointF viewportPosToDoc(const QPointF &p) const
@@ -951,6 +970,7 @@ private:
     Canvas *m_canvas = nullptr;
     Mode m_mode = Mode::Normal;
     qreal m_brushSize = 20.0;
+    QPointF m_lastMouse = QPointF(-1, -1);
 
     static constexpr int BLINK_HALF_MS = 750; // 亮/灭各 750ms，一次“长闪烁”1.5s
     static constexpr int SLEEP_BLINKS = 1;    // 完整闪烁次数；改成 2 则休眠前闪两次
