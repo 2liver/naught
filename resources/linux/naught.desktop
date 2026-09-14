@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=無
+Name[en]=Naught
+Comment=Write in vain.
+Exec=naught
+Icon=naught
+Terminal=false
+Categories=Utility;TextEditor;
