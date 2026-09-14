@@ -1,0 +1,94 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            cmake_args: -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64"
+          - os: windows-latest
+            cmake_args: ""
+          - os: ubuntu-latest
+            cmake_args: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.9.3"
+          cache: true
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release ${{ matrix.cmake_args }}
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Selftest (macOS)
+        if: runner.os == 'macOS'
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: ./build/naught.app/Contents/MacOS/naught --selftest
+
+      - name: Selftest (Linux)
+        if: runner.os == 'Linux'
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: ./build/naught --selftest
+
+      - name: Selftest (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: .\build\Release\naught.exe --selftest
+
+      - name: Package macOS (zip + dmg)
+        if: runner.os == 'macOS'
+        run: |
+          macdeployqt build/naught.app
+          ditto -c -k --keepParent build/naught.app naught-macos.zip
+          hdiutil create -volname "naught" -srcfolder build/naught.app -ov -format UDZO naught-macos.dmg
+
+      - name: Package Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          windeployqt build\Release\naught.exe
+          Compress-Archive -Path build\Release\* -DestinationPath naught-windows.zip
+
+      - name: Package Linux (AppImage)
+        if: runner.os == 'Linux'
+        run: |
+          wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          wget -q https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
+          chmod +x linuxdeploy*.AppImage
+          export APPIMAGE_EXTRACT_AND_RUN=1
+          ./linuxdeploy-x86_64.AppImage --appdir AppDir --executable build/naught \
+            --desktop-file resources/linux/naught.desktop --icon-file resources/icons/naught.png \
+            --plugin qt --output appimage
+          mv ./*.AppImage naught-linux.AppImage
+
+      - name: Publish release (tag only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            naught-macos.dmg
+            naught-macos.zip
+            naught-windows.zip
+            naught-linux.AppImage
+          fail_on_unmatched_files: false
