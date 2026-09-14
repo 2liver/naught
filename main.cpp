@@ -20,9 +20,12 @@
 #include <QGraphicsOpacityEffect>
 #include <QIcon>
 #include <QKeyEvent>
+#include <QLineF>
 #include <QMenu>
+#include <QMouseEvent>
 #include <QNativeGestureEvent>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPalette>
 #include <QPlainTextEdit>
 #include <QScrollBar>
@@ -32,6 +35,157 @@
 #include <QTextDocument>
 #include <QTimer>
 #include <QWheelEvent>
+
+// 画布层：独立于文本，浮于文字之上。笔迹存文档坐标——随滚动平移、
+// 不随缩放变化；颜色随阴/阳（与文字同命运）；事件全部穿透（由 Editor 转发）。
+class Canvas : public QWidget {
+public:
+    explicit Canvas(QWidget *parent)
+        : QWidget(parent)
+    {
+        setAttribute(Qt::WA_TransparentForMouseEvents);
+        setAttribute(Qt::WA_NoSystemBackground);
+        setAutoFillBackground(false);
+    }
+
+    void setInk(const QColor &c)
+    {
+        m_ink = c;
+        update();
+    }
+
+    void setBrushWidth(qreal w) { m_brush = w; }
+
+    void setScrollOffset(const QPointF &o)
+    {
+        m_offset = o;
+        update();
+    }
+
+    void beginStroke(const QPointF &docPos)
+    {
+        m_active.clear();
+        m_active.append(docPos);
+        update();
+    }
+
+    void extendStroke(const QPointF &docPos)
+    {
+        if (m_active.isEmpty())
+            return;
+        if (QLineF(m_active.last(), docPos).length() >= 2.0) {
+            m_active.append(docPos);
+            update();
+        }
+    }
+
+    void endStroke()
+    {
+        if (m_active.isEmpty())
+            return;
+        m_strokes.append(m_active);
+        m_active.clear();
+    }
+
+    void eraseAt(const QPointF &c)
+    {
+        const qreal r = m_brush * 1.4;
+        bool changed = false;
+        for (int i = m_strokes.size() - 1; i >= 0; --i) {
+            const QVector<QPointF> pts = m_strokes.at(i);
+            if (pts.size() == 1) {
+                if (QLineF(pts.at(0), c).length() <= r) {
+                    m_strokes.removeAt(i);
+                    changed = true;
+                }
+                continue;
+            }
+            QVector<bool> keep(pts.size(), true);
+            for (int j = 0; j + 1 < pts.size(); ++j) {
+                if (segDist(pts.at(j), pts.at(j + 1), c) <= r) {
+                    keep[j] = false;
+                    keep[j + 1] = false;
+                }
+            }
+            QVector<QVector<QPointF>> pieces;
+            QVector<QPointF> run;
+            bool removed = false;
+            for (int j = 0; j < pts.size(); ++j) {
+                if (keep.at(j)) {
+                    run.append(pts.at(j));
+                } else {
+                    removed = true;
+                    if (!run.isEmpty()) {
+                        pieces.append(run);
+                        run.clear();
+                    }
+                }
+            }
+            if (!run.isEmpty())
+                pieces.append(run);
+            if (!removed)
+                continue;
+            changed = true;
+            m_strokes.removeAt(i);
+            for (int k = int(pieces.size()) - 1; k >= 0; --k)
+                m_strokes.insert(i, pieces.at(k));
+        }
+        if (changed)
+            update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QWidget *vp = parentWidget();
+        if (vp && size() != vp->size())
+            setGeometry(vp->rect());
+
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+        p.translate(-m_offset);
+        for (const QVector<QPointF> &s : m_strokes)
+            drawStroke(p, s);
+        drawStroke(p, m_active);
+    }
+
+private:
+    static qreal segDist(const QPointF &a, const QPointF &b, const QPointF &c)
+    {
+        const QPointF ab = b - a;
+        const qreal len2 = QPointF::dotProduct(ab, ab);
+        if (len2 <= 0)
+            return QLineF(a, c).length();
+        const qreal t = std::clamp<qreal>(QPointF::dotProduct(c - a, ab) / len2, 0.0, 1.0);
+        return QLineF(a + t * ab, c).length();
+    }
+
+    void drawStroke(QPainter &p, const QVector<QPointF> &pts) const
+    {
+        if (pts.isEmpty())
+            return;
+        if (pts.size() == 1) {
+            p.setPen(Qt::NoPen);
+            p.setBrush(m_ink);
+            p.drawEllipse(pts.at(0), m_brush / 2.0, m_brush / 2.0);
+            return;
+        }
+        QPainterPath path;
+        path.moveTo(pts.at(0));
+        for (int i = 1; i < pts.size(); ++i)
+            path.lineTo(pts.at(i));
+        QPen pen(m_ink, m_brush, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+        p.setPen(pen);
+        p.setBrush(Qt::NoBrush);
+        p.drawPath(path);
+    }
+
+    QColor m_ink = QColor(0, 0, 0);
+    qreal m_brush = 20.0;
+    QPointF m_offset;
+    QVector<QVector<QPointF>> m_strokes;
+    QVector<QPointF> m_active;
+};
 
 // 自绘滚动条：命中区恒为 18px（从任何一侧都容易接近），
 // 闲置时把手 10px、悬停时长满 18px。QSS 无法控制把手宽度（实测），故自绘。
@@ -180,6 +334,18 @@ public:
         connect(hsb, &ZenScrollBar::hovered, this, [this](bool on) { if (on) scrollActivity(); });
         m_scrollHideTimer.start(1500);
 
+        // 画布层（涂/擦）：笔迹随滚动平移，颜色随阴/阳，笔刷随字号
+        m_canvas = new Canvas(viewport());
+        m_canvas->show();
+        m_canvas->setInk(m_dark ? QColor(255, 255, 255) : QColor(0, 0, 0));
+        m_canvas->setBrushWidth(m_size * BRUSH_SCALE);
+        connect(verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int) {
+            m_canvas->setScrollOffset(QPointF(horizontalScrollBar()->value(), verticalScrollBar()->value()));
+        });
+        connect(horizontalScrollBar(), &QScrollBar::valueChanged, this, [this](int) {
+            m_canvas->setScrollOffset(QPointF(horizontalScrollBar()->value(), verticalScrollBar()->value()));
+        });
+
         applyScheme();
         applyZoom();
     }
@@ -209,6 +375,13 @@ public:
             return;
         m_dark = dark;
         applyScheme();
+    }
+
+    enum class Mode { Normal, Draw, Erase };
+
+    void toggleMode(Mode m)
+    {
+        m_mode = (m_mode == m) ? Mode::Normal : m;
     }
 
     void zoom(int delta)
@@ -264,6 +437,16 @@ protected:
         connect(aYin, &QAction::triggered, this, [this] { setDark(true); });
         connect(aYang, &QAction::triggered, this, [this] { setDark(false); });
 
+        menu.addSeparator();
+        QAction *aTu = menu.addAction(QStringLiteral("涂"));
+        QAction *aCa = menu.addAction(QStringLiteral("擦"));
+        aTu->setCheckable(true);
+        aCa->setCheckable(true);
+        aTu->setChecked(m_mode == Mode::Draw);
+        aCa->setChecked(m_mode == Mode::Erase);
+        connect(aTu, &QAction::triggered, this, [this] { toggleMode(Mode::Draw); });
+        connect(aCa, &QAction::triggered, this, [this] { toggleMode(Mode::Erase); });
+
         menu.exec(event->globalPos());
     }
 
@@ -276,6 +459,10 @@ protected:
     void keyPressEvent(QKeyEvent *event) override
     {
         wakeCaret();
+        if (event->key() == Qt::Key_Escape && m_mode != Mode::Normal) {
+            m_mode = Mode::Normal;
+            return;
+        }
         if (event->modifiers() & (Qt::ControlModifier | Qt::MetaModifier)) {
             switch (event->key()) {
             case Qt::Key_S:
@@ -283,6 +470,12 @@ protected:
                 return;
             case Qt::Key_N:
                 kong();
+                return;
+            case Qt::Key_D:
+                toggleMode(Mode::Draw);
+                return;
+            case Qt::Key_E:
+                toggleMode(Mode::Erase);
                 return;
             case Qt::Key_Equal:
             case Qt::Key_Plus:
@@ -390,6 +583,37 @@ protected:
             return true;
         }
         if (watched == viewport()) {
+            // 涂/擦模式：左键在画布层作画或擦除，文本光标不随点击移动
+            if (m_mode != Mode::Normal) {
+                if (event->type() == QEvent::MouseButtonPress) {
+                    const auto *me = static_cast<QMouseEvent *>(event);
+                    if (me->button() == Qt::LeftButton) {
+                        const QPointF doc = viewportPosToDoc(me->position());
+                        if (m_mode == Mode::Draw)
+                            m_canvas->beginStroke(doc);
+                        else
+                            m_canvas->eraseAt(doc);
+                        return true;
+                    }
+                } else if (event->type() == QEvent::MouseMove) {
+                    const auto *me = static_cast<QMouseEvent *>(event);
+                    if (me->buttons() & Qt::LeftButton) {
+                        const QPointF doc = viewportPosToDoc(me->position());
+                        if (m_mode == Mode::Draw)
+                            m_canvas->extendStroke(doc);
+                        else
+                            m_canvas->eraseAt(doc);
+                        return true;
+                    }
+                } else if (event->type() == QEvent::MouseButtonRelease) {
+                    const auto *me = static_cast<QMouseEvent *>(event);
+                    if (me->button() == Qt::LeftButton) {
+                        if (m_mode == Mode::Draw)
+                            m_canvas->endStroke();
+                        return true;
+                    }
+                }
+            }
             // 点击/滚轮都唤醒光标（睡眠隐喻：无动静则隐去）
             if (event->type() == QEvent::MouseButtonPress
                 || event->type() == QEvent::MouseButtonRelease
@@ -420,6 +644,8 @@ private:
             v->setDark(m_dark);
         if (auto *h = qobject_cast<ZenScrollBar *>(horizontalScrollBar()))
             h->setDark(m_dark);
+        if (m_canvas)
+            m_canvas->setInk(m_dark ? QColor(255, 255, 255) : QColor(0, 0, 0));
     }
 
     void applyZoom()
@@ -430,6 +656,8 @@ private:
         document()->setDefaultFont(f);
         document()->markContentsDirty(0, document()->characterCount());
         setFont(f);
+        if (m_canvas)
+            m_canvas->setBrushWidth(m_size * BRUSH_SCALE);
     }
 
     void startHold(int dir)
@@ -437,6 +665,11 @@ private:
         m_holdDir = dir;
         m_holdInterval = 70;
         m_holdTimer.start(m_holdInterval);
+    }
+
+    QPointF viewportPosToDoc(const QPointF &p) const
+    {
+        return p + QPointF(horizontalScrollBar()->value(), verticalScrollBar()->value());
     }
 
     void wakeCaret()
@@ -478,11 +711,14 @@ private:
     QGraphicsOpacityEffect *m_hFade = nullptr;
     qreal m_fadeOpacity = 1.0;
     qreal m_pinchSmooth = 0.0;
+    Canvas *m_canvas = nullptr;
+    Mode m_mode = Mode::Normal;
 
     static constexpr int BLINK_HALF_MS = 750; // 亮/灭各 750ms，一次“长闪烁”1.5s
     static constexpr int SLEEP_BLINKS = 1;    // 完整闪烁次数；改成 2 则休眠前闪两次
     static constexpr qreal PINCH_GAIN = 1.4;  // 捏合增量增益：边缘弱增量也够用
     static constexpr qreal PINCH_SMOOTH_A = 0.5; // 指数平滑系数：滤抖
+    static constexpr qreal BRUSH_SCALE = 1.5; // 笔刷直径 = 1.5 × 字号
 };
 
 int main(int argc, char **argv)
