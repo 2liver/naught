@@ -29,8 +29,11 @@ QSize LineNumberArea::sizeHint() const
 void LineNumberArea::paintEvent(QPaintEvent *event)
 {
     QPainter painter(this);
-    painter.setPen(m_editor->isDark() ? QColor(0x6a, 0x6a, 0x6a) : QColor(0xb0, 0xb0, 0xb0));
-    painter.setFont(m_editor->codeFont());
+    painter.setPen(m_editor->crtOn()
+                       ? Crt::kInkDim
+                       : (m_editor->isDark() ? QColor(0x6a, 0x6a, 0x6a)
+                                             : QColor(0xb0, 0xb0, 0xb0)));
+    painter.setFont(m_editor->displayFont());
     const QFontMetricsF fm(painter.font());
     const qreal rightEdge = width() - 6.0;
 

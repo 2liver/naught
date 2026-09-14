@@ -45,6 +45,7 @@
 #endif
 
 #include "canvas.h"
+#include "crt.h"
 #include "line_number_area.h"
 #include "zen_scroll_bar.h"
 
@@ -64,6 +65,16 @@ public:
         if (m_baseSize <= 0)
             m_baseSize = 12;
         m_size = m_baseSize;
+
+        // 磷光像素字体：随 qrc 捆绑（OFL），一次加载终身可用
+        if (s_crtFamily.isEmpty()) {
+            const int id = QFontDatabase::addApplicationFont(
+                QStringLiteral(":/fonts/fusion-pixel-12px-monospaced-zh_hans.ttf"));
+            if (id >= 0 && !QFontDatabase::applicationFontFamilies(id).isEmpty())
+                s_crtFamily = QFontDatabase::applicationFontFamilies(id).first();
+        }
+        m_crtFont = QFont(s_crtFamily);
+        m_crtFont.setStyleStrategy(QFont::NoAntialias); // 像素栅格，不模糊
 
 #if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
         m_dark = QGuiApplication::styleHints()->colorScheme() == Qt::ColorScheme::Dark;
@@ -111,6 +122,8 @@ public:
             // 行号区：文档一变立即重绘，否则清空/换行不会刷新（假行号）
             m_canvas->update();
             updateGutterWidth();
+            if (m_crtBackdrop)
+                m_crtBackdrop->invalidateGlow();
         });
         wakeCaret();
 
@@ -146,6 +159,8 @@ public:
         m_canvas->setBrushWidth(m_brushSize);
         const auto syncInkOffset = [this](int) {
             m_canvas->setScrollOffset(QPointF(horizontalScrollBar()->value(), verticalScrollBar()->value()));
+            if (m_crtBackdrop)
+                m_crtBackdrop->update(); // 辉光层随滚动重排
         };
         connect(verticalScrollBar(), &QScrollBar::valueChanged, this, syncInkOffset);
         connect(horizontalScrollBar(), &QScrollBar::valueChanged, this, syncInkOffset);
@@ -338,6 +353,8 @@ public:
         f.setPointSizeF(m_size);
         return f;
     }
+    // 行号区用的显示字体：编=等宽，显=像素磷光（其余同文字）
+    QFont displayFont() const { return activeFont(); }
     qreal brushSize() const { return m_brushSize; }
 
     void brushUp() { brushStep(+1); }
@@ -351,6 +368,40 @@ public:
     }
 
     bool codeMode() const { return m_codeMode; }
+    bool crtOn() const { return m_crt; }
+
+    // 显：单一琥珀磷光模式——零 UI，一键回到过去（与编、阴/阳正交可叠加）
+    void toggleCrt()
+    {
+        m_crt = !m_crt;
+        if (m_crt) {
+            if (!m_crtBackdrop) {
+                m_crtBackdrop = new CrtBackdrop(this);
+                m_crtBackdrop->stackUnder(viewport());
+            }
+            m_crtBackdrop->show();
+            if (!m_crtOverlay) {
+                m_crtOverlay = new CrtOverlay(this);
+                m_crtOverlay->stackUnder(verticalScrollBar());
+            }
+            m_crtOverlay->show();
+            m_crtOverlay->raise();
+            viewport()->setAttribute(Qt::WA_NoSystemBackground);
+            viewport()->setAutoFillBackground(false);
+            m_crtOverlay->warmUp();
+        } else {
+            viewport()->setAttribute(Qt::WA_NoSystemBackground, false);
+            viewport()->setAutoFillBackground(true);
+            if (m_crtBackdrop)
+                m_crtBackdrop->hide();
+            if (m_crtOverlay) {
+                m_crtOverlay->hide();
+                m_crtOverlay->stop();
+            }
+        }
+        applyScheme();
+        applyZoom();
+    }
 
     void toggleCodeMode()
     {
@@ -973,6 +1024,77 @@ public:
                 return false;
             }
         }
+        // 显：像素磷光模式——字体/配色/透明视口/画面，开关可逆
+        {
+            e.setPlainText(QStringLiteral("無\n"));
+            e.toggleCrt();
+            QApplication::processEvents();
+            const QString fam = e.document()->defaultFont().family();
+            if (fam.isEmpty()
+                || fam == QFontDatabase::systemFont(QFontDatabase::GeneralFont).family()
+                || e.document()->defaultFont().pixelSize() <= 0) {
+                qWarning("selftest FAIL: CRT font not applied (family=[%s])", qPrintable(fam));
+                return false;
+            }
+            if (e.palette().color(QPalette::Text) != Crt::kInk) {
+                qWarning("selftest FAIL: CRT text color not amber");
+                return false;
+            }
+            if (!e.viewport()->testAttribute(Qt::WA_NoSystemBackground)) {
+                qWarning("selftest FAIL: CRT viewport not transparent");
+                return false;
+            }
+            // 画面：文字区出现琥珀磷光像素；空区是近黑磷底（不是白）
+            // 先等暖机脉冲走完（黑幕约 0.5s 退尽），否则整屏被压黑
+            {
+                QEventLoop loop;
+                QTimer::singleShot(700, &loop, &QEventLoop::quit);
+                loop.exec();
+            }
+            QImage img(e.size(), QImage::Format_ARGB32);
+            img.fill(Qt::white);
+            e.render(&img);
+            const int g = e.viewport()->pos().x();
+            bool amber = false;
+            for (int y = 0; y < e.height() && !amber; ++y)
+                for (int x = g + 2; x < e.width() - 30 && !amber; ++x) {
+                    const QRgb px = img.pixel(x, y);
+                    if (qRed(px) > 170 && qGreen(px) > 90 && qBlue(px) < 90)
+                        amber = true;
+                }
+            if (!amber) {
+                qWarning("selftest FAIL: no amber phosphor pixels in CRT render");
+                return false;
+            }
+            const QRgb bgPx = img.pixel(g + 8, e.height() - 20); // 空行区
+            if (qRed(bgPx) > 90 || qGreen(bgPx) > 80 || qBlue(bgPx) > 60) {
+                qWarning("selftest FAIL: CRT background not dark (%d,%d,%d)",
+                         qRed(bgPx), qGreen(bgPx), qBlue(bgPx));
+                return false;
+            }
+            // 扫描线：同列相邻行底色有明暗差（信息输出，防渲染层位错）
+            auto rowMean = [&](int yMod, int x0, int x1) {
+                long sum = 0;
+                int n = 0;
+                for (int y = yMod + 4; y + 3 < e.height(); y += 3)
+                    for (int x = x0; x < x1; ++x) {
+                        sum += qGray(img.pixel(x, y));
+                        ++n;
+                    }
+                return n ? double(sum) / n : -1.0;
+            };
+            const double m0 = rowMean(0, g + 8, g + 90);
+            const double m1 = rowMean(1, g + 8, g + 90);
+            qInfo("CRT-SCANLINE rows: %f vs %f", m0, m1);
+            e.toggleCrt();
+            QApplication::processEvents();
+            if (e.viewport()->testAttribute(Qt::WA_NoSystemBackground)
+                || e.document()->defaultFont().family()
+                    != QFontDatabase::systemFont(QFontDatabase::GeneralFont).family()) {
+                qWarning("selftest FAIL: CRT toggle-off did not restore font/viewport");
+                return false;
+            }
+        }
         return true;
     }
 
@@ -1012,6 +1134,10 @@ protected:
         aBian->setCheckable(true);
         aBian->setChecked(m_codeMode);
         connect(aBian, &QAction::triggered, this, [this] { toggleCodeMode(); });
+        QAction *aXian = menu.addAction(QStringLiteral("显"));
+        aXian->setCheckable(true);
+        aXian->setChecked(m_crt);
+        connect(aXian, &QAction::triggered, this, [this] { toggleCrt(); });
 
         // 文本格式化：批量校对搭档（言打钩、隔留白），列于编之下
         QAction *aYan = menu.addAction(QStringLiteral("言"));
@@ -1093,6 +1219,9 @@ protected:
                 return;
             case Qt::Key_F:
                 ge(); // 隔：F 是"分"（分隔）的声母；逐行上下补空行
+                return;
+            case Qt::Key_T:
+                toggleCrt(); // 显：T 是 Tube / Time——显像管，回到过去
                 return;
             case Qt::Key_I:
                 setDark(true); // 阴：I 如冰（阴冷）
@@ -1337,7 +1466,14 @@ private:
     void applyScheme()
     {
         QPalette pal = palette();
-        if (m_dark) {
+        if (m_crt) {
+            // 磷光模式自成一套配色（无视阴/阳）：视口透明，透出辉光层
+            pal.setColor(QPalette::Window, Crt::kBg);
+            pal.setColor(QPalette::Base, Qt::transparent);
+            pal.setColor(QPalette::Text, Crt::kInk);
+            pal.setColor(QPalette::Highlight, QColor(0x5C, 0x3E, 0x00, 0xB0));
+            pal.setColor(QPalette::HighlightedText, Crt::kInk);
+        } else if (m_dark) {
             pal.setColor(QPalette::Window, QColor(0, 0, 0));
             pal.setColor(QPalette::Base, QColor(0, 0, 0));
             pal.setColor(QPalette::Text, QColor(255, 255, 255));
@@ -1348,12 +1484,13 @@ private:
         }
         setPalette(pal);
 
+        const bool darkish = m_dark || m_crt; // 显永远是暗底
         if (auto *v = qobject_cast<ZenScrollBar *>(verticalScrollBar()))
-            v->setDark(m_dark);
+            v->setDark(darkish);
         if (auto *h = qobject_cast<ZenScrollBar *>(horizontalScrollBar()))
-            h->setDark(m_dark);
+            h->setDark(darkish);
         if (m_canvas)
-            m_canvas->setInk(m_dark ? QColor(255, 255, 255) : QColor(0, 0, 0));
+            m_canvas->setInk(m_crt ? Crt::kInk : (m_dark ? QColor(255, 255, 255) : QColor(0, 0, 0)));
         if (m_mode != Mode::Normal)
             updateModeCursor(); // 光标跟随墨色与当前笔刷
         if (m_lineNumberArea)
@@ -1468,6 +1605,12 @@ private:
 
     QFont activeFont() const
     {
+        if (m_crt) {
+            // 像素字：整数像素号（12px 为设计原大），无抗锯齿
+            QFont f = m_crtFont;
+            f.setPixelSize(qMax(6, qRound(m_size)));
+            return f;
+        }
         QFont f = m_codeMode ? m_codeFont : m_baseFont;
         f.setPointSizeF(m_size);
         return f;
@@ -1709,6 +1852,11 @@ private:
     int m_gutterWidth = 0;
     QFont m_codeFont;
     LineNumberArea *m_lineNumberArea = nullptr;
+    bool m_crt = false;
+    CrtBackdrop *m_crtBackdrop = nullptr;
+    CrtOverlay *m_crtOverlay = nullptr;
+    QFont m_crtFont;
+    static inline QString s_crtFamily;
 #ifdef NAUGHT_WITH_HIGHLIGHT
     KSyntaxHighlighting::Repository *m_repo = nullptr;
     KSyntaxHighlighting::SyntaxHighlighter *m_hl = nullptr;

@@ -10,8 +10,10 @@ find_package(Qt6 REQUIRED COMPONENTS Widgets)
 
 qt_add_executable(naught WIN32 MACOSX_BUNDLE
     main.cpp
+    crt.cpp
     line_number_area.cpp
     canvas.h
+    crt.h
     editor.h
     line_number_area.h
     zen_scroll_bar.h

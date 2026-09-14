@@ -139,6 +139,30 @@ static bool benchmark()
     qInfo("BENCH ink-render-100-strokes: %.1f ms", ms());
     e.toggleMode(Editor::Mode::Normal);
     e.clearInk();
+
+    // 9) 显：带全套滤镜的打字/滚动/缩放开销（预算：打字≤1.5ms/键、滚动≤5ms/步）
+    e.setPlainText(big);
+    e.toggleCrt();
+    QApplication::processEvents();
+    c.restart();
+    for (int i = 0; i < 200; ++i) {
+        e.moveCursor(QTextCursor::End);
+        e.insertPlainText(QStringLiteral("無"));
+    }
+    qInfo("BENCH crt-type-end x200: %.3f ms/op", ms() / 200.0);
+    c.restart();
+    for (int i = 0; i <= 100; ++i) {
+        vb->setValue(vb->maximum() * i / 100);
+        QApplication::processEvents();
+    }
+    qInfo("BENCH crt-scroll x100: %.3f ms/step", ms() / 100.0);
+    c.restart();
+    for (int i = 0; i < 50; ++i)
+        e.zoomTo(i % 2 ? 12.0 : 96.0);
+    QApplication::processEvents();
+    qInfo("BENCH crt-zoom x50: %.3f ms/op", ms() / 50.0);
+    e.toggleCrt();
+    QApplication::processEvents();
     return true;
 }
 
@@ -192,6 +216,9 @@ int main(int argc, char **argv)
         QAction *bBian = fa->addAction(QStringLiteral("编"));
         bBian->setShortcut(QKeySequence(QStringLiteral("Ctrl+B")));
         bBian->setCheckable(true);
+        QAction *bXian = fa->addAction(QStringLiteral("显"));
+        bXian->setShortcut(QKeySequence(QStringLiteral("Ctrl+T")));
+        bXian->setCheckable(true);
         QAction *bYan = fa->addAction(QStringLiteral("言"));
         bYan->setShortcut(QKeySequence(QStringLiteral("Ctrl+L")));
         QAction *bGe = fa->addAction(QStringLiteral("隔"));
@@ -217,6 +244,7 @@ int main(int argc, char **argv)
         QObject::connect(bCa, &QAction::triggered, &editor, [&editor] { editor.toggleMode(Editor::Mode::Erase); });
         QObject::connect(bXiao, &QAction::triggered, &editor, [&editor] { editor.clearInk(); });
         QObject::connect(bBian, &QAction::triggered, &editor, [&editor] { editor.toggleCodeMode(); });
+        QObject::connect(bXian, &QAction::triggered, &editor, [&editor] { editor.toggleCrt(); });
         QObject::connect(bYan, &QAction::triggered, &editor, [&editor] { editor.yan(); });
         QObject::connect(bGe, &QAction::triggered, &editor, [&editor] { editor.ge(); });
         QObject::connect(bZoomIn, &QAction::triggered, &editor, [&editor] { editor.zoom(1); });
@@ -227,12 +255,13 @@ int main(int argc, char **argv)
         QObject::connect(bBrush0, &QAction::triggered, &editor, [&editor] { editor.brushDefault(); });
         QObject::connect(bUndo, &QAction::triggered, &editor, [&editor] { editor.undoAll(); });
         QObject::connect(bRedo, &QAction::triggered, &editor, [&editor] { editor.redoAll(); });
-        QObject::connect(fa, &QMenu::aboutToShow, &editor, [&editor, bYin, bYang, bTu, bCa, bBian] {
+        QObject::connect(fa, &QMenu::aboutToShow, &editor, [&editor, bYin, bYang, bTu, bCa, bBian, bXian] {
             bYin->setChecked(editor.isDark());
             bYang->setChecked(!editor.isDark());
             bTu->setChecked(editor.mode() == Editor::Mode::Draw);
             bCa->setChecked(editor.mode() == Editor::Mode::Erase);
             bBian->setChecked(editor.codeMode());
+            bXian->setChecked(editor.crtOn());
         });
     }
 #endif

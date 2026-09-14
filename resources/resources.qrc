@@ -1,5 +1,7 @@
 <RCC>
     <qresource prefix="/">
         <file>icons/naught.png</file>
+        <file>fonts/fusion-pixel-12px-monospaced-zh_hans.ttf</file>
+        <file>fonts/FusionPixel-OFL.txt</file>
     </qresource>
 </RCC>
