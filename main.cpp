@@ -24,6 +24,7 @@
 #include <QKeySequence>
 #include <QLineF>
 #include <QMenu>
+#include <QMenuBar>
 #include <QMouseEvent>
 #include <QNativeGestureEvent>
 #include <QPainter>
@@ -465,6 +466,15 @@ public:
 
     enum class Mode { Normal, Draw, Erase };
 
+    bool isDark() const { return m_dark; }
+    Mode mode() const { return m_mode; }
+
+    void clearInk()
+    {
+        if (m_canvas)
+            m_canvas->clearAll();
+    }
+
     void toggleMode(Mode m)
     {
         m_mode = (m_mode == m) ? Mode::Normal : m;
@@ -723,6 +733,62 @@ public:
                 }
             }
         }
+        // 光标矩形与方向键：最后一个字符之后的光标应在右侧，行尾按右不跳行首
+        e.setPlainText(QStringLiteral("你好"));
+        {
+            QTextCursor c(e.document());
+            c.setPosition(2); // “好”之后
+            e.setTextCursor(c);
+            const QRect cr = e.cursorRect();
+            if (cr.x() <= 4) {
+                qWarning("selftest FAIL: cursorRect after last char at x=%d", cr.x());
+                return false;
+            }
+            e.moveCursor(QTextCursor::Right);
+            if (e.textCursor().position() != 2) {
+                qWarning("selftest FAIL: Right at end moves to %d, want 2",
+                         e.textCursor().position());
+                return false;
+            }
+        }
+        // 文末回车产生的空行：光标从行尾按右进入空行（标准行为，锁定以防回归）
+        e.setPlainText(QStringLiteral("你好\n"));
+        {
+            QTextCursor c(e.document());
+            c.setPosition(2);
+            e.setTextCursor(c);
+            e.moveCursor(QTextCursor::Right);
+            if (e.textCursor().position() != 3) {
+                qWarning("selftest FAIL: Right across trailing newline moves to %d, want 3",
+                         e.textCursor().position());
+                return false;
+            }
+        }
+        // 文末空行不可入：点余白行高度落最后一个字符之后；行尾按右停在原地
+        bar = qobject_cast<ZenScrollBar *>(e.verticalScrollBar());
+        if (bar) {
+            const QPoint tp(5, 25); // 第二行（余白行）高度
+            QMouseEvent tpress(QEvent::MouseButtonPress, QPointF(tp), bar->mapToGlobal(tp),
+                               Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(bar, &tpress);
+            if (e.textCursor().position() != 2) {
+                qWarning("selftest FAIL: trailing-empty strip click lands at %d, want 2",
+                         e.textCursor().position());
+                return false;
+            }
+        }
+        {
+            QTextCursor c(e.document());
+            c.setPosition(2);
+            e.setTextCursor(c);
+            QKeyEvent kp(QEvent::KeyPress, Qt::Key_Right, Qt::NoModifier);
+            QApplication::sendEvent(&e, &kp);
+            if (e.textCursor().position() != 2) {
+                qWarning("selftest FAIL: Right into trailing empty moves to %d, want 2",
+                         e.textCursor().position());
+                return false;
+            }
+        }
         return true;
     }
 
@@ -730,17 +796,6 @@ protected:
     void contextMenuEvent(QContextMenuEvent *event) override
     {
         QMenu menu(this);
-        // macOS 原生弹出菜单不渲染 QAction 快捷键（Qt 只给菜单栏菜单设置 key
-        // equivalent），改用 QSS 自绘样式：显示右侧快捷键列，并融入阴/阳黑白美学。
-        menu.setStyleSheet(m_dark
-            ? QStringLiteral("QMenu{background:#1a1a1a;border:1px solid #333;padding:4px;}"
-                             "QMenu::item{padding:5px 28px 5px 16px;color:#fff;}"
-                             "QMenu::item:selected{background:#333;}"
-                             "QMenu::separator{height:1px;background:#3a3a3a;margin:4px 8px;}")
-            : QStringLiteral("QMenu{background:#ffffff;border:1px solid #d8d8d8;padding:4px;}"
-                             "QMenu::item{padding:5px 28px 5px 16px;color:#000;}"
-                             "QMenu::item:selected{background:#eeeeee;}"
-                             "QMenu::separator{height:1px;background:#e0e0e0;margin:4px 8px;}"));
         QAction *aMo = menu.addAction(QStringLiteral("摹"));
         aMo->setShortcut(QKeySequence(QStringLiteral("Ctrl+S")));
         aMo->setShortcutVisibleInContextMenu(true);
@@ -790,6 +845,20 @@ protected:
     void keyPressEvent(QKeyEvent *event) override
     {
         wakeCaret();
+        if (event->key() == Qt::Key_Tab
+            && !(event->modifiers() & (Qt::ControlModifier | Qt::MetaModifier | Qt::AltModifier))) {
+            // Tab 与空格一致：插入 4 个空格（软 Tab，可撤销）
+            textCursor().insertText(QStringLiteral("    "));
+            return;
+        }
+        if (event->key() == Qt::Key_Right
+            && !(event->modifiers() & (Qt::ControlModifier | Qt::MetaModifier
+                                       | Qt::AltModifier | Qt::ShiftModifier))) {
+            // 文末空行不可入：最后一个字符之后按右停在原地
+            if (textCursor().position() == document()->characterCount() - 2
+                && document()->lastBlock().length() == 1)
+                return;
+        }
         if (event->key() == Qt::Key_Escape && m_mode != Mode::Normal) {
             m_mode = Mode::Normal;
             updateModeCursor();
@@ -1126,6 +1195,10 @@ private:
                 }
                 if (line.textLength() == 0 && block.length() > 1)
                     return block.position() + block.length() - 1;
+                // 文末空行是纸的余白：点它的高度时，光标落到最后一个字符之后
+                if (block == document()->lastBlock() && block.length() == 1
+                    && document()->characterCount() >= 2)
+                    return document()->characterCount() - 2;
                 return block.position() + line.textStart() + line.textLength();
             }
             block = block.next();
@@ -1204,6 +1277,47 @@ int main(int argc, char **argv)
     editor.setWindowTitle(QString());
     editor.resize(900, 600);
     editor.show();
+
+#ifdef Q_OS_MACOS
+    // 系统菜单栏上的「法」：快捷键说明随原生 key equivalent 显示。
+    // Windows/Linux 不设菜单栏（无），其右键菜单为 Qt 自绘、自带快捷键列。
+    {
+        QMenuBar *menuBar = new QMenuBar(nullptr);
+        QMenu *fa = menuBar->addMenu(QStringLiteral("法"));
+        QAction *bMo = fa->addAction(QStringLiteral("摹"));
+        bMo->setShortcut(QKeySequence(QStringLiteral("Ctrl+S")));
+        QAction *bKong = fa->addAction(QStringLiteral("空"));
+        bKong->setShortcut(QKeySequence(QStringLiteral("Ctrl+N")));
+        fa->addSeparator();
+        QAction *bYin = fa->addAction(QStringLiteral("阴"));
+        QAction *bYang = fa->addAction(QStringLiteral("阳"));
+        bYin->setCheckable(true);
+        bYang->setCheckable(true);
+        fa->addSeparator();
+        QAction *bTu = fa->addAction(QStringLiteral("涂"));
+        bTu->setShortcut(QKeySequence(QStringLiteral("Ctrl+D")));
+        QAction *bCa = fa->addAction(QStringLiteral("擦"));
+        bCa->setShortcut(QKeySequence(QStringLiteral("Ctrl+E")));
+        QAction *bXiao = fa->addAction(QStringLiteral("消"));
+        bXiao->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+E")));
+        bTu->setCheckable(true);
+        bCa->setCheckable(true);
+        QObject::connect(bMo, &QAction::triggered, &editor, [&editor] { editor.mo(); });
+        QObject::connect(bKong, &QAction::triggered, &editor, [&editor] { editor.kong(); });
+        QObject::connect(bYin, &QAction::triggered, &editor, [&editor] { editor.setDark(true); });
+        QObject::connect(bYang, &QAction::triggered, &editor, [&editor] { editor.setDark(false); });
+        QObject::connect(bTu, &QAction::triggered, &editor, [&editor] { editor.toggleMode(Editor::Mode::Draw); });
+        QObject::connect(bCa, &QAction::triggered, &editor, [&editor] { editor.toggleMode(Editor::Mode::Erase); });
+        QObject::connect(bXiao, &QAction::triggered, &editor, [&editor] { editor.clearInk(); });
+        QObject::connect(fa, &QMenu::aboutToShow, &editor, [&editor, bYin, bYang, bTu, bCa] {
+            bYin->setChecked(editor.isDark());
+            bYang->setChecked(!editor.isDark());
+            bTu->setChecked(editor.mode() == Editor::Mode::Draw);
+            bCa->setChecked(editor.mode() == Editor::Mode::Erase);
+        });
+    }
+#endif
+
     return app.exec();
 }
 
