@@ -65,21 +65,21 @@ void CrtBackdrop::refreshGlow()
     QImage glow = snap.scaled(small, Qt::IgnoreAspectRatio, Qt::SmoothTransformation)
                       .scaled(vp->size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
     // 磷粉余晖：同一滚动位置下，旧帧 15% 混入（打字/编辑留下短暂残影）；
-    // 滚动位置变化时晋升为屏幕固定的残影（渐暗熄灭，不跟着内容跑）
-    const QPoint cur(m_editor->horizontalScrollBar()->value(),
-                     m_editor->verticalScrollBar()->value());
-    if (!m_glow.isNull() && cur == m_glowScroll) {
+    // 滚动位置变化（像素位移 > 0）时晋升为屏幕固定的残影（渐暗熄灭）
+    const QPointF shift = m_editor->crtGlowShift(); // 基于旧快照的像素位移
+    if (!m_glow.isNull() && shift.manhattanLength() <= 0.5) {
         QPainter pg(&glow);
         pg.setOpacity(0.15);
         pg.drawImage(0, 0, m_glow);
-    } else if (!m_glow.isNull() && cur != m_glowScroll) {
+    } else if (!m_glow.isNull()) {
         m_ghost = m_glow;
-        m_ghostPos = QPointF(vp->pos()) - QPointF(cur - m_glowScroll);
+        m_ghostPos = QPointF(vp->pos()) - shift;
         m_ghostAlpha = qMin(0.5, m_ghostAlpha + 0.45);
         m_fadeTimer.start();
     }
     m_glow = glow;
-    m_glowScroll = cur;
+    m_glowScroll = QPoint(m_editor->horizontalScrollBar()->value(),
+                          m_editor->verticalScrollBar()->value());
     m_sinceRefresh.restart();
     m_dirty = false;
     update();
@@ -100,10 +100,8 @@ void CrtBackdrop::paintEvent(QPaintEvent *)
     if (m_glow.isNull()) {
         refreshGlow();
     } else {
-        const QPoint cur(m_editor->horizontalScrollBar()->value(),
-                         m_editor->verticalScrollBar()->value());
-        const QPoint delta = cur - m_glowScroll;
-        if (m_forceRefresh || delta.manhattanLength() >= Crt::kGlowMinScroll)
+        const QPointF shift = m_editor->crtGlowShift(); // 像素位移（vbar 是行号单位）
+        if (m_forceRefresh || shift.manhattanLength() >= Crt::kGlowMinScroll)
             refreshGlow();
         else if (m_dirty && m_sinceRefresh.elapsed() > Crt::kGlowMinIntervalMs)
             refreshGlow();
@@ -116,10 +114,8 @@ void CrtBackdrop::paintEvent(QPaintEvent *)
     }
     if (!m_glow.isNull()) {
         // 环境底光：弱化的快照垫底（日冕由效果层叠加在文字上方）
-        const QPoint cur(m_editor->horizontalScrollBar()->value(),
-                         m_editor->verticalScrollBar()->value());
         p.setOpacity(0.35);
-        p.drawImage(QPointF(vp->pos()) - QPointF(cur - m_glowScroll), m_glow);
+        p.drawImage(QPointF(vp->pos()) - m_editor->crtGlowShift(), m_glow);
     }
 }
 
@@ -192,10 +188,8 @@ void CrtOverlay::paintEvent(QPaintEvent *)
     // 真实管子的光晕包络。磷底近黑，alpha 混合与加法混合视觉等价但快数倍
     const QImage glow = m_editor->crtGlowImage();
     if (!glow.isNull()) {
-        const QPoint cur(m_editor->horizontalScrollBar()->value(),
-                         m_editor->verticalScrollBar()->value());
         const QPointF at = QPointF(m_editor->viewport()->pos())
-            - QPointF(cur - m_editor->crtGlowScroll());
+            - m_editor->crtGlowShift(); // 像素位移（vbar 是行号单位）
         // 裁剪到视口：滚动滞后时旧快照的边缘不许溢出到行号区/边界之外
         // （否则文字外面会残留一圈影子）
         p.save();

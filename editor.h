@@ -379,6 +379,16 @@ public:
     bool crtOn() const { return m_crt; }
     QImage crtGlowImage() const { return m_crtBackdrop ? m_crtBackdrop->glowImage() : QImage(); }
     QPoint crtGlowScroll() const { return m_crtBackdrop ? m_crtBackdrop->glowScroll() : QPoint(); }
+    // 光晕快照与当前滚动之间的**像素位移**（vbar 是行号单位，不能直接相减）
+    QPointF crtGlowShift() const
+    {
+        if (!m_crtBackdrop)
+            return QPointF();
+        const QPoint gs = m_crtBackdrop->glowScroll();
+        const qreal dy = pixelScrollBefore(verticalScrollBar()->value())
+            - pixelScrollBefore(gs.y());
+        return QPointF(horizontalScrollBar()->value() - gs.x(), dy);
+    }
 
     // 显：单一琥珀磷光模式——零 UI，一键回到过去（与编、阴/阳正交可叠加）
     void toggleCrt()
