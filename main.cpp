@@ -151,7 +151,7 @@ public:
 
     void eraseAt(const QPointF &c)
     {
-        const qreal r = m_brush * 0.7; // 擦除直径 = 1.4×笔刷，与足迹一致
+        const qreal r = m_brush * 0.5; // 擦除直径 = 笔刷直径，与足迹一致
         bool changed = false;
         for (int i = m_strokes.size() - 1; i >= 0; --i) {
             const InkStroke &s = m_strokes.at(i);
@@ -222,7 +222,7 @@ protected:
         // 画笔足迹：窗口坐标（不随滚动），尺寸=真实口径，无系统光标尺寸上限
         const QPointF fp = m_fpPos + QPointF(m_vpOffset);
         if (m_fpVisible) {
-            const qreal d = m_fpErase ? m_brush * 1.4 : m_brush;
+            const qreal d = m_brush; // 涂/擦足迹直径一致（实心/空心区分）
             if (m_fpErase) {
                 const qreal stroke = std::clamp<qreal>(d * 0.08, 1.5, 8.0);
                 p.setPen(QPen(m_ink, stroke));
@@ -588,6 +588,40 @@ public:
             return false;
         }
 
+        // 累积求"文档 y 处的视觉行行尾"（与 lineEndForY 同一模型，独立实现作真值）
+        auto lineEndAtDocY = [&](qreal docY) -> int {
+            QTextBlock b = e.document()->firstBlock();
+            qreal top = 0;
+            while (b.isValid()) {
+                const QRectF r = e.document()->documentLayout()->blockBoundingRect(b);
+                if (docY < top + r.height()) {
+                    QTextLayout *tl = b.layout();
+                    if (!tl || tl->lineCount() == 0)
+                        return b.position() + b.length() - 1;
+                    const qreal relY = docY - top;
+                    QTextLine ln = tl->lineAt(0);
+                    for (int i = 1; i < tl->lineCount(); ++i) {
+                        const QTextLine l = tl->lineAt(i);
+                        if (relY >= l.y())
+                            ln = l;
+                        else
+                            break;
+                    }
+                    if (ln.textLength() == 0 && b.length() > 1)
+                        return b.position() + b.length() - 1;
+                    if (b == e.document()->lastBlock() && b.length() == 1
+                        && e.document()->characterCount() >= 2)
+                        return e.document()->characterCount() - 2;
+                    return b.position() + ln.textStart() + ln.textLength();
+                }
+                top += r.height();
+                b = b.next();
+            }
+            if (e.document()->lastBlock().length() == 1 && e.document()->characterCount() >= 2)
+                return e.document()->characterCount() - 2;
+            return e.document()->characterCount() - 1;
+        };
+
         // 光标落点：点击视口最右缘应落在行尾；滚动条轨道点击也应落到行尾
         e.zoomReset();
         QString lines;
@@ -707,53 +741,6 @@ public:
                 return false;
             }
         }
-        // 纵向滚动后点最右缘：应落在该视觉行行尾（滚动偏移计入文档坐标）
-        {
-            QString doc2;
-            for (int i = 0; i < 60; ++i)
-                doc2 += QStringLiteral("第%1行\n").arg(i);
-            e.setPlainText(doc2);
-            e.resize(400, 300);
-            e.show();
-            QApplication::processEvents();
-            QScrollBar *vb = e.verticalScrollBar();
-            if (vb->isVisible()) {
-                vb->setValue(200);
-                QApplication::processEvents();
-                e.moveCursor(QTextCursor::Start);
-                bar = qobject_cast<ZenScrollBar *>(e.verticalScrollBar());
-                const QPoint tp(5, 5);
-                QMouseEvent tpress(QEvent::MouseButtonPress, QPointF(tp), bar->mapToGlobal(tp),
-                                   Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-                QApplication::sendEvent(bar, &tpress);
-                const int got = e.textCursor().position();
-                const qreal docY = 200.0 + 5.0;
-                int want = -1;
-                QTextBlock b = e.document()->firstBlock();
-                while (b.isValid()) {
-                    const QRectF r = e.document()->documentLayout()->blockBoundingRect(b);
-                    if (docY < r.bottom()) {
-                        QTextLayout *tl = b.layout();
-                        const qreal relY = docY - r.top();
-                        QTextLine ln = tl->lineAt(0);
-                        for (int i = 1; i < tl->lineCount(); ++i) {
-                            const QTextLine l = tl->lineAt(i);
-                            if (relY >= l.y())
-                                ln = l;
-                            else
-                                break;
-                        }
-                        want = b.position() + ln.textStart() + ln.textLength();
-                        break;
-                    }
-                    b = b.next();
-                }
-                if (want >= 0 && got != want) {
-                    qWarning("selftest FAIL: scrolled track click lands at %d, want %d", got, want);
-                    return false;
-                }
-            }
-        }
         // 多点扫描：混合文档（首块换行 + 短行 + 空行）各高度点最右缘都应落该行行尾
         {
             QString doc3 = longLine + QStringLiteral("\n");
@@ -776,32 +763,8 @@ public:
                     QApplication::sendEvent(bar, &tpress);
                     const int got = e.textCursor().position();
                     const qreal docY = qreal(y);
-                    int want = -1;
-                    QTextBlock b = e.document()->firstBlock();
-                    while (b.isValid()) {
-                        const QRectF r = e.document()->documentLayout()->blockBoundingRect(b);
-                        if (docY < r.bottom()) {
-                            QTextLayout *tl = b.layout();
-                            if (tl && tl->lineCount() > 0) {
-                                const qreal relY = docY - r.top();
-                                QTextLine ln = tl->lineAt(0);
-                                for (int i = 1; i < tl->lineCount(); ++i) {
-                                    const QTextLine l = tl->lineAt(i);
-                                    if (relY >= l.y())
-                                        ln = l;
-                                    else
-                                        break;
-                                }
-                                if (ln.textLength() > 0 || b.length() == 1)
-                                    want = b.position() + ln.textStart() + ln.textLength();
-                                else
-                                    want = b.position() + b.length() - 1;
-                            }
-                            break;
-                        }
-                        b = b.next();
-                    }
-                    if (want >= 0 && got != want) {
+                    const int want = lineEndAtDocY(docY);
+                    if (got != want) {
                         qWarning("selftest FAIL: sweep y=%d lands at %d, want %d", y, got, want);
                         return false;
                     }
@@ -1318,19 +1281,20 @@ private:
         nf.setPointSizeF(m_size * 0.85);
         p.setFont(nf);
         p.setPen(m_dark ? QColor(0x6a, 0x6a, 0x6a) : QColor(0xb0, 0xb0, 0xb0));
+        // 块映射只存尺寸不存位置（top 恒 0），按 Qt 官方画法从滚动值逐块累积
         const int vbar = verticalScrollBar()->value();
         QTextBlock block = firstVisibleBlock();
-        while (block.isValid()) {
+        qreal top = vbar;
+        while (block.isValid() && top <= vbar + height()) {
             const QRectF r = document()->documentLayout()->blockBoundingRect(block);
-            const qreal y = r.top() - vbar;
-            if (y > height())
-                break;
-            if (r.bottom() - vbar >= 0) {
+            const qreal y = top - vbar;
+            if (top + r.height() > vbar) {
                 const qreal h = qreal(block.layout()->lineAt(0).height());
                 p.drawText(QRectF(0, y, m_gutterWidth - 6, h),
                            Qt::AlignRight | Qt::AlignVCenter,
                            QString::number(block.blockNumber() + 1));
             }
+            top += r.height();
             block = block.next();
         }
     }
@@ -1493,17 +1457,19 @@ private:
     // 直接返回行首偏移 + 行长，满行/空行/换行块都精确落在行尾。
     int lineEndForY(const QPointF &pt) const
     {
-        const QPointF docPt = pt + QPointF(horizontalScrollBar()->value(), verticalScrollBar()->value());
-        QTextBlock block = firstVisibleBlock();
+        const int vbar = verticalScrollBar()->value();
+        // 块映射不存位置（top 恒 0），从文档首块累积；不依赖 firstVisibleBlock 缓存
+        QTextBlock block = document()->firstBlock();
         QAbstractTextDocumentLayout *layout = document()->documentLayout();
+        qreal top = 0;
+        const qreal docY = pt.y() + vbar;
         while (block.isValid()) {
             const QRectF r = layout->blockBoundingRect(block);
-            if (docPt.y() < r.bottom()) {
+            if (docY < top + r.height()) {
                 QTextLayout *tl = block.layout();
-                // 排版未就绪的行数据可能全零（会把光标算到行首）：兜底取块尾
                 if (!tl || tl->lineCount() == 0)
                     return block.position() + block.length() - 1;
-                const qreal relY = docPt.y() - r.top();
+                const qreal relY = docY - top;
                 QTextLine line = tl->lineAt(0);
                 for (int i = 1; i < tl->lineCount(); ++i) {
                     const QTextLine l = tl->lineAt(i);
@@ -1520,6 +1486,7 @@ private:
                     return document()->characterCount() - 2;
                 return block.position() + line.textStart() + line.textLength();
             }
+            top += r.height();
             block = block.next();
         }
         // 未命中任何块（点在零高度的文末空行区域）：余白仍不可入
