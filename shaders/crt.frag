@@ -46,8 +46,9 @@ void main()
 
     vec2 pxpos = uv * ubuf.texSize;
 
-    // 栅条随玻璃曲率弯弓（真 CRT 的 mask 与玻壳共曲率）
-    float bow = 1.2 * (uv.y - 0.5) * (uv.y - 0.5);
+    // 栅条随玻璃曲率微弯（真 CRT 的 mask 与玻壳共曲率；幅度克制，
+    // 过大即两侧对称"漩涡"）
+    float bow = 0.4 * (uv.y - 0.5) * (uv.y - 0.5);
 
     // 荧光粉三元组：窗口函数——每个像素位恰属一个子像素（三者和=1）。
     // 琥珀文字的 R 分量点燃 R 子像素、G 分量点燃 G 子像素，眼合成即磷光。
@@ -72,10 +73,11 @@ void main()
     // 栅线亮度（每 3px 一条）
     col *= wireShade(floor(phase / 3.0) + 0.5);
 
-    // 玻璃反光（鼠标即观察者）+ 暗角
-    vec2 n = normalize(vec2(-ubuf.view.x * 0.8, 0.6));
-    float refl = pow(max(0.0, 1.0 - abs(dot(n, vec2(0.35, 0.94)) - 0.62) * 3.2), 2.0);
-    col += vec3(1.0, 0.88, 0.62) * refl * 0.055;
+    // 玻璃高光：定位光斑跟随观察者（鼠标）——指哪亮哪，
+    // 左右上下都与直觉同向（旧版是全局亮度随点积变化，方向感错误）
+    vec2 glint = vec2(0.5 + ubuf.view.x * 0.30, 0.5 + ubuf.view.y * 0.22);
+    float refl = pow(max(0.0, 1.0 - length((uv - glint) * vec2(1.15, 0.9)) * 1.55), 3.0);
+    col += vec3(1.0, 0.88, 0.62) * refl * 0.07;
     float d = length(uv - 0.5) * 1.5;
     col *= 1.0 - 0.32 * smoothstep(0.4, 1.0, d);
 

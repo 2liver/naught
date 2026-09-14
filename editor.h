@@ -396,6 +396,10 @@ public:
         if (!p.isActive())
             return;
         p.fillRect(img.rect(), Crt::kBg); // 磷光底：行号列条/滚动条槽也同色
+        // 3× 水平超采样（调用方提供 3 倍宽的图像）：RGB 荧光粉掩膜在
+        // 子像素级取样——字形内部融合成琥珀、笔画边缘留彩边（真彩），
+        // 条纹细到显示像素的三分之一，不再是粗线条的红绿块
+        p.scale(3.0, 1.0);
         if (viewport())
             viewport()->render(&p, viewport()->pos());
         if (m_canvas && m_canvas->isVisible())
@@ -480,7 +484,9 @@ public:
             if (m_crtView)
                 m_crtView->hide();
             viewport()->releaseMouse(); // 防御：抓取会话不跨显模式残留
-            if (m_lineNumberArea)
+            // 仅编模式恢复行号区：非编模式下它是隐藏的残留组件，
+            // 无条件 show 会把旧几何的行号叠在首列文字上
+            if (m_codeMode && m_lineNumberArea)
                 m_lineNumberArea->show();
             viewport()->update();
             setFocus();
@@ -1229,7 +1235,8 @@ public:
             // 快照几何：文字在顶部第一行；此前的涂擦测试留下两个墨水圆点，
             // 必须同样出现在合成快照里（墨水进光栅 = 显模式下涂/擦可用的回归闸）
             {
-                QImage snapImg(e.viewport()->size(), QImage::Format_ARGB32);
+                QImage snapImg(e.viewport()->size().width() * 3, e.viewport()->size().height(),
+                               QImage::Format_ARGB32);
                 snapImg.fill(Qt::transparent);
                 e.paintTextSnapshot(snapImg);
                 const QImage snap = snapImg;
