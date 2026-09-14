@@ -12,9 +12,11 @@
 #include <QColor>
 #include <QContextMenuEvent>
 #include <QEvent>
+#include <QFocusEvent>
 #include <QFont>
 #include <QFontDatabase>
 #include <QFrame>
+#include <QGraphicsOpacityEffect>
 #include <QIcon>
 #include <QKeyEvent>
 #include <QMenu>
@@ -61,6 +63,33 @@ public:
         });
 
         viewport()->installEventFilter(this);
+        verticalScrollBar()->installEventFilter(this);
+        horizontalScrollBar()->installEventFilter(this);
+
+        // 光标：不闪烁（main 里 setCursorFlashTime(0)），交互时现身，空闲 3 秒后隐去
+        setCursorWidth(2);
+        m_caretTimer.setSingleShot(true);
+        connect(&m_caretTimer, &QTimer::timeout, this, [this] { setCursorWidth(0); });
+        connect(document(), &QTextDocument::contentsChanged, this, [this] { wakeCaret(); });
+        m_caretTimer.start(3000);
+
+        // 滚动条：交互时淡入，闲置 1 秒后淡出；悬停加宽（事件驱动，QSS 的 :hover 改宽度无效）
+        m_vFade = new QGraphicsOpacityEffect(verticalScrollBar());
+        m_hFade = new QGraphicsOpacityEffect(horizontalScrollBar());
+        verticalScrollBar()->setGraphicsEffect(m_vFade);
+        horizontalScrollBar()->setGraphicsEffect(m_hFade);
+        m_scrollHideTimer.setSingleShot(true);
+        connect(&m_scrollHideTimer, &QTimer::timeout, this, [this] { m_fadeTimer.start(); });
+        m_fadeTimer.setInterval(16);
+        connect(&m_fadeTimer, &QTimer::timeout, this, [this] {
+            m_fadeOpacity = std::max(0.0, m_fadeOpacity - 0.1);
+            setScrollOpacity(m_fadeOpacity);
+            if (m_fadeOpacity <= 0.0)
+                m_fadeTimer.stop();
+        });
+        connect(verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int) { scrollActivity(); });
+        connect(horizontalScrollBar(), &QScrollBar::valueChanged, this, [this](int) { scrollActivity(); });
+        m_scrollHideTimer.start(1000);
 
         applyScheme();
         applyZoom();
@@ -149,8 +178,15 @@ protected:
         menu.exec(event->globalPos());
     }
 
+    void focusInEvent(QFocusEvent *event) override
+    {
+        wakeCaret();
+        QPlainTextEdit::focusInEvent(event);
+    }
+
     void keyPressEvent(QKeyEvent *event) override
     {
+        wakeCaret();
         if (event->modifiers() & (Qt::ControlModifier | Qt::MetaModifier)) {
             switch (event->key()) {
             case Qt::Key_S:
@@ -247,17 +283,41 @@ protected:
 
     bool eventFilter(QObject *watched, QEvent *event) override
     {
-        // 触控板捏合缩放（macOS 原生手势；Windows 精确触摸板同路径）
-        if (watched == viewport() && event->type() == QEvent::NativeGesture) {
-            const auto *ng = static_cast<QNativeGestureEvent *>(event);
-            // value 语义：相对上一事件的增量倍率（macOS NSEvent magnification）。
-            // 直接按 (1+v) 累积到字号，浮点存储，缓慢张开也持续生效。
-            if (ng->gestureType() == Qt::ZoomNativeGesture) {
-                const qreal v = ng->value();
-                if (v != 0.0)
-                    zoomTo(m_size * (1.0 + v));
+        if (watched == viewport()) {
+            // 触控板捏合缩放（macOS 原生手势；Windows 精确触摸板同路径）
+            if (event->type() == QEvent::NativeGesture) {
+                const auto *ng = static_cast<QNativeGestureEvent *>(event);
+                // value 语义：相对上一事件的增量倍率（macOS NSEvent magnification）。
+                // 直接按 (1+v) 累积到字号，浮点存储，缓慢张开也持续生效。
+                if (ng->gestureType() == Qt::ZoomNativeGesture) {
+                    const qreal v = ng->value();
+                    if (v != 0.0)
+                        zoomTo(m_size * (1.0 + v));
+                }
+                return true;
             }
-            return true;
+            // 点击/滚轮都唤醒光标（睡眠隐喻：无动静则隐去）
+            if (event->type() == QEvent::MouseButtonPress
+                || event->type() == QEvent::MouseButtonRelease
+                || event->type() == QEvent::Wheel) {
+                wakeCaret();
+            }
+            return QPlainTextEdit::eventFilter(watched, event);
+        }
+        if (watched == verticalScrollBar() || watched == horizontalScrollBar()) {
+            if (event->type() == QEvent::Enter) {
+                scrollActivity();
+                if (watched == verticalScrollBar())
+                    verticalScrollBar()->setFixedWidth(14);
+                else
+                    horizontalScrollBar()->setFixedHeight(14);
+            } else if (event->type() == QEvent::Leave) {
+                if (watched == verticalScrollBar())
+                    verticalScrollBar()->setFixedWidth(10);
+                else
+                    horizontalScrollBar()->setFixedHeight(10);
+            }
+            return QPlainTextEdit::eventFilter(watched, event);
         }
         return QPlainTextEdit::eventFilter(watched, event);
     }
@@ -311,6 +371,28 @@ private:
         m_holdTimer.start(m_holdInterval);
     }
 
+    void wakeCaret()
+    {
+        setCursorWidth(2);
+        m_caretTimer.start(3000);
+    }
+
+    void scrollActivity()
+    {
+        m_fadeTimer.stop();
+        m_fadeOpacity = 1.0;
+        setScrollOpacity(1.0);
+        m_scrollHideTimer.start(1000);
+    }
+
+    void setScrollOpacity(qreal v)
+    {
+        if (m_vFade)
+            m_vFade->setOpacity(v);
+        if (m_hFade)
+            m_hFade->setOpacity(v);
+    }
+
     QFont m_baseFont;
     int m_baseSize = 12;
     qreal m_size = 12.0;
@@ -319,6 +401,12 @@ private:
     int m_holdDir = 1;
     int m_holdInterval = 70;
     int m_wheelAccum = 0;
+    QTimer m_caretTimer;
+    QTimer m_scrollHideTimer;
+    QTimer m_fadeTimer;
+    QGraphicsOpacityEffect *m_vFade = nullptr;
+    QGraphicsOpacityEffect *m_hFade = nullptr;
+    qreal m_fadeOpacity = 1.0;
 };
 
 int main(int argc, char **argv)
@@ -327,6 +415,7 @@ int main(int argc, char **argv)
     app.setApplicationName(QStringLiteral("無"));
     app.setApplicationDisplayName(QStringLiteral("無"));
     app.setWindowIcon(QIcon(QStringLiteral(":/icons/naught.png")));
+    app.setCursorFlashTime(0); // 光标不闪烁（空闲自动隐去，见 Editor）
 
     if (argc > 1 && QString::fromLocal8Bit(argv[1]) == QLatin1String("--selftest"))
         return Editor::selftest() ? 0 : 1;
