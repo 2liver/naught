@@ -881,6 +881,34 @@ public:
                 return false;
             }
         }
+        // 先言后隔组合：言保持的选区直接喂给隔（批量校对的完整动线）
+        {
+            e.setPlainText(QStringLiteral("甲\n一\n二\n三\n丙\n"));
+            QTextBlock b1 = e.document()->findBlockByNumber(1);
+            QTextBlock b3 = e.document()->findBlockByNumber(3);
+            QTextCursor cc(e.document());
+            cc.setPosition(b1.position());
+            cc.setPosition(b3.position() + b3.length() - 1, QTextCursor::KeepAnchor);
+            e.setTextCursor(cc);
+            e.yan();
+            e.ge();
+            if (e.toPlainText() != QStringLiteral("甲\n\n「一」\n「二」\n「三」\n\n丙\n")) {
+                qWarning("selftest FAIL: yan()+ge() pipeline got [%s]", qPrintable(e.toPlainText()));
+                return false;
+            }
+            QKeyEvent kz(QEvent::KeyPress, Qt::Key_Z, Qt::ControlModifier);
+            QApplication::sendEvent(&e, &kz); // 隔一步撤销 → 回到言的成果
+            if (e.toPlainText() != QStringLiteral("甲\n「一」\n「二」\n「三」\n丙\n")) {
+                qWarning("selftest FAIL: pipeline undo step 1 got [%s]", qPrintable(e.toPlainText()));
+                return false;
+            }
+            QKeyEvent kz2(QEvent::KeyPress, Qt::Key_Z, Qt::ControlModifier);
+            QApplication::sendEvent(&e, &kz2); // 再一步 → 言整体撤销
+            if (e.toPlainText() != QStringLiteral("甲\n一\n二\n三\n丙\n")) {
+                qWarning("selftest FAIL: pipeline undo step 2 got [%s]", qPrintable(e.toPlainText()));
+                return false;
+            }
+        }
         return true;
     }
 
