@@ -505,7 +505,7 @@ public:
         applyScheme();
     }
 
-    enum class Mode { Normal, Draw, Erase, Code };
+    enum class Mode { Normal, Draw, Erase }; // 工具轴；编是独立的视图轴
 
     bool isDark() const { return m_dark; }
     Mode mode() const { return m_mode; }
@@ -552,7 +552,14 @@ public:
     void toggleMode(Mode m)
     {
         m_mode = (m_mode == m) ? Mode::Normal : m;
-        setCodeMode(m_mode == Mode::Code);
+        updateModeCursor();
+    }
+
+    bool codeMode() const { return m_codeMode; }
+
+    void toggleCodeMode()
+    {
+        setCodeMode(!m_codeMode);
         updateModeCursor();
     }
 
@@ -849,7 +856,7 @@ public:
             }
         }
         // 编模式：等宽字体 + 行号槽 + 退出复原
-        e.toggleMode(Editor::Mode::Code);
+        e.toggleCodeMode();
         QApplication::processEvents();
         if (e.document()->defaultFont().family()
             != QFontDatabase::systemFont(QFontDatabase::FixedFont).family()) {
@@ -860,7 +867,7 @@ public:
             qWarning("selftest FAIL: code mode gutter missing");
             return false;
         }
-        e.toggleMode(Editor::Mode::Code);
+        e.toggleCodeMode();
         QApplication::processEvents();
         if (e.viewport()->pos().x() != 0
             || e.document()->defaultFont().family()
@@ -939,8 +946,8 @@ protected:
         menu.addSeparator();
         QAction *aBian = menu.addAction(QStringLiteral("编"));
         aBian->setCheckable(true);
-        aBian->setChecked(m_mode == Mode::Code);
-        connect(aBian, &QAction::triggered, this, [this] { toggleMode(Mode::Code); });
+        aBian->setChecked(m_codeMode);
+        connect(aBian, &QAction::triggered, this, [this] { toggleCodeMode(); });
 
         menu.exec(event->globalPos());
     }
@@ -968,10 +975,14 @@ protected:
                 && document()->lastBlock().length() == 1)
                 return;
         }
-        if (event->key() == Qt::Key_Escape && m_mode != Mode::Normal) {
-            m_mode = Mode::Normal;
-            setCodeMode(false);
-            updateModeCursor();
+        if (event->key() == Qt::Key_Escape && (m_mode != Mode::Normal || m_codeMode)) {
+            // 先退工具（画笔），再退视图（编）
+            if (m_mode != Mode::Normal) {
+                m_mode = Mode::Normal;
+                updateModeCursor();
+            } else {
+                setCodeMode(false);
+            }
             return;
         }
         if (event->modifiers() & (Qt::ControlModifier | Qt::MetaModifier)) {
@@ -986,7 +997,7 @@ protected:
                 toggleMode(Mode::Draw);
                 return;
             case Qt::Key_B:
-                toggleMode(Mode::Code); // 编：编织代码
+                toggleCodeMode(); // 编：编织代码（与涂/擦可叠加）
                 return;
             case Qt::Key_I:
                 setDark(true); // 阴：I 如冰（阴冷）
@@ -1289,14 +1300,19 @@ private:
             const QRectF r = document()->documentLayout()->blockBoundingRect(block);
             const qreal y = top - vbar;
             if (top + r.height() > vbar) {
-                // 数字基线与文字行基线重合（行框垂直居中在缩小后偏高）
+                // 数字字形中心与文字字形中心对齐（基线对齐在小字号时偏高）
                 QTextLayout *tl = block.layout();
                 const QTextLine line0 = tl->lineAt(0);
-                const qreal baseline = y + line0.y() + line0.ascent();
-                const QString num = QString::number(block.blockNumber() + 1);
+                const qreal textBaseline = y + line0.y() + line0.ascent();
+                QFont tf = m_codeFont;
+                tf.setPointSizeF(m_size);
+                const QFontMetricsF tfm(tf);
+                const qreal textCenter = textBaseline - (tfm.ascent() - tfm.descent()) / 2.0;
                 const QFontMetricsF fm(p.font());
+                const qreal numCenter = (fm.ascent() - fm.descent()) / 2.0;
+                const QString num = QString::number(block.blockNumber() + 1);
                 const qreal w = fm.horizontalAdvance(num);
-                p.drawText(QPointF(m_gutterWidth - 6 - w, baseline), num);
+                p.drawText(QPointF(m_gutterWidth - 6 - w, textCenter + numCenter), num);
             }
             top += r.height();
             block = block.next();
@@ -1419,7 +1435,7 @@ private:
     void updateModeCursor()
     {
         QWidget *vp = viewport();
-        if (m_mode == Mode::Normal || m_mode == Mode::Code) {
+        if (m_mode == Mode::Normal) {
             vp->unsetCursor();
             m_canvas->setFootprintVisible(false);
             return;
@@ -1639,7 +1655,7 @@ int main(int argc, char **argv)
         QObject::connect(bTu, &QAction::triggered, &editor, [&editor] { editor.toggleMode(Editor::Mode::Draw); });
         QObject::connect(bCa, &QAction::triggered, &editor, [&editor] { editor.toggleMode(Editor::Mode::Erase); });
         QObject::connect(bXiao, &QAction::triggered, &editor, [&editor] { editor.clearInk(); });
-        QObject::connect(bBian, &QAction::triggered, &editor, [&editor] { editor.toggleMode(Editor::Mode::Code); });
+        QObject::connect(bBian, &QAction::triggered, &editor, [&editor] { editor.toggleCodeMode(); });
         QObject::connect(bZoomIn, &QAction::triggered, &editor, [&editor] { editor.zoom(1); });
         QObject::connect(bZoomOut, &QAction::triggered, &editor, [&editor] { editor.zoom(-1); });
         QObject::connect(bZoom0, &QAction::triggered, &editor, [&editor] { editor.zoomReset(); });
@@ -1653,7 +1669,7 @@ int main(int argc, char **argv)
             bYang->setChecked(!editor.isDark());
             bTu->setChecked(editor.mode() == Editor::Mode::Draw);
             bCa->setChecked(editor.mode() == Editor::Mode::Erase);
-            bBian->setChecked(editor.mode() == Editor::Mode::Code);
+            bBian->setChecked(editor.codeMode());
         });
     }
 #endif
