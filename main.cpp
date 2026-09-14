@@ -214,15 +214,34 @@ protected:
             m_wheelAccum = std::clamp(m_wheelAccum, -119, 119);
             return;
         }
-        // 触控板横向平移 / Shift+滚轮：横向滚动（单字溢出窗口时可用）
+
+        // 像素级滚动：QPlainTextEdit 默认按“行”滚，行高巨大时一滚到底，
+        // 触控板用像素增量，鼠标滚轮一格约 40px（≈常规 3 行）。
+        const bool shift = event->modifiers() & Qt::ShiftModifier;
         QScrollBar *hbar = horizontalScrollBar();
+        QScrollBar *vbar = verticalScrollBar();
+
         int dx = event->angleDelta().x();
-        if (dx == 0 && (event->modifiers() & Qt::ShiftModifier))
-            dx = event->angleDelta().y();
+        if (shift)
+            dx = event->angleDelta().y(); // Shift+滚轮 → 横向
+        int dy = 0;
+        if (!shift) {
+            dy = event->pixelDelta().y();
+            if (dy == 0)
+                dy = event->angleDelta().y() / 3;
+        }
+
+        bool handled = false;
         if (dx != 0 && hbar->isVisible()) {
             hbar->setValue(hbar->value() - dx);
-            return;
+            handled = true;
         }
+        if (dy != 0 && vbar->isVisible()) {
+            vbar->setValue(vbar->value() - dy);
+            handled = true;
+        }
+        if (handled)
+            return;
         QPlainTextEdit::wheelEvent(event);
     }
 
