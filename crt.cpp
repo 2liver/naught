@@ -68,15 +68,22 @@ void CrtBackdrop::refreshGlow()
                       snap.scaled(half, Qt::IgnoreAspectRatio, Qt::SmoothTransformation),
                       4, 3)
                       .scaled(vp->size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-    // 二期真衍射：锐快照差分的竖直亮边，R 在右缘、B 在左缘（±1px、色相相反）
+    // 二期真衍射：锐快照差分的竖直亮边，R 在右缘、B 在左缘（±1px、色相相反）。
+    // 着色用纯字节写入——不用任何合成模式（DestinationIn+Alpha8 掩膜在
+    // 真机引擎上产生未初始化通道垃圾：黑轮廓/花屏绿块的元凶）
     {
         const auto tintEdge = [](const QImage &mask, const QColor &c) {
             QImage out(mask.size(), QImage::Format_ARGB32);
-            out.fill(c);
-            QPainter p(&out);
-            p.setCompositionMode(QPainter::CompositionMode_DestinationIn);
-            p.drawImage(0, 0, mask);
-            p.end();
+            for (int y = 0; y < mask.height(); ++y) {
+                const uchar *m = mask.constScanLine(y);
+                uchar *o = out.scanLine(y);
+                for (int x = 0; x < mask.width(); ++x) {
+                    o[x * 4 + 0] = uchar(c.blue());
+                    o[x * 4 + 1] = uchar(c.green());
+                    o[x * 4 + 2] = uchar(c.red());
+                    o[x * 4 + 3] = uchar(m[x] * c.alpha() / 255);
+                }
+            }
             return out;
         };
         m_edgeR = tintEdge(Crt::edgeDiff(snap, +1), QColor(255, 70, 20, int(255 * Crt::kDiffAlpha)));
@@ -243,18 +250,18 @@ void CrtOverlay::paintEvent(QPaintEvent *)
             p.drawImage(eat, edgeB);
         p.restore();
     }
-    // 磷粉激发：新敲入的字符短暂更亮（软边 blob ×3 圈近似辉光），随时间回落
+    // 磷粉激发：新敲入的字符短暂更亮——单个椭圆径向渐变（柔和光斑，
+    // 无同心圆轮廓；此前三圈圆角矩形叠加出"暗绿方块+翠绿线条"观感）
     if (m_exciteAge > 0.02 && !m_exciteRect.isNull()) {
-        const QPointF base = QPointF(m_editor->viewport()->pos()) + m_exciteRect.topLeft();
-        const qreal a = 0.16 * m_exciteAge;
+        const QRectF r = QRectF(QPointF(m_editor->viewport()->pos()) + m_exciteRect.topLeft(),
+                                m_exciteRect.size())
+                             .adjusted(-8, -8, 8, 8);
+        QRadialGradient g(r.center(), qMax(r.width(), r.height()));
+        g.setColorAt(0.0, QColor(255, 176, 0, int(64 * m_exciteAge)));
+        g.setColorAt(1.0, QColor(255, 176, 0, 0));
         p.setPen(Qt::NoPen);
-        for (int ring = 2; ring >= 0; --ring) {
-            const QRectF r = QRectF(base.x() - ring * 3, base.y() - ring * 3,
-                                    m_exciteRect.width() + ring * 6,
-                                    m_exciteRect.height() + ring * 6);
-            p.setBrush(QColor(255, 176, 0, int(255 * a / 3.0)));
-            p.drawRoundedRect(r, ring * 2 + 1, ring * 2 + 1);
-        }
+        p.setBrush(g);
+        p.drawEllipse(r);
     }
     // 暗角 + 反光 + 扫描线（烘进同一层，一次 blit）
     if (m_glass.size() != size())

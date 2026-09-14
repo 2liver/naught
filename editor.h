@@ -1172,6 +1172,28 @@ public:
                          qRed(bgPx), qGreen(bgPx), qBlue(bgPx));
                 return false;
             }
+            // 颜色分类取证：绿主导/红主导/蓝主导像素计数（坏液晶 = 绿色块泛滥）
+            {
+                int green = 0, red = 0, blue = 0, amber = 0, dark = 0, other = 0;
+                for (int y = 0; y < e.height(); ++y)
+                    for (int x = g; x < e.width() - 30; ++x) {
+                        const QRgb px = img.pixel(x, y);
+                        const int r = qRed(px), gr = qGreen(px), b = qBlue(px);
+                        if (gr > r + 40 && gr > b + 40 && gr > 100) ++green;
+                        else if (r > gr + 40 && r > b + 40 && r > 100) ++red;
+                        else if (b > r + 40 && b > gr + 40 && b > 100) ++blue;
+                        else if (r > 150 && gr > 80 && b < 90) ++amber;
+                        else if (r < 60 && gr < 60 && b < 60) ++dark;
+                        else ++other;
+                    }
+                qInfo("CRT-COLORS amber=%d green=%d red=%d blue=%d dark=%d other=%d",
+                      amber, green, red, blue, dark, other);
+                if (green > amber / 10 && green > 500) {
+                    qWarning("selftest FAIL: green-dominant pixels flood the CRT render (%d)",
+                             green);
+                    return false;
+                }
+            }
             // 扫描线：同列相邻行底色有明暗差（信息输出，防渲染层位错）
             auto rowMean = [&](int yMod, int x0, int x1) {
                 long sum = 0;
