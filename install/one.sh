@@ -26,6 +26,10 @@ mkdir -p "$PREFIX"
 rm -rf "$PREFIX/naught.app"
 cp -R "$TMP/naught.app" "$PREFIX/"
 
+# 未公证应用：剥掉下载隔离标记，否则首次启动被 Gatekeeper 拦（"已损坏/无法验证"）。
+# 只对刚装进本机的这份拷贝生效，不影响其它下载。
+xattr -dr com.apple.quarantine "$PREFIX/naught.app" 2>/dev/null || true
+
 LSREG="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 "$LSREG" -f "$PREFIX/naught.app" >/dev/null 2>&1 || true
 
