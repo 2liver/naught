@@ -227,7 +227,7 @@ protected:
                 const qreal stroke = std::clamp<qreal>(d * 0.08, 1.5, 8.0);
                 p.setPen(QPen(m_ink, stroke));
                 p.setBrush(Qt::NoBrush);
-                p.drawEllipse(fp, d / 2 - 1, d / 2 - 1);
+                p.drawEllipse(fp, d / 2 - stroke / 2, d / 2 - stroke / 2); // 外缘恰为笔刷直径，与擦除范围一致
             } else {
                 p.setPen(Qt::NoPen);
                 p.setBrush(m_ink);
@@ -1289,10 +1289,14 @@ private:
             const QRectF r = document()->documentLayout()->blockBoundingRect(block);
             const qreal y = top - vbar;
             if (top + r.height() > vbar) {
-                const qreal h = qreal(block.layout()->lineAt(0).height());
-                p.drawText(QRectF(0, y, m_gutterWidth - 6, h),
-                           Qt::AlignRight | Qt::AlignVCenter,
-                           QString::number(block.blockNumber() + 1));
+                // 数字基线与文字行基线重合（行框垂直居中在缩小后偏高）
+                QTextLayout *tl = block.layout();
+                const QTextLine line0 = tl->lineAt(0);
+                const qreal baseline = y + line0.y() + line0.ascent();
+                const QString num = QString::number(block.blockNumber() + 1);
+                const QFontMetricsF fm(p.font());
+                const qreal w = fm.horizontalAdvance(num);
+                p.drawText(QPointF(m_gutterWidth - 6 - w, baseline), num);
             }
             top += r.height();
             block = block.next();
