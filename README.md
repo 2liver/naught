@@ -4,8 +4,8 @@
 
 空白。打开即写，关闭即无。
 
-- 右键 / 双指点按：**摹**（全选并复制）· **空**（清空，可撤销）── **阴** · **阳** ── **涂**（画）· **擦**（橡皮擦）· **消**（清空全部笔迹）
-- `Ctrl/Cmd + S`：摹　`Ctrl/Cmd + N`：空　`Ctrl/Cmd + I`：阴　`Ctrl/Cmd + O`：阳　`Ctrl/Cmd + D`：涂　`Ctrl/Cmd + E`：擦　`Ctrl/Cmd + Shift + E`（或 `Shift + 空格`）：消　`Esc`：退出涂擦模式　`Ctrl/Cmd + Y`：重做
+- 右键 / 双指点按：**摹**（全选并复制）· **空**（清空，可撤销）── **阴** · **阳** ── **涂**（画）· **擦**（橡皮擦）· **消**（清空全部笔迹）── **编**（代码：等宽字体 + 行号 + 语法高亮，无运行无保存）
+- `Ctrl/Cmd + S`：摹　`Ctrl/Cmd + N`：空　`Ctrl/Cmd + I`：阴　`Ctrl/Cmd + O`：阳　`Ctrl/Cmd + D`：涂　`Ctrl/Cmd + E`：擦　`Ctrl/Cmd + Shift + E`（或 `Shift + 空格`）：消　`Ctrl/Cmd + B`：编　`Esc`：退出模式　`Ctrl/Cmd + Y`：重做
 - 字体缩放与笔刷互不干扰：`Ctrl/Cmd + = / - / 0` 缩放字号（按住加速）；`Ctrl/Cmd + Shift + = / - / 0` 调节笔刷（初始 1.5 × 字号，之后独立）
 - 画布层与文字分层：涂/擦只碰笔迹、空/撤销只碰文字；笔迹随文字滚动、每笔落笔时锁定笔宽（缩放不影响已画内容）；切换阴/阳时笔迹随文字变色；笔迹无撤销；打字为 I 形光标，涂/擦模式以画布足迹代替系统光标（实心墨点=笔刷直径，空心圆=擦除直径，随阴/阳变色，无尺寸上限）
 - `Ctrl/Cmd + 滚轮`、触控板捏合：缩放；触控板横向平移 / `Shift + 滚轮`：横向滚动
@@ -33,6 +33,12 @@
     curl -fsSL https://github.com/2liver/naught/releases/latest/download/naught-linux.AppImage -o ~/.local/bin/naught && chmod +x ~/.local/bin/naught
 
 也可到 [Releases](../../releases) 手动下载 dmg / zip / AppImage。
+
+## 从源码构建（需要 Qt 6 + CMake；语法高亮为可选依赖 KF6 SyntaxHighlighting）
+
+    git clone --depth 1 https://github.com/KDE/extra-cmake-modules.git
+    git clone --depth 1 https://github.com/KDE/syntax-highlighting.git
+    # 两者按常规 CMake 安装到同一前缀（如 ~/kf6），构建时把该前缀加入 CMAKE_PREFIX_PATH
 
 ## 从源码构建（需要 Qt 6 + CMake）
 

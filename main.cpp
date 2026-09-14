@@ -34,11 +34,19 @@
 #include <QScrollBar>
 #include <QStyleHints>
 #include <QTextBlock>
+#include <QTextCharFormat>
 #include <QTextCursor>
 #include <QTextDocument>
 #include <QTextLayout>
 #include <QTimer>
 #include <QWheelEvent>
+
+#ifdef NAUGHT_WITH_HIGHLIGHT
+#include <KSyntaxHighlighting/Definition>
+#include <KSyntaxHighlighting/Repository>
+#include <KSyntaxHighlighting/SyntaxHighlighter>
+#include <KSyntaxHighlighting/Theme>
+#endif
 
 // 画布层：独立于文本，浮于文字之上。笔迹存文档坐标——随滚动平移、
 // 不随缩放变化（每笔在落笔瞬间锁定自己的笔宽）；颜色随阴/阳；事件全部穿透。
@@ -169,31 +177,36 @@ public:
 protected:
     void paintEvent(QPaintEvent *) override
     {
-        QWidget *vp = parentWidget();
-        if (vp && size() != vp->size())
-            setGeometry(vp->rect());
+        QWidget *par = parentWidget();
+        if (auto *area = qobject_cast<QAbstractScrollArea *>(par))
+            m_vpOffset = area->viewport()->pos();
+        if (par && size() != par->size())
+            setGeometry(par->rect());
 
         QPainter p(this);
+        if (!p.isActive())
+            return;
         p.setRenderHint(QPainter::Antialiasing);
         p.save();
-        p.translate(-m_offset);
+        p.translate(QPointF(m_vpOffset) - m_offset); // 笔迹：文档坐标（随滚动）
         for (const Stroke &s : m_strokes)
             drawStroke(p, s.pts, s.width);
         drawStroke(p, m_active.pts, m_active.width);
         p.restore();
 
-        // 画笔足迹：视口坐标（不随滚动），尺寸=真实口径，无系统光标尺寸上限
+        // 画笔足迹：窗口坐标（不随滚动），尺寸=真实口径，无系统光标尺寸上限
+        const QPointF fp = m_fpPos + QPointF(m_vpOffset);
         if (m_fpVisible) {
             const qreal d = m_fpErase ? m_brush * 1.4 : m_brush;
             if (m_fpErase) {
                 const qreal stroke = std::clamp<qreal>(d * 0.08, 1.5, 8.0);
                 p.setPen(QPen(m_ink, stroke));
                 p.setBrush(Qt::NoBrush);
-                p.drawEllipse(m_fpPos, d / 2 - 1, d / 2 - 1);
+                p.drawEllipse(fp, d / 2 - 1, d / 2 - 1);
             } else {
                 p.setPen(Qt::NoPen);
                 p.setBrush(m_ink);
-                p.drawEllipse(m_fpPos, d / 2, d / 2);
+                p.drawEllipse(fp, d / 2, d / 2);
             }
         }
     }
@@ -237,6 +250,7 @@ private:
     QColor m_ink = QColor(0, 0, 0);
     qreal m_brush = 20.0;
     QPointF m_offset;
+    QPoint m_vpOffset;
     QVector<Stroke> m_strokes;
     Stroke m_active;
     bool m_fpVisible = false;
@@ -350,6 +364,7 @@ public:
         setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
 
         m_baseFont = QFontDatabase::systemFont(QFontDatabase::GeneralFont);
+        m_codeFont = QFontDatabase::systemFont(QFontDatabase::FixedFont);
         m_baseSize = m_baseFont.pointSize();
         if (m_baseSize <= 0)
             m_baseSize = 12;
@@ -420,8 +435,10 @@ public:
         connect(hsb, &ZenScrollBar::trackClicked, this, [this](QPoint pos) { placeCaretAtEdge(false, pos); });
         m_scrollHideTimer.start(1500);
 
-        // 画布层（涂/擦）：笔迹随滚动平移，颜色随阴/阳，笔刷随字号
-        m_canvas = new Canvas(viewport());
+        // 画布层（涂/擦）：覆盖整个窗口（含滚动条区），画布与窗口严格一致；
+        // 置于滚动条之下、文字区之上
+        m_canvas = new Canvas(this);
+        m_canvas->stackUnder(verticalScrollBar());
         m_canvas->show();
         m_canvas->setInk(m_dark ? QColor(255, 255, 255) : QColor(0, 0, 0));
         m_brushSize = m_baseSize * BRUSH_SCALE;
@@ -464,7 +481,7 @@ public:
         applyScheme();
     }
 
-    enum class Mode { Normal, Draw, Erase };
+    enum class Mode { Normal, Draw, Erase, Code };
 
     bool isDark() const { return m_dark; }
     Mode mode() const { return m_mode; }
@@ -475,9 +492,14 @@ public:
             m_canvas->clearAll();
     }
 
+    void brushUp() { brushStep(+1); }
+    void brushDown() { brushStep(-1); }
+    void brushDefault() { brushReset(); }
+
     void toggleMode(Mode m)
     {
         m_mode = (m_mode == m) ? Mode::Normal : m;
+        setCodeMode(m_mode == Mode::Code);
         updateModeCursor();
     }
 
@@ -810,6 +832,26 @@ public:
                 return false;
             }
         }
+        // 编模式：等宽字体 + 行号槽 + 退出复原
+        e.toggleMode(Editor::Mode::Code);
+        QApplication::processEvents();
+        if (e.document()->defaultFont().family()
+            != QFontDatabase::systemFont(QFontDatabase::FixedFont).family()) {
+            qWarning("selftest FAIL: code mode font is not the fixed font");
+            return false;
+        }
+        if (e.viewport()->pos().x() <= 0) {
+            qWarning("selftest FAIL: code mode gutter missing");
+            return false;
+        }
+        e.toggleMode(Editor::Mode::Code);
+        QApplication::processEvents();
+        if (e.viewport()->pos().x() != 0
+            || e.document()->defaultFont().family()
+                != QFontDatabase::systemFont(QFontDatabase::GeneralFont).family()) {
+            qWarning("selftest FAIL: exiting code mode did not restore layout/font");
+            return false;
+        }
         return true;
     }
 
@@ -844,6 +886,12 @@ protected:
         connect(aCa, &QAction::triggered, this, [this] { toggleMode(Mode::Erase); });
         connect(aXiao, &QAction::triggered, this, [this] { m_canvas->clearAll(); });
 
+        menu.addSeparator();
+        QAction *aBian = menu.addAction(QStringLiteral("编"));
+        aBian->setCheckable(true);
+        aBian->setChecked(m_mode == Mode::Code);
+        connect(aBian, &QAction::triggered, this, [this] { toggleMode(Mode::Code); });
+
         menu.exec(event->globalPos());
     }
 
@@ -872,6 +920,7 @@ protected:
         }
         if (event->key() == Qt::Key_Escape && m_mode != Mode::Normal) {
             m_mode = Mode::Normal;
+            setCodeMode(false);
             updateModeCursor();
             return;
         }
@@ -885,6 +934,9 @@ protected:
                 return;
             case Qt::Key_D:
                 toggleMode(Mode::Draw);
+                return;
+            case Qt::Key_B:
+                toggleMode(Mode::Code); // 编：编织代码
                 return;
             case Qt::Key_I:
                 setDark(true); // 阴：I 如冰（阴冷）
@@ -1035,7 +1087,7 @@ protected:
             if (event->type() == QEvent::MouseMove) {
                 const auto *me = static_cast<QMouseEvent *>(event);
                 m_lastMouse = me->position();
-                if (m_mode != Mode::Normal) {
+                if (m_mode == Mode::Draw || m_mode == Mode::Erase) {
                     m_canvas->setFootprint(true, m_lastMouse, m_mode == Mode::Erase);
                     if (me->buttons() & Qt::LeftButton) {
                         const QPointF doc = viewportPosToDoc(me->position());
@@ -1047,7 +1099,8 @@ protected:
                     return true; // 模式内移动不打扰文本
                 }
             }
-            if (event->type() == QEvent::Leave && m_mode != Mode::Normal) {
+            if (event->type() == QEvent::Leave
+                && (m_mode == Mode::Draw || m_mode == Mode::Erase)) {
                 m_canvas->endStroke(); // 拖出窗口时收笔
                 m_canvas->setFootprintVisible(false);
             }
@@ -1065,7 +1118,7 @@ protected:
                 }
             }
             // 涂/擦模式：左键在画布层作画或擦除，文本光标不随点击移动
-            if (m_mode != Mode::Normal) {
+            if (m_mode == Mode::Draw || m_mode == Mode::Erase) {
                 if (event->type() == QEvent::MouseButtonPress) {
                     const auto *me = static_cast<QMouseEvent *>(event);
                     if (me->button() == Qt::LeftButton) {
@@ -1119,17 +1172,135 @@ private:
             m_canvas->setInk(m_dark ? QColor(255, 255, 255) : QColor(0, 0, 0));
         if (m_mode != Mode::Normal)
             updateModeCursor(); // 光标跟随墨色与当前笔刷
+#ifdef NAUGHT_WITH_HIGHLIGHT
+        if (m_codeMode && m_hl && m_repo) {
+            m_hl->setTheme(m_repo->defaultTheme(m_dark ? KSyntaxHighlighting::Repository::DarkTheme
+                                                       : KSyntaxHighlighting::Repository::LightTheme));
+            m_hl->rehighlight();
+        }
+#endif
     }
 
     void applyZoom()
     {
         // O(1)：只改文档默认字号并标脏，重排由 Qt 惰性完成（仅可见区域）。
-        QFont f = m_baseFont;
-        f.setPointSizeF(m_size);
+        QFont f = activeFont();
         document()->setDefaultFont(f);
         document()->markContentsDirty(0, document()->characterCount());
         setFont(f);
         // 笔刷与字号脱钩：只由 Cmd/Ctrl+Shift+= / - / 0 控制
+    }
+
+    void setCodeMode(bool on)
+    {
+        if (m_codeMode == on)
+            return;
+        m_codeMode = on;
+        applyZoom(); // 等宽/比例字体 + 标脏
+        if (on) {
+            // 行号槽：容纳最大行号
+            const int digits = QString::number(qMax(1, document()->blockCount())).size();
+            const QFontMetricsF fm(activeFont());
+            m_gutterWidth = int(fm.horizontalAdvance(QString(digits, QLatin1Char('8'))) + 16);
+            setViewportMargins(m_gutterWidth, 0, 0, 0);
+            startHighlight();
+        } else {
+            m_gutterWidth = 0;
+            setViewportMargins(0, 0, 0, 0);
+            stopHighlight();
+        }
+        viewport()->update();
+    }
+
+    void paintEvent(QPaintEvent *event) override
+    {
+        QPlainTextEdit::paintEvent(event);
+        if (!m_codeMode || m_gutterWidth <= 0)
+            return;
+        // 行号：跟随滚动，颜色克制
+        QPainter p(this);
+        QFont nf = m_codeFont;
+        nf.setPointSizeF(m_size * 0.85);
+        p.setFont(nf);
+        p.setPen(m_dark ? QColor(0x6a, 0x6a, 0x6a) : QColor(0xb0, 0xb0, 0xb0));
+        const int vbar = verticalScrollBar()->value();
+        QTextBlock block = firstVisibleBlock();
+        while (block.isValid()) {
+            const QRectF r = document()->documentLayout()->blockBoundingRect(block);
+            const qreal y = r.top() - vbar;
+            if (y > height())
+                break;
+            if (r.bottom() - vbar >= 0) {
+                const qreal h = qreal(block.layout()->lineAt(0).height());
+                p.drawText(QRectF(0, y, m_gutterWidth - 8, h),
+                           Qt::AlignRight | Qt::AlignVCenter,
+                           QString::number(block.blockNumber() + 1));
+            }
+            block = block.next();
+        }
+    }
+
+#ifdef NAUGHT_WITH_HIGHLIGHT
+    void startHighlight()
+    {
+        if (!m_repo)
+            m_repo = new KSyntaxHighlighting::Repository();
+        if (!m_hl)
+            m_hl = new KSyntaxHighlighting::SyntaxHighlighter(document());
+        m_hl->setTheme(m_repo->defaultTheme(m_dark ? KSyntaxHighlighting::Repository::DarkTheme
+                                                   : KSyntaxHighlighting::Repository::LightTheme));
+        m_hl->setDefinition(m_repo->definitionForName(detectLanguage(document()->toPlainText().left(4096))));
+        m_hl->rehighlight();
+    }
+
+    void stopHighlight()
+    {
+        delete m_hl;
+        m_hl = nullptr;
+        delete m_repo;
+        m_repo = nullptr;
+        QTextCursor c(document());
+        c.select(QTextCursor::Document);
+        c.setCharFormat(QTextCharFormat()); // 高亮颜色只属于编模式
+    }
+
+    // 内容嗅探语言：临时栖息地没有文件名，凭内容猜
+    static QString detectLanguage(const QString &text)
+    {
+        const QString s = text.trimmed();
+        if (s.isEmpty())
+            return QString();
+        if (s.startsWith(QLatin1String("#!/")))
+            return QStringLiteral("Bash");
+        if (s.startsWith(QLatin1String("<?xml")))
+            return QStringLiteral("XML");
+        if (s.startsWith(QLatin1String("<?php")))
+            return QStringLiteral("PHP");
+        if (s.startsWith(QLatin1String("<!DOCTYPE")) || s.startsWith(QLatin1String("<html")))
+            return QStringLiteral("HTML");
+        if (s.contains(QLatin1String("#include")) || s.contains(QLatin1String("int main"))
+            || s.contains(QLatin1String("std::")) || s.contains(QLatin1String("template <")))
+            return QStringLiteral("C++");
+        if (s.contains(QLatin1String("import java")) || s.contains(QLatin1String("public class")))
+            return QStringLiteral("Java");
+        if (s.contains(QLatin1String("package main")) || s.contains(QLatin1String("func ")))
+            return QStringLiteral("Go");
+        if (s.contains(QLatin1String("fn ")) || s.contains(QLatin1String("let mut")))
+            return QStringLiteral("Rust");
+        if (s.contains(QLatin1String("def ")) || (s.contains(QLatin1String("import ")) && s.contains(QLatin1Char(':'))))
+            return QStringLiteral("Python");
+        if (s.contains(QLatin1String("function")) || s.contains(QLatin1String("const "))
+            || s.contains(QLatin1String("=>")))
+            return QStringLiteral("JavaScript");
+        return QStringLiteral("C++");
+    }
+#endif
+
+    QFont activeFont() const
+    {
+        QFont f = m_codeMode ? m_codeFont : m_baseFont;
+        f.setPointSizeF(m_size);
+        return f;
     }
 
     void startHold(int dir)
@@ -1144,7 +1315,7 @@ private:
         const int step = std::max(1, int(std::lround(m_brushSize * 0.1)));
         m_brushSize = std::clamp<qreal>(m_brushSize + dir * step, 2, 1024);
         m_canvas->setBrushWidth(m_brushSize);
-        if (m_mode != Mode::Normal)
+        if (m_mode == Mode::Draw || m_mode == Mode::Erase)
             updateModeCursor();
     }
 
@@ -1152,7 +1323,7 @@ private:
     {
         m_brushSize = m_baseSize * BRUSH_SCALE;
         m_canvas->setBrushWidth(m_brushSize);
-        if (m_mode != Mode::Normal)
+        if (m_mode == Mode::Draw || m_mode == Mode::Erase)
             updateModeCursor();
     }
 
@@ -1162,7 +1333,7 @@ private:
     void updateModeCursor()
     {
         QWidget *vp = viewport();
-        if (m_mode == Mode::Normal) {
+        if (m_mode == Mode::Normal || m_mode == Mode::Code) {
             vp->unsetCursor();
             m_canvas->setFootprintVisible(false);
             return;
@@ -1287,6 +1458,13 @@ private:
     Mode m_mode = Mode::Normal;
     qreal m_brushSize = 20.0;
     QPointF m_lastMouse = QPointF(-1, -1);
+    bool m_codeMode = false;
+    int m_gutterWidth = 0;
+    QFont m_codeFont;
+#ifdef NAUGHT_WITH_HIGHLIGHT
+    KSyntaxHighlighting::Repository *m_repo = nullptr;
+    KSyntaxHighlighting::SyntaxHighlighter *m_hl = nullptr;
+#endif
 
     static constexpr int BLINK_HALF_MS = 750; // 亮/灭各 750ms，一次“长闪烁”1.5s
     static constexpr int SLEEP_BLINKS = 1;    // 完整闪烁次数；改成 2 则休眠前闪两次
@@ -1338,6 +1516,21 @@ int main(int argc, char **argv)
         bXiao->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+E")));
         bTu->setCheckable(true);
         bCa->setCheckable(true);
+        fa->addSeparator();
+        QAction *bBian = fa->addAction(QStringLiteral("编"));
+        bBian->setShortcut(QKeySequence(QStringLiteral("Ctrl+B")));
+        bBian->setCheckable(true);
+        fa->addSeparator();
+        // 字号/笔刷不做成真键等效（系统接管会毁掉按住加速），提示内嵌标签
+        QAction *bZoomIn = fa->addAction(QStringLiteral("字号放大 ⌘="));
+        QAction *bZoomOut = fa->addAction(QStringLiteral("字号缩小 ⌘-"));
+        QAction *bZoom0 = fa->addAction(QStringLiteral("字号复位 ⌘0"));
+        QAction *bBrushIn = fa->addAction(QStringLiteral("笔刷加粗 ⇧⌘="));
+        QAction *bBrushOut = fa->addAction(QStringLiteral("笔刷变细 ⇧⌘-"));
+        QAction *bBrush0 = fa->addAction(QStringLiteral("笔刷复位 ⇧⌘0"));
+        fa->addSeparator();
+        QAction *bRedo = fa->addAction(QStringLiteral("重做"));
+        bRedo->setShortcut(QKeySequence(QStringLiteral("Ctrl+Y")));
         QObject::connect(bMo, &QAction::triggered, &editor, [&editor] { editor.mo(); });
         QObject::connect(bKong, &QAction::triggered, &editor, [&editor] { editor.kong(); });
         QObject::connect(bYin, &QAction::triggered, &editor, [&editor] { editor.setDark(true); });
@@ -1345,11 +1538,20 @@ int main(int argc, char **argv)
         QObject::connect(bTu, &QAction::triggered, &editor, [&editor] { editor.toggleMode(Editor::Mode::Draw); });
         QObject::connect(bCa, &QAction::triggered, &editor, [&editor] { editor.toggleMode(Editor::Mode::Erase); });
         QObject::connect(bXiao, &QAction::triggered, &editor, [&editor] { editor.clearInk(); });
-        QObject::connect(fa, &QMenu::aboutToShow, &editor, [&editor, bYin, bYang, bTu, bCa] {
+        QObject::connect(bBian, &QAction::triggered, &editor, [&editor] { editor.toggleMode(Editor::Mode::Code); });
+        QObject::connect(bZoomIn, &QAction::triggered, &editor, [&editor] { editor.zoom(1); });
+        QObject::connect(bZoomOut, &QAction::triggered, &editor, [&editor] { editor.zoom(-1); });
+        QObject::connect(bZoom0, &QAction::triggered, &editor, [&editor] { editor.zoomReset(); });
+        QObject::connect(bBrushIn, &QAction::triggered, &editor, [&editor] { editor.brushUp(); });
+        QObject::connect(bBrushOut, &QAction::triggered, &editor, [&editor] { editor.brushDown(); });
+        QObject::connect(bBrush0, &QAction::triggered, &editor, [&editor] { editor.brushDefault(); });
+        QObject::connect(bRedo, &QAction::triggered, &editor, [&editor] { editor.redo(); });
+        QObject::connect(fa, &QMenu::aboutToShow, &editor, [&editor, bYin, bYang, bTu, bCa, bBian] {
             bYin->setChecked(editor.isDark());
             bYang->setChecked(!editor.isDark());
             bTu->setChecked(editor.mode() == Editor::Mode::Draw);
             bCa->setChecked(editor.mode() == Editor::Mode::Erase);
+            bBian->setChecked(editor.mode() == Editor::Mode::Code);
         });
     }
 #endif

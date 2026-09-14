@@ -31,8 +31,22 @@ jobs:
           version: "6.9.3"
           cache: true
 
+      - name: Build KF6 syntax-highlighting
+        shell: bash
+        run: |
+          set -e
+          PREFIX="$RUNNER_TEMP/kf6"
+          git clone --depth 1 --quiet https://github.com/KDE/extra-cmake-modules.git "$RUNNER_TEMP/ecm"
+          git clone --depth 1 --quiet https://github.com/KDE/syntax-highlighting.git "$RUNNER_TEMP/sh"
+          cmake -S "$RUNNER_TEMP/ecm" -B "$RUNNER_TEMP/ecm-build" -DCMAKE_INSTALL_PREFIX="$PREFIX"
+          cmake --build "$RUNNER_TEMP/ecm-build" --config Release --target install
+          cmake -S "$RUNNER_TEMP/sh" -B "$RUNNER_TEMP/sh-build" \
+            -DCMAKE_INSTALL_PREFIX="$PREFIX" -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$PREFIX;$QT_ROOT_DIR"
+          cmake --build "$RUNNER_TEMP/sh-build" --config Release --target install --parallel
+
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release ${{ matrix.cmake_args }}
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/kf6;$QT_ROOT_DIR" ${{ matrix.cmake_args }}
 
       - name: Build
         run: cmake --build build --config Release --parallel
@@ -60,6 +74,12 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           macdeployqt build/naught.app
+          DYLIB=$(ls "$RUNNER_TEMP"/kf6/lib/libKF6SyntaxHighlighting.*.dylib | head -1)
+          cp "$DYLIB" build/naught.app/Contents/Frameworks/
+          BASE=$(basename "$DYLIB")
+          LOAD=$(otool -L build/naught.app/Contents/MacOS/naught | grep KF6Syntax | awk '{print $1}')
+          install_name_tool -change "$LOAD" "@executable_path/../Frameworks/$BASE" build/naught.app/Contents/MacOS/naught
+          install_name_tool -id "@executable_path/../Frameworks/$BASE" "build/naught.app/Contents/Frameworks/$BASE"
           ditto -c -k --keepParent build/naught.app naught-macos.zip
           hdiutil create -volname "naught" -srcfolder build/naught.app -ov -format UDZO naught-macos.dmg
 
@@ -68,6 +88,7 @@ jobs:
         shell: pwsh
         run: |
           windeployqt build\Release\naught.exe
+          Copy-Item "$env:RUNNER_TEMP\kf6\bin\KF6SyntaxHighlighting.dll" build\Release\
           Compress-Archive -Path build\Release\* -DestinationPath naught-windows.zip
 
       - name: Package Linux (AppImage)

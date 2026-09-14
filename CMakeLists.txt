@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(naught VERSION 0.2.13 LANGUAGES CXX)
+project(naught VERSION 0.3.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -10,6 +10,13 @@ find_package(Qt6 REQUIRED COMPONENTS Widgets)
 
 qt_add_executable(naught WIN32 MACOSX_BUNDLE main.cpp resources/resources.qrc)
 target_link_libraries(naught PRIVATE Qt6::Widgets)
+
+# 语法高亮（可选）：未找到时 编 模式退化为 等宽字体 + 行号
+find_package(KF6SyntaxHighlighting QUIET)
+if(KF6SyntaxHighlighting_FOUND)
+    target_link_libraries(naught PRIVATE KF6::SyntaxHighlighting)
+    target_compile_definitions(naught PRIVATE NAUGHT_WITH_HIGHLIGHT)
+endif()
 
 if(MSVC)
     target_compile_options(naught PRIVATE /utf-8)
