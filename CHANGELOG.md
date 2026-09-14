@@ -4,6 +4,10 @@
 
 1.0 之约：功能冻结，只等发布仪式（版本号 → 1.0.0 并打正式标签）。
 
+## 0.3.14
+
+- 修复：CI 的 macOS 包未钉部署目标，跟随构建机系统版本（15+），在 macOS 13.7 上启动报 `kLSIncompatibleSystemVersionErr`。现应用与 KF6 动态库均钉 `CMAKE_OSX_DEPLOYMENT_TARGET=12.0`，CI 增加 `vtool` 校验（minos == 12.0）锁死回归。
+
 ## 0.3.13
 
 计划阶段收官：模块化 → 行号几何 → 性能 → 深度审核。
