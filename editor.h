@@ -170,8 +170,10 @@ public:
         m_canvas->setBrushWidth(m_brushSize);
         const auto syncInkOffset = [this](int) {
             m_canvas->setScrollOffset(QPointF(horizontalScrollBar()->value(), verticalScrollBar()->value()));
-            if (m_crtOverlay)
+            if (m_crtOverlay) {
                 m_crtOverlay->update(); // 辉光层随滚动重排/对齐
+                m_crtSettleTimer.start(400); // 滚动停下后半拍自归位（磷粉惰性）
+            }
         };
         connect(verticalScrollBar(), &QScrollBar::valueChanged, this, syncInkOffset);
         connect(horizontalScrollBar(), &QScrollBar::valueChanged, this, syncInkOffset);
@@ -424,6 +426,13 @@ public:
     QImage crtSnapImage() const
     {
         return m_crtOverlay ? m_crtOverlay->snapImage() : QImage();
+    }
+    // 辉光背景纹理：视口背景画刷（字永远实心压在上面——辉光在文字之下）
+    void setCrtGlowTexture(const QImage &tex)
+    {
+        m_crtGlowTex = tex;
+        if (m_crt)
+            applyScheme();
     }
     // 光晕快照与当前滚动之间的**像素位移**（vbar 是行号单位，不能直接相减）
     QPointF crtGlowShift() const
@@ -1187,8 +1196,8 @@ public:
                 qWarning("selftest FAIL: CRT text color not amber");
                 return false;
             }
-            if (e.palette().color(QPalette::Base) != Crt::kBg) {
-                qWarning("selftest FAIL: CRT base not the opaque phosphor background");
+            if (e.palette().brush(QPalette::Base).style() != Qt::TexturePattern) {
+                qWarning("selftest FAIL: CRT base not the glow texture brush");
                 return false;
             }
             // 画面：文字区出现琥珀磷光像素；空区是近黑磷底（不是白）
@@ -1691,10 +1700,13 @@ private:
     {
         QPalette pal = palette();
         if (m_crt) {
-            // 磷光模式自成一套配色（无视阴/阳）：视口**不透明**（透明视口
-            // 在真机窗口合成器上产生未初始化内存的"绿洞"——已废除此架构）
+            // 磷光模式自成一套配色（无视阴/阳）：视口不透明，Base 为
+            // 辉光背景纹理画刷（Qt 原生合成，字压在其上）
             pal.setColor(QPalette::Window, Crt::kBg);
-            pal.setColor(QPalette::Base, Crt::kBg);
+            if (!m_crtGlowTex.isNull())
+                pal.setBrush(QPalette::Base, QBrush(QPixmap::fromImage(m_crtGlowTex)));
+            else
+                pal.setColor(QPalette::Base, Crt::kBg);
             pal.setColor(QPalette::Text, Crt::kInk);
             pal.setColor(QPalette::Highlight, QColor(0x5C, 0x3E, 0x00, 0xB0));
             pal.setColor(QPalette::HighlightedText, Crt::kInk);
@@ -2209,6 +2221,7 @@ private:
     QFont m_crtFont;
     static inline QString s_crtFamily;
     QTimer m_crtSettleTimer;
+    QImage m_crtGlowTex;
 #ifdef NAUGHT_WITH_HIGHLIGHT
     KSyntaxHighlighting::Repository *m_repo = nullptr;
     KSyntaxHighlighting::SyntaxHighlighter *m_hl = nullptr;

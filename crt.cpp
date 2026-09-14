@@ -44,17 +44,6 @@ CrtOverlay::CrtOverlay(Editor *editor)
         if (m_warm <= 0.0)
             m_warmTimer.stop();
     });
-    // 残影渐暗：30ms 一拍，约 250ms 熄灭——渐变包络，不是开关
-    m_fadeTimer.setInterval(30);
-    connect(&m_fadeTimer, &QTimer::timeout, this, [this] {
-        if (m_ghostAlpha <= 0.0) {
-            m_fadeTimer.stop();
-            m_ghost = QImage();
-            return;
-        }
-        m_ghostAlpha -= 0.06;
-        update();
-    });
 }
 
 void CrtOverlay::warmUp()
@@ -117,22 +106,31 @@ void CrtOverlay::refreshGlow()
     // 真高斯辉光：全分辨率三轮盒式模糊（半分辨率版本在放大时出块状稀碎，
     // 真高斯形状 + 全分辨率 = 任何字号都平滑）
     QImage glow = Crt::gaussianBlur(snap, 4, 3);
-    // 磷粉余晖：同一滚动位置下旧帧 15% 混入；位置变化时晋升为屏幕固定
-    // 的残影（渐暗熄灭，不跟着内容跑）
+    // 磷粉余晖：旧帧按位移幅度混入（同一位置 15%，位移越大混得越淡——
+    // 滚动残影随刷新自然自愈，不需要独立渐变层）
     const QPointF shift = m_editor->crtGlowShift();
-    if (!m_glow.isNull() && shift.manhattanLength() <= 0.5) {
-        QPainter pg(&glow);
-        pg.setOpacity(0.15);
-        pg.drawImage(0, 0, m_glow);
-    } else if (!m_glow.isNull()) {
-        m_ghost = m_glow;
-        m_ghostPos = QPointF(vp->pos()) - shift;
-        m_ghostAlpha = qMin(0.3, m_ghostAlpha + 0.25);
-        m_fadeTimer.start();
+    if (!m_glow.isNull()) {
+        const qreal persist = qMax(0.0, 0.15 - shift.manhattanLength() * 0.002);
+        if (persist > 0.01) {
+            QPainter pg(&glow);
+            pg.setOpacity(persist);
+            pg.drawImage(0, 0, m_glow);
+        }
     }
     m_glow = glow;
     m_glowScroll = QPoint(m_editor->horizontalScrollBar()->value(),
                           m_editor->verticalScrollBar()->value());
+    // 背景纹理 = 磷底 + 辉光：作为视口背景画刷（Qt 原生合成，字永远
+    // 实心压在上面——辉光在"着色器底下"，正是分层该有的样子）
+    {
+        QImage tex(snap.size(), QImage::Format_ARGB32);
+        tex.fill(Crt::kBg);
+        QPainter pt(&tex);
+        pt.setOpacity(0.55);
+        pt.drawImage(0, 0, m_glow);
+        pt.end();
+        m_editor->setCrtGlowTexture(tex);
+    }
     // 真衍射：竖直亮边 R 右 / B 左。着色用纯字节写入（合成模式在真机
     // 引擎上产生未初始化通道垃圾：黑轮廓/花屏绿块的元凶）
     const auto tintEdge = [](const QImage &mask, const QColor &c) {
@@ -177,22 +175,6 @@ void CrtOverlay::paintEvent(QPaintEvent *)
         else if (m_dirty && m_sinceRefresh.elapsed() > Crt::kGlowMinIntervalMs)
             refreshGlow();
     }
-    // 残影：屏幕固定、渐暗熄灭
-    if (!m_ghost.isNull() && m_ghostAlpha > 0.01) {
-        p.setOpacity(m_ghostAlpha);
-        p.drawImage(m_ghostPos, m_ghost);
-        p.setOpacity(1.0);
-    }
-    // 辉光（文字上方的日冕：模糊快照叠在字形上，柔化+发光同源）
-    if (!m_glow.isNull()) {
-        p.setClipRect(vp->geometry());
-        p.setOpacity(0.35); // 打字动效参考值 0.4 档位；盖在字上要克制
-        p.drawImage(QPointF(vp->pos()) - m_editor->crtGlowShift(), m_glow);
-        p.setOpacity(1.0);
-        // 衍射彩边暂不绘制：放大时字形竖边成灾（"纵向连带"乱纹），
-        // 边差分算法保留并通过自检，待真彩子像素模型上线后以正确方式呈现
-        p.setClipping(false);
-    }
     // 磷粉激发：单个椭圆径向渐变（柔和光斑，无轮廓）
     if (m_exciteAge > 0.02 && !m_exciteRect.isNull()) {
         const QRectF r = QRectF(QPointF(vp->pos()) + m_exciteRect.topLeft(),
@@ -205,11 +187,21 @@ void CrtOverlay::paintEvent(QPaintEvent *)
         p.setBrush(g);
         p.drawEllipse(r);
     }
-    // 暗角 + 反光 + 扫描线（烘进同一层，一次 blit）
+    // 暗角 + 扫描线（烘进同一层，一次 blit）
     if (m_glass.size() != size())
         rebuildGlass();
     if (!m_glass.isNull())
         p.drawImage(0, 0, m_glass);
+    // 玻璃反光带：随刷新带相位缓慢漂移（光源在呼吸，不是死贴图）
+    {
+        const qreal drift = qSin(m_bandPhase * 2.0 * 3.14159265) * 0.12;
+        QLinearGradient sheen(rect().topLeft() + QPointF(int(drift * width()), 0),
+                              rect().bottomRight() + QPointF(int(drift * width()), 0));
+        sheen.setColorAt(0.42, QColor(255, 255, 255, 0));
+        sheen.setColorAt(0.5, QColor(255, 255, 255, 12));
+        sheen.setColorAt(0.58, QColor(255, 255, 255, 0));
+        p.fillRect(rect(), sheen);
+    }
     // 行亮度抖动（两帧交替：扫描线起伏，机器活着；1:1 全尺寸，无缩放）
     p.setOpacity(0.55);
     if (!m_noise[m_noiseFrame].isNull())
@@ -256,11 +248,6 @@ void CrtOverlay::rebuildGlass()
     g.setColorAt(0.55, QColor(0, 0, 0, 0));
     g.setColorAt(1.0, QColor(0, 0, 0, 70));
     p.fillRect(rect(), g);
-    QLinearGradient sheen(rect().topLeft(), rect().bottomRight());
-    sheen.setColorAt(0.42, QColor(255, 255, 255, 0));
-    sheen.setColorAt(0.5, QColor(255, 255, 255, 12));
-    sheen.setColorAt(0.58, QColor(255, 255, 255, 0));
-    p.fillRect(rect(), sheen);
     // 扫描线烘进本层：重绘时省掉一次平铺
     p.drawTiledPixmap(rect(), QPixmap::fromImage(m_scanMask));
 }

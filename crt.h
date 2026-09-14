@@ -156,8 +156,4 @@ private:
     QImage m_snap;  // 锐快照
     QImage m_edgeR; // 右缘红边
     QImage m_edgeB; // 左缘蓝边
-    QImage m_ghost; // 残影（屏幕固定渐暗）
-    QPointF m_ghostPos;
-    qreal m_ghostAlpha = 0.0;
-    QTimer m_fadeTimer;
 };
