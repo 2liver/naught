@@ -8,7 +8,14 @@ set(CMAKE_AUTORCC ON)
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets)
 
-qt_add_executable(naught WIN32 MACOSX_BUNDLE main.cpp resources/resources.qrc)
+qt_add_executable(naught WIN32 MACOSX_BUNDLE
+    main.cpp
+    line_number_area.cpp
+    canvas.h
+    editor.h
+    line_number_area.h
+    zen_scroll_bar.h
+    resources/resources.qrc)
 target_link_libraries(naught PRIVATE Qt6::Widgets)
 
 # 语法高亮（可选）：未找到时 编 模式退化为 等宽字体 + 行号
