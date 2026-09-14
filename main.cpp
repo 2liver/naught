@@ -805,6 +805,8 @@ protected:
         menu.addSeparator();
         QAction *aYin = menu.addAction(QStringLiteral("阴"));
         QAction *aYang = menu.addAction(QStringLiteral("阳"));
+        aYin->setShortcut(QKeySequence(QStringLiteral("Ctrl+I")));
+        aYang->setShortcut(QKeySequence(QStringLiteral("Ctrl+O")));
         aYin->setCheckable(true);
         aYang->setCheckable(true);
         aYin->setChecked(m_dark);
@@ -874,6 +876,12 @@ protected:
                 return;
             case Qt::Key_D:
                 toggleMode(Mode::Draw);
+                return;
+            case Qt::Key_I:
+                setDark(true); // 阴：I 如冰（阴冷）
+                return;
+            case Qt::Key_O:
+                setDark(false); // 阳：O 如太阳（圆日）
                 return;
             case Qt::Key_E:
                 if (event->modifiers() & Qt::ShiftModifier)
@@ -1294,6 +1302,8 @@ int main(int argc, char **argv)
         fa->addSeparator();
         QAction *bYin = fa->addAction(QStringLiteral("阴"));
         QAction *bYang = fa->addAction(QStringLiteral("阳"));
+        bYin->setShortcut(QKeySequence(QStringLiteral("Ctrl+I")));
+        bYang->setShortcut(QKeySequence(QStringLiteral("Ctrl+O")));
         bYin->setCheckable(true);
         bYang->setCheckable(true);
         fa->addSeparator();
