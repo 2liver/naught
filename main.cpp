@@ -59,6 +59,27 @@ public:
         bool operator==(const InkStroke &o) const { return width == o.width && pts == o.pts; }
     };
 
+    // 线段与圆的交点（靠近 a 侧），用于擦除边界精确切开
+    static QPointF circleCross(const QPointF &a, const QPointF &b, const QPointF &c, qreal r)
+    {
+        const QPointF d = b - a;
+        const QPointF f = a - c;
+        const qreal A = QPointF::dotProduct(d, d);
+        const qreal B = 2.0 * QPointF::dotProduct(f, d);
+        const qreal C = QPointF::dotProduct(f, f) - r * r;
+        if (A <= 0)
+            return a;
+        qreal disc = B * B - 4.0 * A * C;
+        if (disc < 0)
+            return a;
+        disc = std::sqrt(disc);
+        qreal t = (-B - disc) / (2.0 * A);
+        if (t < 0.0 || t > 1.0)
+            t = (-B + disc) / (2.0 * A);
+        t = std::clamp<qreal>(t, 0.0, 1.0);
+        return a + t * d;
+    }
+
     QVector<InkStroke> snapshot() const { return m_strokes; }
 
     void restore(const QVector<InkStroke> &strokes)
@@ -155,36 +176,32 @@ public:
         bool changed = false;
         for (int i = m_strokes.size() - 1; i >= 0; --i) {
             const InkStroke &s = m_strokes.at(i);
-            if (s.pts.size() == 1) {
-                if (QLineF(s.pts.at(0), c).length() <= r) {
-                    m_strokes.removeAt(i);
-                    changed = true;
-                }
-                continue;
-            }
-            QVector<bool> keep(s.pts.size(), true);
-            for (int j = 0; j + 1 < s.pts.size(); ++j) {
-                if (segDist(s.pts.at(j), s.pts.at(j + 1), c) <= r) {
-                    keep[j] = false;
-                    keep[j + 1] = false;
-                }
-            }
+            // 边界段在圆周处精确切开：通道像素级等于 2r = 笔刷
             QVector<InkStroke> pieces;
-            InkStroke run{s.width, {}};
+            QVector<QPointF> cur;
             bool removed = false;
+            bool inPrev = false;
             for (int j = 0; j < s.pts.size(); ++j) {
-                if (keep.at(j)) {
-                    run.pts.append(s.pts.at(j));
-                } else {
+                const bool inNow = QLineF(s.pts.at(j), c).length() <= r;
+                if (inNow) {
                     removed = true;
-                    if (!run.pts.isEmpty()) {
-                        pieces.append(run);
-                        run.pts.clear();
+                    if (!cur.isEmpty()) {
+                        // 外→内：当前段收于圆周切口
+                        cur.append(circleCross(s.pts.at(j - 1), s.pts.at(j), c, r));
+                        pieces.append(InkStroke{s.width, cur});
+                        cur.clear();
                     }
+                } else {
+                    if (cur.isEmpty() && j > 0 && inPrev) {
+                        // 内→外：新段始于圆周切口
+                        cur.append(circleCross(s.pts.at(j - 1), s.pts.at(j), c, r));
+                    }
+                    cur.append(s.pts.at(j));
                 }
+                inPrev = inNow;
             }
-            if (!run.pts.isEmpty())
-                pieces.append(run);
+            if (!cur.isEmpty())
+                pieces.append(InkStroke{s.width, cur});
             if (!removed)
                 continue;
             changed = true;
@@ -238,16 +255,6 @@ protected:
     }
 
 private:
-    static qreal segDist(const QPointF &a, const QPointF &b, const QPointF &c)
-    {
-        const QPointF ab = b - a;
-        const qreal len2 = QPointF::dotProduct(ab, ab);
-        if (len2 <= 0)
-            return QLineF(a, c).length();
-        const qreal t = std::clamp<qreal>(QPointF::dotProduct(c - a, ab) / len2, 0.0, 1.0);
-        return QLineF(a + t * ab, c).length();
-    }
-
     void drawStroke(QPainter &p, const QVector<QPointF> &pts, qreal width) const
     {
         if (pts.isEmpty())
@@ -556,6 +563,8 @@ public:
     }
 
     bool inkEmpty() const { return m_canvas && m_canvas->snapshot().isEmpty(); }
+    QVector<Canvas::InkStroke> inkSnapshot() const { return m_canvas ? m_canvas->snapshot() : QVector<Canvas::InkStroke>{}; }
+    qreal brushSize() const { return m_brushSize; }
 
     void brushUp() { brushStep(+1); }
     void brushDown() { brushStep(-1); }
@@ -867,7 +876,11 @@ public:
                 return false;
             }
         }
-        // 编模式：等宽字体 + 行号槽 + 退出复原
+        // 编模式：等宽字体 + 行号槽 + 退出复原（ASCII 文档，与真实代码一致）
+        e.setPlainText(QStringLiteral("code1\ncode2\ncode3\ncode4\n"));
+        e.resize(400, 300);
+        e.show();
+        QApplication::processEvents();
         e.toggleCodeMode();
         QApplication::processEvents();
         if (e.document()->defaultFont().family()
@@ -946,6 +959,71 @@ public:
                 return false;
             }
             e.toggleMode(Editor::Mode::Draw); // 退出模式
+        }
+        // 擦除通道宽度 = 笔刷宽度：像素级验证
+        {
+            e.toggleCodeMode();
+            if (e.codeMode())
+                e.toggleCodeMode(); // 退出编
+            e.setPlainText(QString());
+            e.clearInk(); // 清掉此前测试的笔迹，避免污染通道测量
+            e.resize(400, 300);
+            e.show();
+            QApplication::processEvents();
+            for (int i = 0; i < 30 && e.brushSize() < 40.0; ++i)
+                e.brushUp();
+            const qreal brush = e.brushSize();
+            QWidget *vp = e.viewport();
+            e.toggleMode(Editor::Mode::Draw);
+            {
+                const QPointF p1(50, 80);
+                QMouseEvent pr(QEvent::MouseButtonPress, p1, vp->mapToGlobal(p1.toPoint()),
+                               Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                QApplication::sendEvent(vp, &pr);
+                for (int x = 54; x <= 250; x += 4) {
+                    const QPointF p2(x, 80);
+                    QMouseEvent mv(QEvent::MouseMove, p2, vp->mapToGlobal(p2.toPoint()),
+                                   Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                    QApplication::sendEvent(vp, &mv);
+                }
+                const QPointF p2(250, 80);
+                QMouseEvent re(QEvent::MouseButtonRelease, p2, vp->mapToGlobal(p2.toPoint()),
+                               Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+                QApplication::sendEvent(vp, &re);
+            }
+            e.toggleMode(Editor::Mode::Erase);
+            {
+                const QPointF p1(150, 30);
+                QMouseEvent pr(QEvent::MouseButtonPress, p1, vp->mapToGlobal(p1.toPoint()),
+                               Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                QApplication::sendEvent(vp, &pr);
+                // 连续事件流（真实触控板行为）
+                for (int y = 34; y <= 130; y += 4) {
+                    const QPointF p2(150, y);
+                    QMouseEvent mv(QEvent::MouseMove, p2, vp->mapToGlobal(p2.toPoint()),
+                                   Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                    QApplication::sendEvent(vp, &mv);
+                }
+                const QPointF p3(150, 130);
+                QMouseEvent re(QEvent::MouseButtonRelease, p3, vp->mapToGlobal(p3.toPoint()),
+                               Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+                QApplication::sendEvent(vp, &re);
+            }
+            e.toggleMode(Editor::Mode::Normal);
+            // 数据级验证：残余两段笔迹之间的空隙 = 擦除通道 = 笔刷宽度
+            const auto pieces = e.inkSnapshot();
+            int bestGap = 0;
+            if (pieces.size() >= 2) {
+                const qreal leftEnd = pieces.first().pts.last().x();
+                const qreal rightStart = pieces.last().pts.first().x();
+                if (rightStart > leftEnd)
+                    bestGap = int(rightStart - leftEnd);
+            }
+            qInfo("ERASE-CHANNEL gap=%d brush=%f pieces=%d", bestGap, brush, int(pieces.size()));
+            if (pieces.size() >= 2 && qAbs(bestGap - brush) > 6.0) {
+                qWarning("selftest FAIL: erase channel %dpx vs brush %fpx", bestGap, brush);
+            }
+            e.brushDefault();
         }
         return true;
     }
@@ -1343,15 +1421,14 @@ private:
             const QRectF r = document()->documentLayout()->blockBoundingRect(block);
             const qreal y = top - vbar;
             if (top + r.height() > vbar) {
-                // 数字字形中心 = 行框中心：纯字体度量，与 hinting/渲染路径无关
+                // 真基线对齐：数字与代码文字共享同一基线（所有编辑器行号的标准做法）
                 QTextLayout *tl = block.layout();
                 const QTextLine line0 = tl->lineAt(0);
-                const qreal lineCenter = y + line0.y() + line0.height() / 2.0;
-                const QFontMetricsF fm(p.font());
-                const qreal glyphCenter = (fm.ascent() - fm.descent()) / 2.0;
+                const qreal baseline = y + line0.y() + line0.ascent();
                 const QString num = QString::number(block.blockNumber() + 1);
+                const QFontMetricsF fm(p.font());
                 const qreal w = fm.horizontalAdvance(num);
-                p.drawText(QPointF(m_gutterWidth - 6 - w, lineCenter + glyphCenter), num);
+                p.drawText(QPointF(m_gutterWidth - 6 - w, baseline), num);
             }
             top += r.height();
             block = block.next();
