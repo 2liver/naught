@@ -396,10 +396,6 @@ public:
         if (!p.isActive())
             return;
         p.fillRect(img.rect(), Crt::kBg); // 磷光底：行号列条/滚动条槽也同色
-        // 3× 水平超采样（调用方提供 3 倍宽的图像）：RGB 荧光粉掩膜在
-        // 子像素级取样——字形内部融合成琥珀、笔画边缘留彩边（真彩），
-        // 条纹细到显示像素的三分之一，不再是粗线条的红绿块
-        p.scale(3.0, 1.0);
         if (viewport())
             viewport()->render(&p, viewport()->pos());
         if (m_canvas && m_canvas->isVisible())
@@ -1235,8 +1231,7 @@ public:
             // 快照几何：文字在顶部第一行；此前的涂擦测试留下两个墨水圆点，
             // 必须同样出现在合成快照里（墨水进光栅 = 显模式下涂/擦可用的回归闸）
             {
-                QImage snapImg(e.viewport()->size().width() * 3, e.viewport()->size().height(),
-                               QImage::Format_ARGB32);
+                QImage snapImg(e.viewport()->size(), QImage::Format_ARGB32);
                 snapImg.fill(Qt::transparent);
                 e.paintTextSnapshot(snapImg);
                 const QImage snap = snapImg;
@@ -1255,29 +1250,25 @@ public:
                     return false;
                 }
             }
-            // 颜色分类取证：R/G/B 子像素点燃计数。琥珀文字的 R 与 G 分量
-            // 分别落在 R/G 掩膜上——红绿两族都应存在且大致均衡；蓝 = 熄灭。
-            // 坏管线 = 蓝色泛滥（B 掩膜点燃蓝分量 = 本应归零）。
+            // 颜色分类取证：琥珀透色（r 主导、g 中量、b 近零——颜色穿过
+            // 竖纹亮度纹理）、暗底、无蓝泛滥（坏管线 = 蓝通道点燃）
             {
-                int green = 0, red = 0, blue = 0, dark = 0, other = 0;
+                int amber = 0, blue = 0, dark = 0, other = 0;
                 for (int y = 0; y < e.height(); ++y)
                     for (int x = g; x < e.width() - 30; ++x) {
                         const QRgb px = img.pixel(x, y);
                         const int r = qRed(px), gr = qGreen(px), b = qBlue(px);
-                        if (gr > r + 40 && gr > b + 40 && gr > 100) ++green;
-                        else if (r > gr + 40 && r > b + 40 && r > 100) ++red;
+                        if (r > 150 && gr > 100 && b < 90) ++amber;
                         else if (b > r + 40 && b > gr + 40 && b > 100) ++blue;
                         else if (r < 60 && gr < 60 && b < 60) ++dark;
                         else ++other;
                     }
-                qInfo("CRT-COLORS green=%d red=%d blue=%d dark=%d other=%d",
-                      green, red, blue, dark, other);
-                if (red < 500 || green < 500) {
-                    qWarning("selftest FAIL: RGB mask not lighting (red=%d green=%d)",
-                             red, green);
+                qInfo("CRT-COLORS amber=%d blue=%d dark=%d other=%d", amber, blue, dark, other);
+                if (amber < 500) {
+                    qWarning("selftest FAIL: amber phosphor not lighting (%d)", amber);
                     return false;
                 }
-                if (blue > red / 4 || blue > green / 4) {
+                if (blue > 100) {
                     qWarning("selftest FAIL: blue flood in CRT render (%d)", blue);
                     return false;
                 }

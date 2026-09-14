@@ -85,9 +85,6 @@ void CrtView::paintEvent(QPaintEvent *)
     QPainter p(this);
     p.fillRect(rect(), QColor(12, 9, 3));
     if (!m_shown.isNull()) {
-        // 3× 水平超采样帧缩回 1:1：平滑缩放在字形边缘留下子像素彩边，
-        // 内部融合成磷光琥珀（真彩）
-        p.setRenderHint(QPainter::SmoothPixmapTransform);
         p.drawImage(rect(), m_shown);
     }
 }
@@ -122,8 +119,8 @@ void CrtView::ensureRhi()
         return;
     }
 
-    // 颜色目标（离屏，无交换链）；3× 水平超采样：掩膜在子像素级取样
-    m_colorTex = m_r->newTexture(QRhiTexture::RGBA8, QSize(width() * 3, height()), 1,
+    // 颜色目标（离屏，无交换链）
+    m_colorTex = m_r->newTexture(QRhiTexture::RGBA8, size(), 1,
                                  QRhiTexture::RenderTarget | QRhiTexture::UsedAsTransferSource);
     if (!m_colorTex->create()) {
         shaderLog(QStringLiteral("TEX CREATE FAIL"));
@@ -134,7 +131,7 @@ void CrtView::ensureRhi()
     m_rt->setRenderPassDescriptor(m_rp);
 
     // 像素输入：存储缓冲（buffer 路径已在 Metal+RHI 上验证）
-    const int pxbytes = qMax(1, width() * 3) * qMax(1, height()) * 4;
+    const int pxbytes = qMax(1, width()) * qMax(1, height()) * 4;
     m_pxbuf = m_r->newBuffer(QRhiBuffer::Static, QRhiBuffer::StorageBuffer, pxbytes);
     m_pxbuf->create();
     // 常量缓冲：view + texSize（std140：两个 vec2）
@@ -173,7 +170,7 @@ void CrtView::ensureRhi()
     else
         shaderLog(QStringLiteral("PS CREATE OK"));
 
-    m_texSize = QSize(width() * 3, height());
+    m_texSize = size();
     m_forceNow = true;
     m_pending = QImage(m_texSize, QImage::Format_ARGB32);
     m_pending.fill(qRgb(12, 9, 3));
@@ -186,7 +183,7 @@ void CrtView::renderFrame()
     ensureRhi();
     if (!m_r || !m_ps || !m_srb || !m_pxbuf || !m_ubuf || m_readbackInFlight)
         return;
-    if (size() != QSize(m_texSize.width() / 3, m_texSize.height())) {
+    if (size() != m_texSize) {
         releaseGpu(); // 帧边界安全重建（此刻无在途回读）
         ensureRhi();
         if (!m_ps)
