@@ -1203,6 +1203,9 @@ private:
             }
             block = block.next();
         }
+        // 未命中任何块（点在零高度的文末空行区域）：余白仍不可入
+        if (document()->lastBlock().length() == 1 && document()->characterCount() >= 2)
+            return document()->characterCount() - 2;
         return document()->characterCount() - 1;
     }
 
