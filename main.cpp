@@ -37,7 +37,7 @@
 #include <QWheelEvent>
 
 // 画布层：独立于文本，浮于文字之上。笔迹存文档坐标——随滚动平移、
-// 不随缩放变化；颜色随阴/阳（与文字同命运）；事件全部穿透（由 Editor 转发）。
+// 不随缩放变化（每笔在落笔瞬间锁定自己的笔宽）；颜色随阴/阳；事件全部穿透。
 class Canvas : public QWidget {
 public:
     explicit Canvas(QWidget *parent)
@@ -64,27 +64,35 @@ public:
 
     void beginStroke(const QPointF &docPos)
     {
-        m_active.clear();
-        m_active.append(docPos);
+        m_active = Stroke{m_brush, {docPos}};
         update();
     }
 
     void extendStroke(const QPointF &docPos)
     {
-        if (m_active.isEmpty())
+        if (m_active.pts.isEmpty())
             return;
-        if (QLineF(m_active.last(), docPos).length() >= 2.0) {
-            m_active.append(docPos);
+        if (QLineF(m_active.pts.last(), docPos).length() >= 2.0) {
+            m_active.pts.append(docPos);
             update();
         }
     }
 
     void endStroke()
     {
-        if (m_active.isEmpty())
+        if (m_active.pts.isEmpty())
             return;
         m_strokes.append(m_active);
-        m_active.clear();
+        m_active = Stroke{};
+    }
+
+    void clearAll()
+    {
+        if (m_strokes.isEmpty() && m_active.pts.isEmpty())
+            return;
+        m_strokes.clear();
+        m_active = Stroke{};
+        update();
     }
 
     void eraseAt(const QPointF &c)
@@ -92,36 +100,36 @@ public:
         const qreal r = m_brush * 1.4;
         bool changed = false;
         for (int i = m_strokes.size() - 1; i >= 0; --i) {
-            const QVector<QPointF> pts = m_strokes.at(i);
-            if (pts.size() == 1) {
-                if (QLineF(pts.at(0), c).length() <= r) {
+            const Stroke &s = m_strokes.at(i);
+            if (s.pts.size() == 1) {
+                if (QLineF(s.pts.at(0), c).length() <= r) {
                     m_strokes.removeAt(i);
                     changed = true;
                 }
                 continue;
             }
-            QVector<bool> keep(pts.size(), true);
-            for (int j = 0; j + 1 < pts.size(); ++j) {
-                if (segDist(pts.at(j), pts.at(j + 1), c) <= r) {
+            QVector<bool> keep(s.pts.size(), true);
+            for (int j = 0; j + 1 < s.pts.size(); ++j) {
+                if (segDist(s.pts.at(j), s.pts.at(j + 1), c) <= r) {
                     keep[j] = false;
                     keep[j + 1] = false;
                 }
             }
-            QVector<QVector<QPointF>> pieces;
-            QVector<QPointF> run;
+            QVector<Stroke> pieces;
+            Stroke run{s.width, {}};
             bool removed = false;
-            for (int j = 0; j < pts.size(); ++j) {
+            for (int j = 0; j < s.pts.size(); ++j) {
                 if (keep.at(j)) {
-                    run.append(pts.at(j));
+                    run.pts.append(s.pts.at(j));
                 } else {
                     removed = true;
-                    if (!run.isEmpty()) {
+                    if (!run.pts.isEmpty()) {
                         pieces.append(run);
-                        run.clear();
+                        run.pts.clear();
                     }
                 }
             }
-            if (!run.isEmpty())
+            if (!run.pts.isEmpty())
                 pieces.append(run);
             if (!removed)
                 continue;
@@ -144,12 +152,17 @@ protected:
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
         p.translate(-m_offset);
-        for (const QVector<QPointF> &s : m_strokes)
-            drawStroke(p, s);
-        drawStroke(p, m_active);
+        for (const Stroke &s : m_strokes)
+            drawStroke(p, s.pts, s.width);
+        drawStroke(p, m_active.pts, m_active.width);
     }
 
 private:
+    struct Stroke {
+        qreal width = 0;
+        QVector<QPointF> pts;
+    };
+
     static qreal segDist(const QPointF &a, const QPointF &b, const QPointF &c)
     {
         const QPointF ab = b - a;
@@ -160,21 +173,21 @@ private:
         return QLineF(a + t * ab, c).length();
     }
 
-    void drawStroke(QPainter &p, const QVector<QPointF> &pts) const
+    void drawStroke(QPainter &p, const QVector<QPointF> &pts, qreal width) const
     {
         if (pts.isEmpty())
             return;
         if (pts.size() == 1) {
             p.setPen(Qt::NoPen);
             p.setBrush(m_ink);
-            p.drawEllipse(pts.at(0), m_brush / 2.0, m_brush / 2.0);
+            p.drawEllipse(pts.at(0), width / 2.0, width / 2.0);
             return;
         }
         QPainterPath path;
         path.moveTo(pts.at(0));
         for (int i = 1; i < pts.size(); ++i)
             path.lineTo(pts.at(i));
-        QPen pen(m_ink, m_brush, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+        QPen pen(m_ink, width, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
         p.setPen(pen);
         p.setBrush(Qt::NoBrush);
         p.drawPath(path);
@@ -183,8 +196,8 @@ private:
     QColor m_ink = QColor(0, 0, 0);
     qreal m_brush = 20.0;
     QPointF m_offset;
-    QVector<QVector<QPointF>> m_strokes;
-    QVector<QPointF> m_active;
+    QVector<Stroke> m_strokes;
+    Stroke m_active;
 };
 
 // 自绘滚动条：命中区恒为 18px（从任何一侧都容易接近），
@@ -204,6 +217,7 @@ public:
 
 signals:
     void hovered(bool on);
+    void trackClicked(QPoint pos);
 
 protected:
     void enterEvent(QEnterEvent *event) override
@@ -225,7 +239,17 @@ protected:
         QScrollBar::leaveEvent(event);
     }
 
-    void paintEvent(QPaintEvent *) override
+    void mousePressEvent(QMouseEvent *event) override
+    {
+        // 轨道（非把手）上的左键让位给文字光标：点最右缘即把光标落到行尾
+        if (event->button() == Qt::LeftButton && !handleRect().contains(event->position().toPoint())) {
+            emit trackClicked(event->position().toPoint());
+            return;
+        }
+        QScrollBar::mousePressEvent(event);
+    }
+
+    QRect handleRect() const
     {
         const bool vert = orientation() == Qt::Vertical;
         const QRect t = rect();
@@ -234,21 +258,26 @@ protected:
         const int page = pageStep();
         const qreal total = range + page;
         if (total <= 0)
-            return;
+            return QRect();
         const int sliderLen = qMax(32, int(L * page / total));
         const int pos = int((L - sliderLen) * (value() - minimum()) / qMax(1, range));
         const int thick = m_hover ? 18 : 10;
+        if (vert)
+            return QRect(t.right() - thick + 1, pos, thick, sliderLen);
+        return QRect(pos, t.bottom() - thick + 1, sliderLen, thick);
+    }
 
+    void paintEvent(QPaintEvent *) override
+    {
+        const QRect h = handleRect();
+        if (h.isEmpty())
+            return;
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
         p.setPen(Qt::NoPen);
         p.setBrush(m_dark ? QColor(0x4a, 0x4a, 0x4a) : QColor(0xb8, 0xb8, 0xb8));
-        QRect h;
-        if (vert)
-            h = QRect(t.right() - thick + 1, pos, thick, sliderLen);
-        else
-            h = QRect(pos, t.bottom() - thick + 1, sliderLen, thick);
-        p.drawRoundedRect(h, thick / 2, thick / 2);
+        const int rad = qMin(h.width(), h.height()) / 2;
+        p.drawRoundedRect(h, rad, rad);
     }
 
 private:
@@ -332,6 +361,8 @@ public:
         connect(horizontalScrollBar(), &QScrollBar::valueChanged, this, [this](int) { scrollActivity(); });
         connect(vsb, &ZenScrollBar::hovered, this, [this](bool on) { if (on) scrollActivity(); });
         connect(hsb, &ZenScrollBar::hovered, this, [this](bool on) { if (on) scrollActivity(); });
+        connect(vsb, &ZenScrollBar::trackClicked, this, [this](QPoint pos) { placeCaretAtEdge(true, pos); });
+        connect(hsb, &ZenScrollBar::trackClicked, this, [this](QPoint pos) { placeCaretAtEdge(false, pos); });
         m_scrollHideTimer.start(1500);
 
         // 画布层（涂/擦）：笔迹随滚动平移，颜色随阴/阳，笔刷随字号
@@ -439,13 +470,15 @@ protected:
 
         menu.addSeparator();
         QAction *aTu = menu.addAction(QStringLiteral("涂"));
+        QAction *aShi = menu.addAction(QStringLiteral("拭"));
         QAction *aCa = menu.addAction(QStringLiteral("擦"));
         aTu->setCheckable(true);
-        aCa->setCheckable(true);
+        aShi->setCheckable(true);
         aTu->setChecked(m_mode == Mode::Draw);
-        aCa->setChecked(m_mode == Mode::Erase);
+        aShi->setChecked(m_mode == Mode::Erase);
         connect(aTu, &QAction::triggered, this, [this] { toggleMode(Mode::Draw); });
-        connect(aCa, &QAction::triggered, this, [this] { toggleMode(Mode::Erase); });
+        connect(aShi, &QAction::triggered, this, [this] { toggleMode(Mode::Erase); });
+        connect(aCa, &QAction::triggered, this, [this] { m_canvas->clearAll(); });
 
         menu.exec(event->globalPos());
     }
@@ -475,7 +508,10 @@ protected:
                 toggleMode(Mode::Draw);
                 return;
             case Qt::Key_E:
-                toggleMode(Mode::Erase);
+                if (event->modifiers() & Qt::ShiftModifier)
+                    m_canvas->clearAll();
+                else
+                    toggleMode(Mode::Erase);
                 return;
             case Qt::Key_Equal:
             case Qt::Key_Plus:
@@ -670,6 +706,21 @@ private:
     QPointF viewportPosToDoc(const QPointF &p) const
     {
         return p + QPointF(horizontalScrollBar()->value(), verticalScrollBar()->value());
+    }
+
+    // 滚动条轨道上的左键让位给文字：点最右缘 = 光标落行尾，点最下缘 = 光标落文末
+    void placeCaretAtEdge(bool vertical, const QPoint &pos)
+    {
+        QWidget *vp = viewport();
+        QPointF vpPos;
+        if (vertical)
+            vpPos = QPointF(qreal(vp->width()) - 1.0, qreal(qMin(pos.y(), vp->height() - 1)));
+        else
+            vpPos = QPointF(qreal(qMin(pos.x(), vp->width() - 1)), qreal(vp->height()) - 1.0);
+        QMouseEvent press(QEvent::MouseButtonPress, vpPos, vp->mapToGlobal(vpPos.toPoint()),
+                          Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(vp, &press);
+        wakeCaret();
     }
 
     void wakeCaret()
