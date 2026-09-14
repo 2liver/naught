@@ -27,6 +27,7 @@ protected:
     void keyPressEvent(QKeyEvent *event) override;
     void initialize(QRhiCommandBuffer *cb) override;
     void render(QRhiCommandBuffer *cb) override;
+    void releaseResources() override;
 
 private:
     Editor *m_editor = nullptr;

@@ -113,8 +113,22 @@ void CrtView::initialize(QRhiCommandBuffer *)
     m_texDirty = true;
 }
 
+void CrtView::releaseResources()
+{
+    // 我们自己的资源归属 rhi，rhi 死亡时它们一并销毁：指针置空，
+    // 下次 paint 的 needsInit 路径会经 initialize() 全部重建。
+    m_tex = nullptr;
+    m_pxbuf = nullptr;
+    m_ubuf = nullptr;
+    m_srb = nullptr;
+    m_ps = nullptr;
+    m_texDirty = true;
+}
+
 void CrtView::render(QRhiCommandBuffer *cb)
 {
+    if (!m_ps || !m_srb || !m_pxbuf || !m_ubuf)
+        return; // 资源未就绪（rhi 刚重建）：本帧跳过，下帧 initialize 后自愈
     QRhiResourceUpdateBatch *u = rhi()->nextResourceUpdateBatch();
 
     // 节流刷新（80ms）：文字快照自绘 + 上传
