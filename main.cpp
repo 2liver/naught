@@ -484,6 +484,29 @@ public:
                 return false;
             }
         }
+
+        // 放大 + 横向溢出场景：横滚到最右后，点最右缘仍应落到该行行尾
+        e.setPlainText(QStringLiteral("無無無無無無無無無無\n無無無無無無無無無無\n無無無無無無無無無無\n無無無無無無無無無無\n無無無無無無無無無無\n"));
+        e.zoomTo(200);
+        QApplication::processEvents();
+        QScrollBar *hb = e.horizontalScrollBar();
+        if (hb->isVisible()) {
+            hb->setValue(hb->maximum());
+            QApplication::processEvents();
+            e.moveCursor(QTextCursor::Start);
+            bar = qobject_cast<ZenScrollBar *>(e.verticalScrollBar());
+            if (bar && bar->isVisible()) {
+                const QPoint tp(5, 5);
+                QMouseEvent tpress(QEvent::MouseButtonPress, QPointF(tp), bar->mapToGlobal(tp),
+                                   Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                QApplication::sendEvent(bar, &tpress);
+                if (e.textCursor().positionInBlock() != 10) {
+                    qWarning("selftest FAIL: scrolled track click lands at %d, want 10",
+                             e.textCursor().positionInBlock());
+                    return false;
+                }
+            }
+        }
         return true;
     }
 
@@ -582,12 +605,18 @@ protected:
                 zoom(-1);
                 startHold(-1);
                 return;
+            case Qt::Key_Underscore:
+                brushStep(-1); // Shift+"-"在 macOS Qt 中报作下划线键
+                return;
             case Qt::Key_0:
                 if (event->modifiers() & Qt::ShiftModifier) {
                     brushReset();
                     return;
                 }
                 zoomReset();
+                return;
+            case Qt::Key_ParenRight:
+                brushReset(); // Shift+"0"在 macOS Qt 中报作右括号键
                 return;
             default:
                 break;
@@ -852,16 +881,18 @@ private:
     }
 
     // QPlainTextEdit 的流式布局没有可用的 hitTest（实测连文字内部都返回 -1），
-    // 复刻 Qt 内部点击映射：逐块找行，行内 xToCursor（行尾空白自然落行尾）。
+    // 复刻 Qt 内部点击映射：先把视口坐标换算成文档坐标（含横纵滚动偏移），
+    // 再逐块找行，行内 xToCursor（行尾空白自然落行尾）。
     int positionForPoint(const QPointF &pt) const
     {
+        const QPointF docPt = pt + QPointF(horizontalScrollBar()->value(), verticalScrollBar()->value());
         QTextBlock block = firstVisibleBlock();
         QAbstractTextDocumentLayout *layout = document()->documentLayout();
         while (block.isValid()) {
             const QRectF r = layout->blockBoundingRect(block);
-            if (pt.y() < r.bottom()) {
+            if (docPt.y() < r.bottom()) {
                 QTextLayout *tl = block.layout();
-                const qreal relY = pt.y() - r.top();
+                const qreal relY = docPt.y() - r.top();
                 QTextLine line = tl->lineAt(0);
                 for (int i = 1; i < tl->lineCount(); ++i) {
                     const QTextLine l = tl->lineAt(i);
@@ -870,7 +901,7 @@ private:
                     else
                         break;
                 }
-                const qreal x = std::clamp<qreal>(pt.x() - r.left(), 0.0, qMax(1.0, r.width()));
+                const qreal x = std::clamp<qreal>(docPt.x() - r.left(), 0.0, qMax(1.0, r.width()));
                 return block.position() + line.xToCursor(x);
             }
             block = block.next();
