@@ -760,6 +760,22 @@ protected:
         QPlainTextEdit::focusInEvent(event);
     }
 
+    void focusOutEvent(QFocusEvent *event) override
+    {
+        // 失焦（Cmd+Tab / 点走）时收尾按住笔刷会话：Shift 的 keyRelease
+        // 不会在失焦后送达，否则鼠标抓取与笔迹会话会滞留到下次按 Shift
+        if (m_shiftInkActive) {
+            m_shiftInkActive = false;
+            viewport()->releaseMouse();
+            if (m_mode == Mode::Draw)
+                m_canvas->endStroke();
+            else if (m_mode == Mode::Erase)
+                m_canvas->eraseEnd();
+            endInkSession();
+        }
+        QPlainTextEdit::focusOutEvent(event);
+    }
+
     void keyPressEvent(QKeyEvent *event) override
     {
         wakeCaret();
@@ -965,7 +981,6 @@ protected:
                     p -= QPointF(m_gutterWidth, 0); // 行号区 → 视口坐标
                 return p;
             };
-            Q_UNUSED(posOf);
             // 记录指针位置（画笔足迹用，所有模式都跟踪）
             if (event->type() == QEvent::MouseMove) {
                 const auto *me = static_cast<QMouseEvent *>(event);

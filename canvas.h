@@ -161,11 +161,15 @@ public:
 
     void applyErase(const QPainterPath &tube)
     {
-        // Qt 自带几何引擎：轮廓布尔相减，所见即所得，小口径也精确
+        // Qt 自带几何引擎：轮廓布尔相减，所见即所得，小口径也精确。
+        // 包围盒先筛：不与管段相交的笔迹跳过昂贵的布尔运算（大笔量文档的关键）
+        const QRectF tubeRect = tube.boundingRect();
         bool changed = false;
         for (int i = m_strokes.size() - 1; i >= 0; --i) {
             const qreal width = m_strokes.at(i).width;
             const QPainterPath before = m_strokes.at(i).path;
+            if (!before.boundingRect().intersects(tubeRect))
+                continue;
             const QPainterPath after = before.subtracted(tube);
             if (after == before)
                 continue;
@@ -219,7 +223,11 @@ protected:
         p.setRenderHint(QPainter::Antialiasing);
         p.save();
         p.translate(QPointF(m_vpOffset) - m_offset); // 笔迹：文档坐标（随滚动）
+        // 可见区裁剪：只画与窗口相交的笔迹（滚动/打字时的大笔量文档关键）
+        const QRectF viewDoc{QPointF(m_offset), QSizeF(size())};
         for (const InkStroke &s : m_strokes) {
+            if (!s.path.boundingRect().intersects(viewDoc))
+                continue;
             p.setPen(Qt::NoPen);
             p.setBrush(m_ink);
             p.drawPath(s.path);
