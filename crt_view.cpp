@@ -4,6 +4,8 @@
 #include "editor.h"
 
 #include <QFile>
+#include <QMouseEvent>
+#include <QWheelEvent>
 #include <QtGui/rhi/qrhi.h>
 #include <QtGui/rhi/qshader.h>
 
@@ -36,13 +38,79 @@ CrtView::CrtView(Editor *editor)
     : QRhiWidget(editor)
     , m_editor(editor)
 {
-    // 原生子窗口：Metal 层由窗口服务器直接合成——纹理列表路径在
-    // 本机不合成（黑屏/灰屏的根源）
-    setAttribute(Qt::WA_NativeWindow);
-    setAttribute(Qt::WA_TransparentForMouseEvents);
+    // 整面光栅层。原生 NSView 在 macOS 上会吃光指针事件
+    // （WA_TransparentForMouseEvents 对原生子窗口无效，已实测）：
+    // 本层不假装透明，而是把全部指针事件手动转发给真实组件
+    //（滚动条/视口），键盘已由 keyPressEvent 转发。
     setMouseTracking(true);
     // 原生子窗口会截走键盘焦点：永不抢焦，输入留在编辑器
     setFocusPolicy(Qt::NoFocus);
+}
+
+// 指针事件转发目标：滚动条命中滚动条（拖动/点击），其余给视口——
+// 与真实组件的命中判定完全一致
+static QWidget *crtTarget(Editor *ed, const QPointF &pos)
+{
+    if (!ed)
+        return nullptr;
+    const QPoint pt = pos.toPoint();
+    if (ed->verticalScrollBar() && ed->verticalScrollBar()->isVisible()
+        && ed->verticalScrollBar()->geometry().contains(pt))
+        return ed->verticalScrollBar();
+    if (ed->horizontalScrollBar() && ed->horizontalScrollBar()->isVisible()
+        && ed->horizontalScrollBar()->geometry().contains(pt))
+        return ed->horizontalScrollBar();
+    return ed->viewport();
+}
+
+template <typename E>
+static bool crtForward(Editor *ed, E *ev)
+{
+    QWidget *t = crtTarget(ed, ev->position());
+    if (!t)
+        return false;
+    // 位置换算：CrtView 坐标（= 编辑器坐标，整面 1:1）→ 目标组件坐标。
+    // 用公开构造函数重建事件（QMutableEventPoint 在私有头，不可靠）。
+    const QPointF local = ev->position() - QPointF(t->mapTo(ed, QPoint(0, 0)));
+    if (auto *me = dynamic_cast<QMouseEvent *>(ev)) {
+        QMouseEvent translated(me->type(), local, me->scenePosition(), me->globalPosition(),
+                               me->button(), me->buttons(), me->modifiers(), me->source());
+        QCoreApplication::sendEvent(t, &translated);
+        return true;
+    }
+    if (auto *we = dynamic_cast<QWheelEvent *>(ev)) {
+        QWheelEvent translated(local, we->globalPosition(), we->pixelDelta(), we->angleDelta(),
+                               we->buttons(), we->modifiers(), we->phase(), we->inverted(),
+                               we->source());
+        QCoreApplication::sendEvent(t, &translated);
+        return true;
+    }
+    return false;
+}
+
+void CrtView::mousePressEvent(QMouseEvent *event)
+{
+    crtForward(m_editor, event);
+}
+
+void CrtView::mouseReleaseEvent(QMouseEvent *event)
+{
+    crtForward(m_editor, event);
+}
+
+void CrtView::mouseDoubleClickEvent(QMouseEvent *event)
+{
+    crtForward(m_editor, event);
+}
+
+void CrtView::mouseMoveEvent(QMouseEvent *event)
+{
+    crtForward(m_editor, event);
+}
+
+void CrtView::wheelEvent(QWheelEvent *event)
+{
+    crtForward(m_editor, event);
 }
 
 void CrtView::markDirty(bool force)
@@ -58,6 +126,18 @@ void CrtView::syncGeometry()
     // 整面覆盖：文字区+行号区+滚动条全部进入光栅（无任何"未覆盖"黑区）
     if (m_editor)
         setGeometry(m_editor->rect());
+}
+
+void CrtView::tearDownNative()
+{
+    // 关闭显时彻底拆除原生窗口：隐藏的原生 NSView 会在 macOS 上
+    // 劫持整窗指针事件（退出显后触摸板全瘫的根源）。destroy() 是
+    // QWidget 的受保护成员，只能在派生类作用域内调用——这正是它
+    // 作为 CrtView 自身方法存在的原因。
+    hide();
+    setGeometry(0, 0, 1, 1);
+    destroy(false, false);
+    setAttribute(Qt::WA_NativeWindow, false);
 }
 
 void CrtView::initialize(QRhiCommandBuffer *)

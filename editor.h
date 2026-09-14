@@ -409,9 +409,10 @@ public:
             viewport()->render(&p, viewport()->pos());
         if (m_canvas && m_canvas->isVisible())
             m_canvas->render(&p, m_canvas->pos());
-        if (m_lineNumberArea && m_lineNumberArea->isVisible())
-            m_lineNumberArea->render(&p, m_lineNumberArea->pos());
-        if (m_fadeOpacity > 0.02) {
+        // 行号区：显模式下真实组件已隐藏（防双层），合成仍渲染它——
+        // 行号只存在于光栅内
+        if (m_lineNumberArea)
+            m_lineNumberArea->render(&p, m_lineNumberArea->pos());        if (m_fadeOpacity > 0.02) {
             p.save();
             p.setOpacity(m_fadeOpacity);
             if (verticalScrollBar() && verticalScrollBar()->isVisible())
@@ -461,6 +462,10 @@ public:
             m_crtView->show();
             m_crtView->raise();
             m_crtView->markDirty(true);
+            // 行号只在光栅内存在：真实行号区隐藏（合成仍渲染它，防双层）
+            if (m_lineNumberArea)
+                m_lineNumberArea->hide();
+            updateModeCursor(); // 光栅层的系统光标与当前模式一致（涂/擦=隐藏）
             setFocus(); // 原生子窗口可能扰动首响应者：焦点还给编辑器
             activateWindow();
             m_crtRefreshTimer.start(); // 光标闪烁/足迹圆点/滚动条淡出的逐帧源
@@ -486,16 +491,21 @@ public:
             // 常驻对象，只隐藏：销毁会把顶层 backing store 的 RHI/swapchain
             // 拆掉，与在途 paint 竞态 = beginOffscreenFrame 撞上已释放的
             // 帧槽信号量（SIGSEGV 0x30 崩溃的根因）。
-            // 但隐藏的原生 NSView 仍会劫持整窗事件（退出显后滚动/落选/
-            // 光标睡眠/笔刷圆点全瘫的根源）：摘除原生窗口属性，NSView 即毁，
-            // 恢复纯 alien 隐藏子控件 = 完全惰性。
-            if (m_crtView) {
-                m_crtView->hide();
-                m_crtView->setGeometry(0, 0, 1, 1);
-                m_crtView->setAttribute(Qt::WA_NativeWindow, false);
-            }
+            // 但隐藏的原生 NSView 仍会劫持整窗指针事件（退出显后触摸板
+            // 全瘫的根源）：显式 destroy() 销毁原生窗口 + 摘除原生属性，
+            // 恢复纯 alien 隐藏子控件 = 完全惰性。延后一拍执行：逃出
+            // 当前键事件嵌套上下文，确保 NSView 销毁生效。
             m_crtRefreshTimer.stop();
             viewport()->releaseMouse(); // 防御：抓取会话不跨显模式残留
+            if (m_crtView) {
+                CrtView *v = m_crtView;
+                QTimer::singleShot(0, this, [this, v] {
+                    if (v == m_crtView)
+                        v->tearDownNative();
+                });
+            }
+            if (m_lineNumberArea)
+                m_lineNumberArea->show();
             viewport()->update();
             setFocus();
         }
@@ -1786,8 +1796,10 @@ private:
                 m_lineNumberArea = new LineNumberArea(this);
                 m_lineNumberArea->installEventFilter(this);
             }
-            m_lineNumberArea->show();
+            m_lineNumberArea->show(); // 显模式下行号只存在于光栅，这里恢复真实组件
             m_lineNumberArea->raise();
+            if (m_crt)
+                m_lineNumberArea->hide();
             updateLineNumberArea();
             if (m_crtView) {
                 m_crtView->syncGeometry();
@@ -1987,10 +1999,14 @@ private:
         QWidget *vp = viewport();
         if (m_mode == Mode::Normal) {
             vp->unsetCursor();
+            if (m_crtView)
+                m_crtView->setCursor(Qt::IBeamCursor);
             m_canvas->setFootprintVisible(false);
             return;
         }
         vp->setCursor(Qt::BlankCursor);
+        if (m_crtView)
+            m_crtView->setCursor(Qt::BlankCursor); // 光栅层的系统光标同样隐藏
         QPointF pos = m_lastMouse;
         if (pos.x() < 0)
             pos = QPointF(vp->width() / 2.0, vp->height() / 2.0);

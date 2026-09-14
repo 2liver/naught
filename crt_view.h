@@ -12,7 +12,8 @@ class QRhiBuffer;
 class QRhiGraphicsPipeline;
 class QRhiShaderResourceBindings;
 class QRhiTexture;
-class QRhiReadbackResult;
+class QMouseEvent;
+class QWheelEvent;
 
 class Editor;
 
@@ -21,10 +22,16 @@ public:
     explicit CrtView(Editor *editor);
     void markDirty(bool force = false);
     void syncGeometry();
+    void tearDownNative();
     QImage frameImage() const { return m_pending; }
 
 protected:
     void keyPressEvent(QKeyEvent *event) override;
+    void mousePressEvent(QMouseEvent *event) override;
+    void mouseReleaseEvent(QMouseEvent *event) override;
+    void mouseDoubleClickEvent(QMouseEvent *event) override;
+    void mouseMoveEvent(QMouseEvent *event) override;
+    void wheelEvent(QWheelEvent *event) override;
     void initialize(QRhiCommandBuffer *cb) override;
     void render(QRhiCommandBuffer *cb) override;
     void releaseResources() override;
