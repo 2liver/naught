@@ -97,7 +97,7 @@ public:
         });
         connect(verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int) { scrollActivity(); });
         connect(horizontalScrollBar(), &QScrollBar::valueChanged, this, [this](int) { scrollActivity(); });
-        m_scrollHideTimer.start(1000);
+        m_scrollHideTimer.start(1500);
 
         applyScheme();
         applyZoom();
@@ -291,19 +291,24 @@ protected:
 
     bool eventFilter(QObject *watched, QEvent *event) override
     {
-        if (watched == viewport()) {
-            // 触控板捏合缩放（macOS 原生手势；Windows 精确触摸板同路径）
-            if (event->type() == QEvent::NativeGesture) {
-                const auto *ng = static_cast<QNativeGestureEvent *>(event);
+        // 触控板捏合缩放：对任意子控件下（含滚动条区域）的手势都生效
+        if (event->type() == QEvent::NativeGesture) {
+            const auto *ng = static_cast<QNativeGestureEvent *>(event);
+            if (ng->gestureType() == Qt::BeginNativeGesture) {
+                m_pinchSmooth = 0.0;
+            } else if (ng->gestureType() == Qt::ZoomNativeGesture) {
                 // value 语义：相对上一事件的增量倍率（macOS NSEvent magnification）。
-                // 直接按 (1+v) 累积到字号，浮点存储，缓慢张开也持续生效。
-                if (ng->gestureType() == Qt::ZoomNativeGesture) {
-                    const qreal v = ng->value();
-                    if (v != 0.0)
-                        zoomTo(m_size * (1.0 + v));
+                // 增益 + 指数平滑过滤边缘手势的抖动与尖峰，单事件倍率钳制防误触跳变。
+                const qreal v = ng->value();
+                if (qAbs(v) >= 0.002) {
+                    m_pinchSmooth = PINCH_SMOOTH_A * v + (1.0 - PINCH_SMOOTH_A) * m_pinchSmooth;
+                    const qreal factor = std::clamp<qreal>(1.0 + m_pinchSmooth * PINCH_GAIN, 0.75, 1.35);
+                    zoomTo(m_size * factor);
                 }
-                return true;
             }
+            return true;
+        }
+        if (watched == viewport()) {
             // 点击/滚轮都唤醒光标（睡眠隐喻：无动静则隐去）
             if (event->type() == QEvent::MouseButtonPress
                 || event->type() == QEvent::MouseButtonRelease
@@ -391,7 +396,7 @@ private:
         m_fadeTimer.stop();
         m_fadeOpacity = 1.0;
         setScrollOpacity(1.0);
-        m_scrollHideTimer.start(1000);
+        m_scrollHideTimer.start(1500); // 与光标睡眠同拍（1.5s）
     }
 
     void setScrollOpacity(qreal v)
@@ -417,9 +422,12 @@ private:
     QGraphicsOpacityEffect *m_vFade = nullptr;
     QGraphicsOpacityEffect *m_hFade = nullptr;
     qreal m_fadeOpacity = 1.0;
+    qreal m_pinchSmooth = 0.0;
 
     static constexpr int BLINK_HALF_MS = 750; // 亮/灭各 750ms，一次“长闪烁”1.5s
     static constexpr int SLEEP_BLINKS = 1;    // 完整闪烁次数；改成 2 则休眠前闪两次
+    static constexpr qreal PINCH_GAIN = 1.4;  // 捏合增量增益：边缘弱增量也够用
+    static constexpr qreal PINCH_SMOOTH_A = 0.5; // 指数平滑系数：滤抖
 };
 
 int main(int argc, char **argv)
