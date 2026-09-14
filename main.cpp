@@ -369,7 +369,8 @@ public:
         m_canvas = new Canvas(viewport());
         m_canvas->show();
         m_canvas->setInk(m_dark ? QColor(255, 255, 255) : QColor(0, 0, 0));
-        m_canvas->setBrushWidth(m_size * BRUSH_SCALE);
+        m_brushSize = m_baseSize * BRUSH_SCALE;
+        m_canvas->setBrushWidth(m_brushSize);
         connect(verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int) {
             m_canvas->setScrollOffset(QPointF(horizontalScrollBar()->value(), verticalScrollBar()->value()));
         });
@@ -433,7 +434,7 @@ public:
         applyZoom();
     }
 
-    // 自检（CI/本地验证）：确认 O(1) 缩放（文档默认字号）对既有文本生效。
+    // 自检（CI/本地验证）：确认 O(1) 缩放、光标最右缘落点、轨道点击转落点均正常。
     static bool selftest()
     {
         Editor e;
@@ -443,8 +444,44 @@ public:
         e.zoomTo(200);
         const qreal h2 = e.document()->documentLayout()->blockBoundingRect(block).height();
         if (!(h2 > h1 * 2.0)) {
-            qWarning("selftest FAIL: h1=%f h2=%f", h1, h2);
+            qWarning("selftest FAIL: zoom h1=%f h2=%f", h1, h2);
             return false;
+        }
+
+        // 光标落点：点击视口最右缘应落在行尾；滚动条轨道点击也应落到行尾
+        e.zoomReset();
+        QString lines;
+        for (int i = 0; i < 40; ++i)
+            lines += QStringLiteral("一二三四五\n");
+        e.setPlainText(lines);
+        e.resize(400, 300);
+        e.show();
+        QApplication::processEvents();
+        const int len = e.document()->firstBlock().length() - 1;
+        QWidget *vp = e.viewport();
+
+        const QPointF edge(vp->width() - 1.0, 10.0);
+        QMouseEvent press(QEvent::MouseButtonPress, edge, vp->mapToGlobal(edge.toPoint()),
+                          Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(vp, &press);
+        if (e.textCursor().positionInBlock() != len) {
+            qWarning("selftest FAIL: viewport edge click lands at %d, want %d",
+                     e.textCursor().positionInBlock(), len);
+            return false;
+        }
+
+        e.moveCursor(QTextCursor::Start);
+        ZenScrollBar *bar = qobject_cast<ZenScrollBar *>(e.verticalScrollBar());
+        if (bar && bar->isVisible()) {
+            const QPoint tp(5, 5);
+            QMouseEvent tpress(QEvent::MouseButtonPress, QPointF(tp), bar->mapToGlobal(tp),
+                               Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(bar, &tpress);
+            if (e.textCursor().positionInBlock() != len) {
+                qWarning("selftest FAIL: track click lands at %d, want %d",
+                         e.textCursor().positionInBlock(), len);
+                return false;
+            }
         }
         return true;
     }
@@ -470,15 +507,15 @@ protected:
 
         menu.addSeparator();
         QAction *aTu = menu.addAction(QStringLiteral("涂"));
-        QAction *aShi = menu.addAction(QStringLiteral("拭"));
         QAction *aCa = menu.addAction(QStringLiteral("擦"));
+        QAction *aXiao = menu.addAction(QStringLiteral("消"));
         aTu->setCheckable(true);
-        aShi->setCheckable(true);
+        aCa->setCheckable(true);
         aTu->setChecked(m_mode == Mode::Draw);
-        aShi->setChecked(m_mode == Mode::Erase);
+        aCa->setChecked(m_mode == Mode::Erase);
         connect(aTu, &QAction::triggered, this, [this] { toggleMode(Mode::Draw); });
-        connect(aShi, &QAction::triggered, this, [this] { toggleMode(Mode::Erase); });
-        connect(aCa, &QAction::triggered, this, [this] { m_canvas->clearAll(); });
+        connect(aCa, &QAction::triggered, this, [this] { toggleMode(Mode::Erase); });
+        connect(aXiao, &QAction::triggered, this, [this] { m_canvas->clearAll(); });
 
         menu.exec(event->globalPos());
     }
@@ -513,20 +550,41 @@ protected:
                 else
                     toggleMode(Mode::Erase);
                 return;
+            case Qt::Key_Y:
+                redo();
+                return;
+            case Qt::Key_Space:
+                if (event->modifiers() & Qt::ShiftModifier) {
+                    m_canvas->clearAll(); // 消的别名（输入法可能吞掉此组合，E 兜底）
+                    return;
+                }
+                break;
             case Qt::Key_Equal:
             case Qt::Key_Plus:
+                if (event->modifiers() & Qt::ShiftModifier) {
+                    brushStep(+1); // 画笔侧：Cmd+Shift+= 加粗
+                    return;
+                }
                 if (event->isAutoRepeat())
                     return; // 按住时的重复交给加速定时器
                 zoom(+1);
                 startHold(+1);
                 return;
             case Qt::Key_Minus:
+                if (event->modifiers() & Qt::ShiftModifier) {
+                    brushStep(-1);
+                    return;
+                }
                 if (event->isAutoRepeat())
                     return;
                 zoom(-1);
                 startHold(-1);
                 return;
             case Qt::Key_0:
+                if (event->modifiers() & Qt::ShiftModifier) {
+                    brushReset();
+                    return;
+                }
                 zoomReset();
                 return;
             default:
@@ -692,8 +750,7 @@ private:
         document()->setDefaultFont(f);
         document()->markContentsDirty(0, document()->characterCount());
         setFont(f);
-        if (m_canvas)
-            m_canvas->setBrushWidth(m_size * BRUSH_SCALE);
+        // 笔刷与字号脱钩：只由 Cmd/Ctrl+Shift+= / - / 0 控制
     }
 
     void startHold(int dir)
@@ -703,12 +760,26 @@ private:
         m_holdTimer.start(m_holdInterval);
     }
 
+    void brushStep(int dir)
+    {
+        const int step = std::max(1, int(std::lround(m_brushSize * 0.1)));
+        m_brushSize = std::clamp<qreal>(m_brushSize + dir * step, 2, 1024);
+        m_canvas->setBrushWidth(m_brushSize);
+    }
+
+    void brushReset()
+    {
+        m_brushSize = m_baseSize * BRUSH_SCALE;
+        m_canvas->setBrushWidth(m_brushSize);
+    }
+
     QPointF viewportPosToDoc(const QPointF &p) const
     {
         return p + QPointF(horizontalScrollBar()->value(), verticalScrollBar()->value());
     }
 
-    // 滚动条轨道上的左键让位给文字：点最右缘 = 光标落行尾，点最下缘 = 光标落文末
+    // 滚动条轨道上的左键让位给文字：点最右缘 = 光标落行尾，点最下缘 = 光标落文末。
+    // 直接命中文档坐标（hitTest + setTextCursor），不依赖合成事件链。
     void placeCaretAtEdge(bool vertical, const QPoint &pos)
     {
         QWidget *vp = viewport();
@@ -717,9 +788,12 @@ private:
             vpPos = QPointF(qreal(vp->width()) - 1.0, qreal(qMin(pos.y(), vp->height() - 1)));
         else
             vpPos = QPointF(qreal(qMin(pos.x(), vp->width() - 1)), qreal(vp->height()) - 1.0);
-        QMouseEvent press(QEvent::MouseButtonPress, vpPos, vp->mapToGlobal(vpPos.toPoint()),
-                          Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-        QApplication::sendEvent(vp, &press);
+        const int hit = document()->documentLayout()->hitTest(vpPos, Qt::ExactHit);
+        if (hit >= 0) {
+            QTextCursor c(document());
+            c.setPosition(hit);
+            setTextCursor(c);
+        }
         wakeCaret();
     }
 
@@ -764,6 +838,7 @@ private:
     qreal m_pinchSmooth = 0.0;
     Canvas *m_canvas = nullptr;
     Mode m_mode = Mode::Normal;
+    qreal m_brushSize = 20.0;
 
     static constexpr int BLINK_HALF_MS = 750; // 亮/灭各 750ms，一次“长闪烁”1.5s
     static constexpr int SLEEP_BLINKS = 1;    // 完整闪烁次数；改成 2 则休眠前闪两次
