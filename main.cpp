@@ -1141,7 +1141,11 @@ protected:
                 if (qAbs(v) >= 0.002) {
                     m_pinchSmooth = PINCH_SMOOTH_A * v + (1.0 - PINCH_SMOOTH_A) * m_pinchSmooth;
                     const qreal factor = std::clamp<qreal>(1.0 + m_pinchSmooth * PINCH_GAIN, 0.75, 1.35);
-                    zoomTo(m_size * factor);
+                    // 换模式即换缩放项目：涂/擦模式捏合控制笔刷，其余控制字号
+                    if (m_mode == Mode::Draw || m_mode == Mode::Erase)
+                        brushScale(factor);
+                    else
+                        zoomTo(m_size * factor);
                 }
             }
             return true;
@@ -1289,7 +1293,7 @@ private:
         if (!m_codeMode || m_gutterWidth <= 0)
             return;
         QFont nf = m_codeFont;
-        nf.setPointSizeF(m_size * 0.85);
+        nf.setPointSizeF(m_size); // 与文字同字号：同基线即像素级对齐
         p.setFont(nf);
         p.setPen(m_dark ? QColor(0x6a, 0x6a, 0x6a) : QColor(0xb0, 0xb0, 0xb0));
         // 块映射只存尺寸不存位置（top 恒 0），按 Qt 官方画法从滚动值逐块累积
@@ -1300,19 +1304,14 @@ private:
             const QRectF r = document()->documentLayout()->blockBoundingRect(block);
             const qreal y = top - vbar;
             if (top + r.height() > vbar) {
-                // 数字字形中心与文字字形中心对齐（基线对齐在小字号时偏高）
+                // 与文字同字号、同基线：像素级对齐
                 QTextLayout *tl = block.layout();
                 const QTextLine line0 = tl->lineAt(0);
-                const qreal textBaseline = y + line0.y() + line0.ascent();
-                QFont tf = m_codeFont;
-                tf.setPointSizeF(m_size);
-                const QFontMetricsF tfm(tf);
-                const qreal textCenter = textBaseline - (tfm.ascent() - tfm.descent()) / 2.0;
-                const QFontMetricsF fm(p.font());
-                const qreal numCenter = (fm.ascent() - fm.descent()) / 2.0;
+                const qreal baseline = y + line0.y() + line0.ascent();
                 const QString num = QString::number(block.blockNumber() + 1);
+                const QFontMetricsF fm(p.font());
                 const qreal w = fm.horizontalAdvance(num);
-                p.drawText(QPointF(m_gutterWidth - 6 - w, textCenter + numCenter), num);
+                p.drawText(QPointF(m_gutterWidth - 6 - w, baseline), num);
             }
             top += r.height();
             block = block.next();
@@ -1419,6 +1418,13 @@ private:
         m_canvas->setBrushWidth(m_brushSize);
         if (m_mode == Mode::Draw || m_mode == Mode::Erase)
             updateModeCursor();
+    }
+
+    void brushScale(qreal factor)
+    {
+        m_brushSize = std::clamp<qreal>(m_brushSize * factor, 2, 1024);
+        m_canvas->setBrushWidth(m_brushSize);
+        updateModeCursor(); // 足迹随动
     }
 
     void brushReset()
