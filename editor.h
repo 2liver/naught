@@ -91,6 +91,13 @@ public:
             m_holdTimer.start(m_holdInterval);
         });
 
+        // 显的自归位补拍（合并式单发；见 applyZoom）
+        m_crtSettleTimer.setSingleShot(true);
+        connect(&m_crtSettleTimer, &QTimer::timeout, this, [this] {
+            if (m_crt && m_crtBackdrop)
+                m_crtBackdrop->forceGlow();
+        });
+
         // 换成自绘滚动条：命中区恒 18px，把手闲置 10px / 悬停 18px
         auto *vsb = new ZenScrollBar(Qt::Vertical);
         auto *hsb = new ZenScrollBar(Qt::Horizontal);
@@ -1649,11 +1656,9 @@ private:
         if (m_crtBackdrop) {
             m_crtBackdrop->forceGlow(); // 光晕立即随缩放重拍（影子不跟缩放就是这个漏了）
             // 自归位：布局与滚动在数帧后才彻底落定；延迟放长到 400ms——
-            // 磷粉本来就有惰性，光晕迟半拍归位正是显像管的质感（纯重渲染，零缩放）
-            QTimer::singleShot(400, this, [this] {
-                if (m_crt && m_crtBackdrop)
-                    m_crtBackdrop->forceGlow();
-            });
+            // 磷粉本来就有惰性。合并式定时器：连发缩放只留最后一次补拍
+            //（否则每次缩放各排一个定时器，堆积后把缩放拖到 100ms+）
+            m_crtSettleTimer.start(400);
         }
     }
 
@@ -2116,6 +2121,7 @@ private:
     CrtOverlay *m_crtOverlay = nullptr;
     QFont m_crtFont;
     static inline QString s_crtFamily;
+    QTimer m_crtSettleTimer;
 #ifdef NAUGHT_WITH_HIGHLIGHT
     KSyntaxHighlighting::Repository *m_repo = nullptr;
     KSyntaxHighlighting::SyntaxHighlighter *m_hl = nullptr;
