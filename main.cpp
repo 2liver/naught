@@ -13,6 +13,7 @@
 #include <QContextMenuEvent>
 #include <QEnterEvent>
 #include <QEvent>
+#include <QEventLoop>
 #include <QFocusEvent>
 #include <QFont>
 #include <QFontDatabase>
@@ -257,6 +258,13 @@ public:
         update();
     }
 
+    void setAsleep(bool a)
+    {
+        if (m_asleep == a)
+            return;
+        m_asleep = a;
+    }
+
 signals:
     void hovered(bool on);
     void trackClicked(QPoint pos);
@@ -283,7 +291,10 @@ protected:
 
     void mousePressEvent(QMouseEvent *event) override
     {
-        if (event->button() == Qt::LeftButton && !handleRect().contains(event->position().toPoint())) {
+        // 睡着（已淡出）的滚动条完全让位给文字：任何左键都落光标。
+        // 醒着时只有轨道让位，把手仍可拖动滚动。
+        if (event->button() == Qt::LeftButton
+            && (m_asleep || !handleRect().contains(event->position().toPoint()))) {
             emit trackClicked(event->position().toPoint());
             return;
         }
@@ -324,6 +335,7 @@ protected:
 private:
     bool m_dark = false;
     bool m_hover = false;
+    bool m_asleep = false;
 };
 
 class Editor : public QPlainTextEdit {
@@ -582,6 +594,135 @@ public:
                 }
             }
         }
+        // 增量打字后立刻点最右缘（不结算事件）：落点仍应是该视觉行行尾
+        e.setPlainText(QString());
+        e.resize(400, 300);
+        e.show();
+        QApplication::processEvents();
+        for (int i = 0; i < 40; ++i)
+            e.insertPlainText(QStringLiteral("無"));
+        e.insertPlainText(QStringLiteral("\n"));
+        for (int i = 0; i < 20; ++i)
+            e.insertPlainText(QStringLiteral("短行\n"));
+        e.moveCursor(QTextCursor::Start);
+        bar = qobject_cast<ZenScrollBar *>(e.verticalScrollBar());
+        if (bar && bar->isVisible()) {
+            const QPoint tp(5, 5);
+            QMouseEvent tpress(QEvent::MouseButtonPress, QPointF(tp), bar->mapToGlobal(tp),
+                               Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(bar, &tpress);
+            const int got = e.textCursor().position();
+            // 结算后求真值
+            QApplication::processEvents();
+            QTextBlock blk2 = e.document()->firstBlock();
+            const QTextLine line0b = blk2.layout()->lineAt(0);
+            const int want = blk2.position() + line0b.textStart() + line0b.textLength();
+            if (got != want) {
+                qWarning("selftest FAIL: fresh-typing track click lands at %d, want %d", got, want);
+                return false;
+            }
+        }
+        // 纵向滚动后点最右缘：应落在该视觉行行尾（滚动偏移计入文档坐标）
+        {
+            QString doc2;
+            for (int i = 0; i < 60; ++i)
+                doc2 += QStringLiteral("第%1行\n").arg(i);
+            e.setPlainText(doc2);
+            e.resize(400, 300);
+            e.show();
+            QApplication::processEvents();
+            QScrollBar *vb = e.verticalScrollBar();
+            if (vb->isVisible()) {
+                vb->setValue(200);
+                QApplication::processEvents();
+                e.moveCursor(QTextCursor::Start);
+                bar = qobject_cast<ZenScrollBar *>(e.verticalScrollBar());
+                const QPoint tp(5, 5);
+                QMouseEvent tpress(QEvent::MouseButtonPress, QPointF(tp), bar->mapToGlobal(tp),
+                                   Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                QApplication::sendEvent(bar, &tpress);
+                const int got = e.textCursor().position();
+                const qreal docY = 200.0 + 5.0;
+                int want = -1;
+                QTextBlock b = e.document()->firstBlock();
+                while (b.isValid()) {
+                    const QRectF r = e.document()->documentLayout()->blockBoundingRect(b);
+                    if (docY < r.bottom()) {
+                        QTextLayout *tl = b.layout();
+                        const qreal relY = docY - r.top();
+                        QTextLine ln = tl->lineAt(0);
+                        for (int i = 1; i < tl->lineCount(); ++i) {
+                            const QTextLine l = tl->lineAt(i);
+                            if (relY >= l.y())
+                                ln = l;
+                            else
+                                break;
+                        }
+                        want = b.position() + ln.textStart() + ln.textLength();
+                        break;
+                    }
+                    b = b.next();
+                }
+                if (want >= 0 && got != want) {
+                    qWarning("selftest FAIL: scrolled track click lands at %d, want %d", got, want);
+                    return false;
+                }
+            }
+        }
+        // 多点扫描：混合文档（首块换行 + 短行 + 空行）各高度点最右缘都应落该行行尾
+        {
+            QString doc3 = longLine + QStringLiteral("\n");
+            for (int i = 0; i < 10; ++i)
+                doc3 += QStringLiteral("短行\n");
+            doc3 += QStringLiteral("\n"); // 空行
+            for (int i = 0; i < 10; ++i)
+                doc3 += QStringLiteral("又一段\n");
+            e.setPlainText(doc3);
+            e.resize(400, 300);
+            e.show();
+            QApplication::processEvents();
+            bar = qobject_cast<ZenScrollBar *>(e.verticalScrollBar());
+            if (bar && bar->isVisible()) {
+                for (int y : {5, 40, 90, 140, 190, 240}) {
+                    e.moveCursor(QTextCursor::Start);
+                    const QPoint tp(5, y);
+                    QMouseEvent tpress(QEvent::MouseButtonPress, QPointF(tp), bar->mapToGlobal(tp),
+                                       Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                    QApplication::sendEvent(bar, &tpress);
+                    const int got = e.textCursor().position();
+                    const qreal docY = qreal(y);
+                    int want = -1;
+                    QTextBlock b = e.document()->firstBlock();
+                    while (b.isValid()) {
+                        const QRectF r = e.document()->documentLayout()->blockBoundingRect(b);
+                        if (docY < r.bottom()) {
+                            QTextLayout *tl = b.layout();
+                            if (tl && tl->lineCount() > 0) {
+                                const qreal relY = docY - r.top();
+                                QTextLine ln = tl->lineAt(0);
+                                for (int i = 1; i < tl->lineCount(); ++i) {
+                                    const QTextLine l = tl->lineAt(i);
+                                    if (relY >= l.y())
+                                        ln = l;
+                                    else
+                                        break;
+                                }
+                                if (ln.textLength() > 0 || b.length() == 1)
+                                    want = b.position() + ln.textStart() + ln.textLength();
+                                else
+                                    want = b.position() + b.length() - 1;
+                            }
+                            break;
+                        }
+                        b = b.next();
+                    }
+                    if (want >= 0 && got != want) {
+                        qWarning("selftest FAIL: sweep y=%d lands at %d, want %d", y, got, want);
+                        return false;
+                    }
+                }
+            }
+        }
         return true;
     }
 
@@ -589,10 +730,23 @@ protected:
     void contextMenuEvent(QContextMenuEvent *event) override
     {
         QMenu menu(this);
+        // macOS 原生弹出菜单不渲染 QAction 快捷键（Qt 只给菜单栏菜单设置 key
+        // equivalent），改用 QSS 自绘样式：显示右侧快捷键列，并融入阴/阳黑白美学。
+        menu.setStyleSheet(m_dark
+            ? QStringLiteral("QMenu{background:#1a1a1a;border:1px solid #333;padding:4px;}"
+                             "QMenu::item{padding:5px 28px 5px 16px;color:#fff;}"
+                             "QMenu::item:selected{background:#333;}"
+                             "QMenu::separator{height:1px;background:#3a3a3a;margin:4px 8px;}")
+            : QStringLiteral("QMenu{background:#ffffff;border:1px solid #d8d8d8;padding:4px;}"
+                             "QMenu::item{padding:5px 28px 5px 16px;color:#000;}"
+                             "QMenu::item:selected{background:#eeeeee;}"
+                             "QMenu::separator{height:1px;background:#e0e0e0;margin:4px 8px;}"));
         QAction *aMo = menu.addAction(QStringLiteral("摹"));
         aMo->setShortcut(QKeySequence(QStringLiteral("Ctrl+S")));
+        aMo->setShortcutVisibleInContextMenu(true);
         QAction *aKong = menu.addAction(QStringLiteral("空"));
         aKong->setShortcut(QKeySequence(QStringLiteral("Ctrl+N")));
+        aKong->setShortcutVisibleInContextMenu(true);
         menu.addSeparator();
         QAction *aYin = menu.addAction(QStringLiteral("阴"));
         QAction *aYang = menu.addAction(QStringLiteral("阳"));
@@ -609,10 +763,13 @@ protected:
         menu.addSeparator();
         QAction *aTu = menu.addAction(QStringLiteral("涂"));
         aTu->setShortcut(QKeySequence(QStringLiteral("Ctrl+D")));
+        aTu->setShortcutVisibleInContextMenu(true);
         QAction *aCa = menu.addAction(QStringLiteral("擦"));
         aCa->setShortcut(QKeySequence(QStringLiteral("Ctrl+E")));
+        aCa->setShortcutVisibleInContextMenu(true);
         QAction *aXiao = menu.addAction(QStringLiteral("消"));
         aXiao->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+E")));
+        aXiao->setShortcutVisibleInContextMenu(true);
         aTu->setCheckable(true);
         aCa->setCheckable(true);
         aTu->setChecked(m_mode == Mode::Draw);
@@ -926,6 +1083,8 @@ private:
     // 滚动条轨道上的左键让位给文字：点最右缘 = 光标落该视觉行行尾，点最下缘 = 光标落文末。
     void placeCaretAtEdge(bool vertical, const QPoint &pos)
     {
+        // 先结算挂起的排版（刚打完字/刚滚动后行数据可能未更新）
+        QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
         QWidget *vp = viewport();
         if (!vertical) {
             QTextCursor c(document());
@@ -953,6 +1112,9 @@ private:
             const QRectF r = layout->blockBoundingRect(block);
             if (docPt.y() < r.bottom()) {
                 QTextLayout *tl = block.layout();
+                // 排版未就绪的行数据可能全零（会把光标算到行首）：兜底取块尾
+                if (!tl || tl->lineCount() == 0)
+                    return block.position() + block.length() - 1;
                 const qreal relY = docPt.y() - r.top();
                 QTextLine line = tl->lineAt(0);
                 for (int i = 1; i < tl->lineCount(); ++i) {
@@ -962,6 +1124,8 @@ private:
                     else
                         break;
                 }
+                if (line.textLength() == 0 && block.length() > 1)
+                    return block.position() + block.length() - 1;
                 return block.position() + line.textStart() + line.textLength();
             }
             block = block.next();
@@ -990,6 +1154,11 @@ private:
             m_vFade->setOpacity(v);
         if (m_hFade)
             m_hFade->setOpacity(v);
+        const bool asleep = v <= 0.01;
+        if (auto *bar = qobject_cast<ZenScrollBar *>(verticalScrollBar()))
+            bar->setAsleep(asleep);
+        if (auto *bar = qobject_cast<ZenScrollBar *>(horizontalScrollBar()))
+            bar->setAsleep(asleep);
     }
 
     QFont m_baseFont;
