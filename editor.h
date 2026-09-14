@@ -168,6 +168,10 @@ public:
         };
         connect(verticalScrollBar(), &QScrollBar::valueChanged, this, syncInkOffset);
         connect(horizontalScrollBar(), &QScrollBar::valueChanged, this, syncInkOffset);
+        connect(horizontalScrollBar(), &QScrollBar::valueChanged, this, [this](int) {
+            if (m_codeMode)
+                applyGutterGeometry(); // 行号随横滚移出/复原
+        });
 
         applyScheme();
         applyZoom();
@@ -768,6 +772,45 @@ public:
                 != QFontDatabase::systemFont(QFontDatabase::GeneralFont).family()) {
             qWarning("selftest FAIL: exiting code mode did not restore layout/font");
             return false;
+        }
+        // 行号随横滚：放大到溢出后，行号区随横向滚动移出屏幕、边距回收、滚回复原
+        {
+            e.setPlainText(QStringLiteral("無無無無無無無無無無無無無無無無無無無無\n第二行\n"));
+            e.resize(400, 300);
+            e.show();
+            QApplication::processEvents();
+            e.toggleCodeMode();
+            QApplication::processEvents();
+            e.zoomTo(96);
+            QApplication::processEvents();
+            QScrollBar *hb = e.horizontalScrollBar();
+            const int w0 = e.gutterWidth();
+            if (hb->isVisible() && hb->maximum() > 0) {
+                hb->setValue(qMin(hb->maximum(), w0 + 8));
+                QApplication::processEvents();
+                if (e.viewport()->pos().x() != qMax(0, w0 - hb->value())) {
+                    qWarning("selftest FAIL: gutter margin did not shrink (vp.x=%d h=%d)",
+                             e.viewport()->pos().x(), hb->value());
+                    return false;
+                }
+                hb->setValue(hb->maximum());
+                QApplication::processEvents();
+                if (e.viewport()->pos().x() != 0) {
+                    qWarning("selftest FAIL: gutter margin not fully reclaimed (vp.x=%d)",
+                             e.viewport()->pos().x());
+                    return false;
+                }
+                hb->setValue(0);
+                QApplication::processEvents();
+                if (e.viewport()->pos().x() != w0) {
+                    qWarning("selftest FAIL: gutter margin not restored (vp.x=%d want %d)",
+                             e.viewport()->pos().x(), w0);
+                    return false;
+                }
+            }
+            e.zoomReset();
+            e.toggleCodeMode();
+            QApplication::processEvents();
         }
         // 笔迹统一撤销：画一笔 → Cmd+Z 撤销 → Cmd+Y 复原
         e.setPlainText(QStringLiteral("文字\n"));
@@ -1558,9 +1601,9 @@ private:
         updateGutterWidth(); // 行号区宽度随缩放重算（否则放大溢出、打字缩回）
         if (m_crtBackdrop) {
             m_crtBackdrop->forceGlow(); // 光晕立即随缩放重拍（影子不跟缩放就是这个漏了）
-            // 自归位：布局与滚动在数帧后才彻底落定，120ms 后补拍一次
-            //（纯重渲染，不做任何缩放），消除"定格时影子还在字外"的残影
-            QTimer::singleShot(120, this, [this] {
+            // 自归位：布局与滚动在数帧后才彻底落定；延迟放长到 400ms——
+            // 磷粉本来就有惰性，光晕迟半拍归位正是显像管的质感（纯重渲染，零缩放）
+            QTimer::singleShot(400, this, [this] {
                 if (m_crt && m_crtBackdrop)
                     m_crtBackdrop->forceGlow();
             });
@@ -1700,7 +1743,20 @@ private:
     void updateLineNumberArea()
     {
         if (m_lineNumberArea)
-            m_lineNumberArea->setGeometry(0, 0, m_gutterWidth, viewport()->height());
+            applyGutterGeometry();
+    }
+
+    // 行号区随横向滚动移出屏幕、边距同步回收：缩放到最大时行号不再常驻
+    // 挡住文字，横向滚动真正把行号"滚出去"（滚回 0 时完整复原）
+    void applyGutterGeometry()
+    {
+        if (!m_codeMode || !m_lineNumberArea)
+            return;
+        const int h = horizontalScrollBar()->value();
+        const int margin = qMax(0, m_gutterWidth - h);
+        m_lineNumberArea->move(-h, 0);
+        m_lineNumberArea->resize(m_gutterWidth, viewport()->height());
+        setViewportMargins(margin, 0, 0, 0);
     }
 
     void updateGutterWidth()
@@ -1712,8 +1768,7 @@ private:
         const int w = qMax(20, int(fm.horizontalAdvance(QString(digits, QLatin1Char('8'))) + 12));
         if (w != m_gutterWidth) {
             m_gutterWidth = w;
-            setViewportMargins(m_gutterWidth, 0, 0, 0);
-            updateLineNumberArea();
+            applyGutterGeometry();
         }
         if (m_lineNumberArea)
             m_lineNumberArea->update();

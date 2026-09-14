@@ -64,5 +64,6 @@ private:
     QTimer m_noiseTimer;
     QImage m_glass;
     qreal m_warm = 0.0;
+    qreal m_bandPhase = 0.0; // 滚动刷新带相位（0..1，3 秒一周）
     QTimer m_warmTimer;
 };

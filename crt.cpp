@@ -130,6 +130,9 @@ CrtOverlay::CrtOverlay(Editor *editor)
     m_noiseTimer.setInterval(120);
     connect(&m_noiseTimer, &QTimer::timeout, this, [this] {
         m_noiseFrame = 1 - m_noiseFrame;
+        m_bandPhase += 0.04; // 120ms / 3000ms：刷新带 3 秒扫一周
+        if (m_bandPhase >= 1.0)
+            m_bandPhase -= 1.0;
         update();
     });
     m_warmTimer.setInterval(24);
@@ -189,6 +192,9 @@ void CrtOverlay::paintEvent(QPaintEvent *)
     p.setOpacity(0.55);
     p.drawImage(rect(), m_noise[m_noiseFrame]);
     p.setOpacity(1.0);
+    // 滚动刷新带：3px 暗带 3 秒自上而下扫过（老式扫描的"呼吸"）
+    const int bandY = int(m_bandPhase * height());
+    p.fillRect(QRect(0, bandY, width(), 3), QColor(0, 0, 0, 14));
     // 暖机：黑幕由暗到亮
     if (m_warm > 0.0)
         p.fillRect(rect(), QColor(0, 0, 0, int(235 * m_warm)));
