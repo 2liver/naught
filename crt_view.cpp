@@ -45,9 +45,11 @@ CrtView::CrtView(Editor *editor)
     setFocusPolicy(Qt::NoFocus);
 }
 
-void CrtView::markDirty()
+void CrtView::markDirty(bool force)
 {
     m_texDirty = true;
+    if (force)
+        m_forceNow = true; // 绕过 80ms 节流（缩放等必须立即重拍）
     update();
 }
 
@@ -116,7 +118,7 @@ void CrtView::render(QRhiCommandBuffer *cb)
     QRhiResourceUpdateBatch *u = rhi()->nextResourceUpdateBatch();
 
     // 节流刷新（80ms）：文字快照自绘 + 上传
-    if (m_texDirty && (!m_sinceRefresh.isValid() || m_sinceRefresh.elapsed() >= 80)) {
+    if (m_texDirty && (m_forceNow || !m_sinceRefresh.isValid() || m_sinceRefresh.elapsed() >= 80)) {
         m_pending = QImage(m_editor->viewport()->size(), QImage::Format_ARGB32);
         m_pending.fill(qRgb(12, 9, 3));
         m_editor->paintTextSnapshot(m_pending);
@@ -149,6 +151,7 @@ void CrtView::render(QRhiCommandBuffer *cb)
             m_texSize = up.size();
         }
         m_texDirty = false;
+        m_forceNow = false;
         m_sinceRefresh.restart();
         // 取证：输入纹理原图落盘（每次刷新覆盖）
         up.save(QStringLiteral("/tmp/naught-crt-snap2.png"));

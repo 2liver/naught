@@ -19,7 +19,7 @@ class Editor;
 class CrtView : public QRhiWidget {
 public:
     explicit CrtView(Editor *editor);
-    void markDirty();
+    void markDirty(bool force = false);
     void syncGeometry();
     QImage frameImage() const { return m_pending; }
 
@@ -37,6 +37,7 @@ private:
     QRhiGraphicsPipeline *m_ps = nullptr;
     QImage m_pending;
     bool m_texDirty = true;
+    bool m_forceNow = false;
     QRhiReadbackResult *m_rb = nullptr;
     QElapsedTimer m_sinceRefresh;
     QSize m_texSize;

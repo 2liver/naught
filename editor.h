@@ -467,6 +467,8 @@ public:
             m_crtView->show();
             m_crtView->raise();
             m_crtView->markDirty();
+            if (m_lineNumberArea)
+                m_lineNumberArea->hide(); // 行号由快照自绘，避免两套
             setFocus(); // 原生子窗口可能扰动首响应者：焦点还给编辑器
             activateWindow();
             // 临时取证：开显 1.2 秒后把着色器帧缓冲与快照存成 PNG
@@ -488,8 +490,13 @@ public:
                 f.close();
             });
         } else {
-            if (m_crtView)
-                m_crtView->hide();
+            // 原生子窗口即使隐藏也持续干扰（滚动栏/滚轮/鼠标点击全失效）：
+            // 关闭即彻底销毁，恢复原生状态的编辑器
+            delete m_crtView;
+            m_crtView = nullptr;
+            if (m_lineNumberArea)
+                m_lineNumberArea->show();
+            viewport()->update();
         }
         applyScheme();
         applyZoom();
@@ -1759,8 +1766,8 @@ private:
         // 笔刷与字号脱钩：只由 Cmd/Ctrl+Shift+= / - / 0 控制
         updateGutterWidth(); // 行号区宽度随缩放重算（否则放大溢出、打字缩回）
         if (m_crtView) {
-            m_crtView->markDirty();
-            m_crtSettleTimer.start(400); // 合并式补拍（连发缩放只留最后一次）
+            m_crtView->markDirty(true); // 缩放强制重拍（节流会让新旧帧交叠）
+            m_crtSettleTimer.start(400);
         }
     }
 
