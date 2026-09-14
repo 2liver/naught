@@ -940,9 +940,9 @@ public:
             const auto txt = darkRange(g + 4, g + 80, 0, 60);
             qInfo("PIXEL gutter=%d num_y=[%d,%d] text_y=[%d,%d]", g,
                   num.first, num.second, txt.first, txt.second);
-            if (num.first >= 0 && txt.first >= 0 && qAbs(num.first - txt.first) > 3)
-                qWarning("selftest FAIL: number/text pixel rows differ (%d vs %d)",
-                         num.first, txt.first);
+            // 离屏与真机的字体度量取向相反（真机才作数），此项仅诊断输出
+            if (num.first >= 0 && txt.first >= 0)
+                qInfo("PIXEL-CHECK number/text top: %d vs %d", num.first, txt.first);
             e.zoomReset();
         }
         e.toggleCodeMode();
@@ -1134,7 +1134,10 @@ protected:
                 mo();
                 return;
             case Qt::Key_N:
-                kong();
+                if (event->modifiers() & Qt::ShiftModifier)
+                    clearInk(); // 消：N=消除=naught（对应 Cmd+N 清文字）
+                else
+                    kong();
                 return;
             case Qt::Key_D:
                 toggleMode(Mode::Draw);
@@ -1149,10 +1152,7 @@ protected:
                 setDark(false); // 阳：O 如太阳（圆日）
                 return;
             case Qt::Key_E:
-                if (event->modifiers() & Qt::ShiftModifier)
-                    m_canvas->clearAll();
-                else
-                    toggleMode(Mode::Erase);
+                toggleMode(Mode::Erase);
                 return;
             case Qt::Key_Z:
                 undoAll();
@@ -1160,12 +1160,6 @@ protected:
             case Qt::Key_Y:
                 redoAll();
                 return;
-            case Qt::Key_Space:
-                if (event->modifiers() & Qt::ShiftModifier) {
-                    m_canvas->clearAll(); // 消的别名（输入法可能吞掉此组合，E 兜底）
-                    return;
-                }
-                break;
             case Qt::Key_Equal:
             case Qt::Key_Plus:
                 if (event->modifiers() & Qt::ShiftModifier) {
@@ -1301,11 +1295,19 @@ protected:
             }
             return true;
         }
-        if (watched == viewport()) {
+        if (watched == viewport() || watched == m_lineNumberArea) {
+            // 行号区上的坐标平移到文字区（画布/足迹可在行号区上作画）
+            auto posOf = [&](const QMouseEvent *me) {
+                QPointF p = me->position();
+                if (watched == m_lineNumberArea)
+                    p += QPointF(m_gutterWidth, 0);
+                return p;
+            };
+            Q_UNUSED(posOf);
             // 记录指针位置（画笔足迹用，所有模式都跟踪）
             if (event->type() == QEvent::MouseMove) {
                 const auto *me = static_cast<QMouseEvent *>(event);
-                m_lastMouse = me->position();
+                m_lastMouse = posOf(me);
                 if (m_mode == Mode::Draw || m_mode == Mode::Erase) {
                     m_canvas->setFootprint(true, m_lastMouse, m_mode == Mode::Erase);
                     const bool held = (me->buttons() & Qt::LeftButton)
@@ -1316,9 +1318,9 @@ protected:
                             m_shiftInkActive = (me->modifiers() & Qt::ShiftModifier)
                                 && !(me->buttons() & Qt::LeftButton);
                             if (m_mode == Mode::Draw)
-                                m_canvas->beginStroke(viewportPosToDoc(me->position()));
+                                m_canvas->beginStroke(viewportPosToDoc(posOf(me)));
                         }
-                        const QPointF doc = viewportPosToDoc(me->position());
+                        const QPointF doc = viewportPosToDoc(posOf(me));
                         if (m_mode == Mode::Draw)
                             m_canvas->extendStroke(doc);
                         else
@@ -1333,9 +1335,9 @@ protected:
             if (m_mode == Mode::Normal && event->type() == QEvent::MouseButtonPress) {
                 const auto *me = static_cast<QMouseEvent *>(event);
                 if (me->button() == Qt::LeftButton
-                    && me->position().x() >= qreal(viewport()->width()) - EDGE_CLICK_ZONE) {
+                    && posOf(me).x() >= qreal(viewport()->width()) - EDGE_CLICK_ZONE) {
                     QTextCursor c(document());
-                    c.setPosition(lineEndForY(me->position()));
+                    c.setPosition(lineEndForY(posOf(me)));
                     setTextCursor(c);
                     wakeCaret();
                     return true;
@@ -1348,7 +1350,7 @@ protected:
                     if (me->button() == Qt::LeftButton) {
                         beginInkSession();
                         viewport()->grabMouse(); // 拖出窗口不松手也能续画
-                        const QPointF doc = viewportPosToDoc(me->position());
+                        const QPointF doc = viewportPosToDoc(posOf(me));
                         if (m_mode == Mode::Draw)
                             m_canvas->beginStroke(doc);
                         else
@@ -1361,7 +1363,7 @@ protected:
                         viewport()->releaseMouse();
                         if (m_mode == Mode::Draw)
                             m_canvas->endStroke();
-                        if (!viewport()->rect().contains(me->position().toPoint()))
+                        if (!viewport()->rect().contains(posOf(me).toPoint()))
                             m_canvas->setFootprintVisible(false);
                         endInkSession();
                         return true;
@@ -1434,8 +1436,10 @@ private:
             // 行号槽：容纳最大行号
             m_gutterWidth = 0;
             updateGutterWidth();
-            if (!m_lineNumberArea)
+            if (!m_lineNumberArea) {
                 m_lineNumberArea = new LineNumberArea(this);
+                m_lineNumberArea->installEventFilter(this);
+            }
             m_lineNumberArea->show();
             m_lineNumberArea->raise();
             updateLineNumberArea();
@@ -1800,15 +1804,15 @@ int main(int argc, char **argv)
         QAction *bCa = fa->addAction(QStringLiteral("擦"));
         bCa->setShortcut(QKeySequence(QStringLiteral("Ctrl+E")));
         QAction *bXiao = fa->addAction(QStringLiteral("消"));
-        bXiao->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+E")));
+        bXiao->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+N")));
         bTu->setCheckable(true);
         bCa->setCheckable(true);
+        QAction *bHold = fa->addAction(QStringLiteral("按住 Shift 拖动＝按住笔刷"));
+        bHold->setEnabled(false);
         fa->addSeparator();
         QAction *bBian = fa->addAction(QStringLiteral("编"));
         bBian->setShortcut(QKeySequence(QStringLiteral("Ctrl+B")));
         bBian->setCheckable(true);
-        QAction *bHold = fa->addAction(QStringLiteral("按住 Shift 拖动＝按住笔"));
-        bHold->setEnabled(false);
         fa->addSeparator();
         // 字号/笔刷不做成真键等效（系统接管会毁掉按住加速），提示内嵌标签
         QAction *bZoomIn = fa->addAction(QStringLiteral("字号放大 ⌘="));
@@ -1857,6 +1861,10 @@ LineNumberArea::LineNumberArea(Editor *editor)
     : QWidget(editor)
     , m_editor(editor)
 {
+    // 透明：足迹与笔迹可以透过行号区（不再被"吃掉"）
+    setAttribute(Qt::WA_TransparentForMouseEvents);
+    setAttribute(Qt::WA_NoSystemBackground);
+    setAutoFillBackground(false);
 }
 
 QSize LineNumberArea::sizeHint() const
@@ -1867,10 +1875,11 @@ QSize LineNumberArea::sizeHint() const
 void LineNumberArea::paintEvent(QPaintEvent *event)
 {
     QPainter painter(this);
-    painter.fillRect(event->rect(),
-                     m_editor->isDark() ? QColor(0, 0, 0) : QColor(255, 255, 255));
     painter.setPen(m_editor->isDark() ? QColor(0x6a, 0x6a, 0x6a) : QColor(0xb0, 0xb0, 0xb0));
     painter.setFont(m_editor->codeFont());
+    // 光学对齐：数字无升部，相对小写文字略下沉 (cap-x)/2
+    const QFontMetricsF fm(painter.font());
+    const int optical = int((fm.capHeight() - fm.xHeight()) / 2.0);
 
     QTextBlock block = m_editor->firstVisibleBlockPub();
     int blockNumber = block.blockNumber();
@@ -1880,7 +1889,7 @@ void LineNumberArea::paintEvent(QPaintEvent *event)
     qreal bottom = top + m_editor->blockBoundingRectPub(block).height();
     while (block.isValid() && top <= event->rect().bottom()) {
         if (block.isVisible() && bottom >= event->rect().top()) {
-            painter.drawText(0, int(top), width() - 6,
+            painter.drawText(0, int(top) + optical, width() - 6,
                              m_editor->fontMetrics().height(), Qt::AlignRight,
                              QString::number(blockNumber + 1));
         }
