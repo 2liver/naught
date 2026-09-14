@@ -40,13 +40,15 @@ jobs:
           git clone --depth 1 --quiet https://github.com/KDE/syntax-highlighting.git "$RUNNER_TEMP/sh"
           cmake -S "$RUNNER_TEMP/ecm" -B "$RUNNER_TEMP/ecm-build" -DCMAKE_INSTALL_PREFIX="$PREFIX"
           cmake --build "$RUNNER_TEMP/ecm-build" --config Release --target install
+          ARCH_ARGS=""
+          if [ "$RUNNER_OS" = "macOS" ]; then ARCH_ARGS="-DCMAKE_OSX_ARCHITECTURES=x86_64;arm64"; fi
           cmake -S "$RUNNER_TEMP/sh" -B "$RUNNER_TEMP/sh-build" \
             -DCMAKE_INSTALL_PREFIX="$PREFIX" -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_PREFIX_PATH="$PREFIX;$QT_ROOT_DIR"
+            -DCMAKE_PREFIX_PATH="$PREFIX;$QT_ROOT_DIR" $ARCH_ARGS
           cmake --build "$RUNNER_TEMP/sh-build" --config Release --target install --parallel
 
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/kf6;$QT_ROOT_DIR" ${{ matrix.cmake_args }}
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="${{ runner.temp }}/kf6;${{ env.QT_ROOT_DIR }}" ${{ matrix.cmake_args }}
 
       - name: Build
         run: cmake --build build --config Release --parallel

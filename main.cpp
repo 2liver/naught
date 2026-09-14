@@ -1203,11 +1203,15 @@ private:
             const QFontMetricsF fm(activeFont());
             m_gutterWidth = int(fm.horizontalAdvance(QString(digits, QLatin1Char('8'))) + 16);
             setViewportMargins(m_gutterWidth, 0, 0, 0);
+#ifdef NAUGHT_WITH_HIGHLIGHT
             startHighlight();
+#endif
         } else {
             m_gutterWidth = 0;
             setViewportMargins(0, 0, 0, 0);
+#ifdef NAUGHT_WITH_HIGHLIGHT
             stopHighlight();
+#endif
         }
         viewport()->update();
     }
