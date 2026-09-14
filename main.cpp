@@ -190,10 +190,33 @@ public:
 
     void eraseAt(const QPointF &c)
     {
-        // Qt 自带几何引擎：轮廓布尔相减，所见即所得，小口径也精确
-        const qreal r = m_brush * 0.5;
+        // 增量管段：上次点→当前点描边成管（圆帽无缝相接），拖动再快也连续
         QPainterPath tube;
-        tube.addEllipse(c, r, r);
+        if (m_eraseActive) {
+            QPainterPath seg;
+            seg.moveTo(m_eraseLast);
+            seg.lineTo(c);
+            QPainterPathStroker stroker;
+            stroker.setWidth(m_brush);
+            stroker.setCapStyle(Qt::RoundCap);
+            stroker.setJoinStyle(Qt::RoundJoin);
+            tube = stroker.createStroke(seg);
+        } else {
+            tube.addEllipse(c, m_brush / 2.0, m_brush / 2.0);
+        }
+        m_eraseLast = c;
+        m_eraseActive = true;
+        applyErase(tube);
+    }
+
+    void eraseEnd()
+    {
+        m_eraseActive = false;
+    }
+
+    void applyErase(const QPainterPath &tube)
+    {
+        // Qt 自带几何引擎：轮廓布尔相减，所见即所得，小口径也精确
         bool changed = false;
         for (int i = m_strokes.size() - 1; i >= 0; --i) {
             const qreal width = m_strokes.at(i).width;
@@ -304,6 +327,8 @@ private:
     QPoint m_vpOffset;
     QVector<InkStroke> m_strokes;
     QVector<QPointF> m_activePts;
+    QPointF m_eraseLast;
+    bool m_eraseActive = false;
     bool m_fpVisible = false;
     bool m_fpErase = false;
     QPointF m_fpPos;
@@ -1210,6 +1235,8 @@ protected:
                 viewport()->releaseMouse();
                 if (m_mode == Mode::Draw)
                     m_canvas->endStroke();
+                else
+                    m_canvas->eraseEnd();
                 endInkSession();
             }
             break;
@@ -1366,6 +1393,8 @@ protected:
                         viewport()->releaseMouse();
                         if (m_mode == Mode::Draw)
                             m_canvas->endStroke();
+                        else
+                            m_canvas->eraseEnd();
                         if (!viewport()->rect().contains(posOf(me).toPoint()))
                             m_canvas->setFootprintVisible(false);
                         endInkSession();
