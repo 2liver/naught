@@ -492,7 +492,7 @@ public:
         } else {
             // 原生子窗口即使隐藏也持续干扰（滚动栏/滚轮/鼠标点击全失效）：
             // 关闭即彻底销毁，恢复原生状态的编辑器
-            delete m_crtView;
+            m_crtView->deleteLater(); // 事件处理中途销毁原生窗口会死锁 RHI
             m_crtView = nullptr;
             if (m_lineNumberArea)
                 m_lineNumberArea->show();
