@@ -100,6 +100,15 @@ public:
                 m_crtView->markDirty();
         });
 
+        // 显模式逐帧源：光标闪烁（自驱 2Hz）、足迹圆点随鼠标、滚动条淡出、
+        // 选区/墨水中间态——这些只重绘源组件、不会标脏着色器层，必须由
+        // 这里持续补拍（CrtView 内部 80ms 节流挡住超频上传）
+        m_crtRefreshTimer.setInterval(45);
+        connect(&m_crtRefreshTimer, &QTimer::timeout, this, [this] {
+            if (m_crt && m_crtView)
+                m_crtView->markDirty();
+        });
+
         // 换成自绘滚动条：命中区恒 18px，把手闲置 10px / 悬停 18px
         auto *vsb = new ZenScrollBar(Qt::Vertical);
         auto *hsb = new ZenScrollBar(Qt::Horizontal);
@@ -382,37 +391,34 @@ public:
     // 行号区用的显示字体：编=等宽，显=像素磷光（其余同文字）
     QFont displayFont() const { return activeFont(); }
 
-    // 文字快照自绘：块走查几何（与 lineEndForY 同一模型，落点自检已证明），
-    // 引擎无关——真机的视口 re-render（render/grab）不可靠，快照必须自己画。
+    // 文字快照：整面合成——把真实子控件的 paintEvent 逐个渲染进快照
+    // （QWidget::render，引擎原生绘制，无手工几何）：
+    //   视口 = 文字 + 打字光标（含闪烁态/选区）
+    //   画布 = 墨水笔迹 + 足迹圆点（实心涂点/空心擦环）
+    //   行号区 = 结构对齐的行号（真实组件，对齐由构造保证）
+    //   滚动条 = 最上层（与真实层级一致），按当前淡出透明度绘制
+    // 全部 1:1 真实坐标：光栅里的文字与点击命中的文字严格同位，
+    // 光栅不再有"看不全/点不到"的黑区。
     void paintTextSnapshot(QImage &img) const
     {
         QPainter p(&img);
         if (!p.isActive())
             return;
-        p.setFont(displayFont());
-        p.setPen(Crt::kInk);
-        QAbstractTextDocumentLayout *layout = document()->documentLayout();
-        QTextBlock block = document()->firstBlock();
-        qreal top = 0;
-        const qreal vscroll = pixelScrollBefore(verticalScrollBar()->value());
-        const qreal xoff = contentOffset().x(); // 页边距 + 横滚
-        const qreal h = viewport()->height();
-        while (block.isValid() && top - vscroll <= h) {
-            const qreal bh = layout->blockBoundingRect(block).height();
-            if (top - vscroll + bh >= 0) {
-                // 规范画法：QTextLayout::draw 在给定原点自行处理内部行位
-                //（逐行 line.y 会与内部线位重复叠加 = 叠行的根源）。
-                // 顶部 16px 留白：曲率会把屏幕顶缘推出采样范围
-                if (QTextLayout *tl = block.layout())
-                    tl->draw(&p, QPointF(xoff, top - vscroll + 16.0));
-            }
-            top += bh;
-            block = block.next();
-        }
-        // 打字光标：2px 竖线（有焦点时）
-        if (hasFocus()) {
-            const QRect cr = cursorRect();
-            p.fillRect(QRect(cr.left(), cr.top() + 16, 2, cr.height()), Crt::kInk);
+        p.fillRect(img.rect(), Crt::kBg); // 磷光底：行号列条/滚动条槽也同色
+        if (viewport())
+            viewport()->render(&p, viewport()->pos());
+        if (m_canvas && m_canvas->isVisible())
+            m_canvas->render(&p, m_canvas->pos());
+        if (m_lineNumberArea && m_lineNumberArea->isVisible())
+            m_lineNumberArea->render(&p, m_lineNumberArea->pos());
+        if (m_fadeOpacity > 0.02) {
+            p.save();
+            p.setOpacity(m_fadeOpacity);
+            if (verticalScrollBar() && verticalScrollBar()->isVisible())
+                verticalScrollBar()->render(&p, verticalScrollBar()->pos());
+            if (horizontalScrollBar() && horizontalScrollBar()->isVisible())
+                horizontalScrollBar()->render(&p, horizontalScrollBar()->pos());
+            p.restore();
         }
     }
     qreal brushSize() const { return m_brushSize; }
@@ -443,19 +449,21 @@ public:
     {
         m_crt = !m_crt;
         if (m_crt) {
-            // B 路线：真光学着色器层（QRhiWidget·Metal），盖在视口之上，
+            // B 路线：真光学着色器层（QRhiWidget·Metal），盖住编辑器整面，
             // 逐像素渲染——CPU 光栅的引擎坑从根上消失
             if (!m_crtView) {
                 m_crtView = new CrtView(this);
             }
-            m_crtView->syncGeometry();
+            // 原生 NSView 按需重建：关闭时已摘除（隐藏态原生窗口会在 macOS
+            // 上劫持整窗事件分发），此处重新挂上再合成
+            m_crtView->setAttribute(Qt::WA_NativeWindow, true);
+            m_crtView->syncGeometry(); // 整面：文字+行号区+滚动条全被光栅覆盖
             m_crtView->show();
             m_crtView->raise();
-            m_crtView->markDirty();
-            if (m_lineNumberArea)
-                m_lineNumberArea->hide(); // 行号由快照自绘，避免两套
+            m_crtView->markDirty(true);
             setFocus(); // 原生子窗口可能扰动首响应者：焦点还给编辑器
             activateWindow();
+            m_crtRefreshTimer.start(); // 光标闪烁/足迹圆点/滚动条淡出的逐帧源
             // 临时取证：开显 1.2 秒后保存纯 CPU 快照（不碰 RHI——
             // grabFramebuffer/grab 会嵌套 beginOffscreenFrame，本身就是风险源）
             QTimer::singleShot(1200, this, [this] {
@@ -475,17 +483,19 @@ public:
                 f.close();
             });
         } else {
-            // 常驻，只隐藏，绝不销毁：销毁会把顶层 backing store 的
-            // RHI/swapchain 拆掉，与在途 paint 竞态 = beginOffscreenFrame
-            // 撞上已释放的帧槽信号量（SIGSEGV 0x30 崩溃的根因）。
-            // 原生子窗口隐藏后仍需彻底让位（滚轮/点击曾受干扰）：
-            // 缩成 1×1 再隐藏，事件分发与合成都不再碰到它。
+            // 常驻对象，只隐藏：销毁会把顶层 backing store 的 RHI/swapchain
+            // 拆掉，与在途 paint 竞态 = beginOffscreenFrame 撞上已释放的
+            // 帧槽信号量（SIGSEGV 0x30 崩溃的根因）。
+            // 但隐藏的原生 NSView 仍会劫持整窗事件（退出显后滚动/落选/
+            // 光标睡眠/笔刷圆点全瘫的根源）：摘除原生窗口属性，NSView 即毁，
+            // 恢复纯 alien 隐藏子控件 = 完全惰性。
             if (m_crtView) {
                 m_crtView->hide();
                 m_crtView->setGeometry(0, 0, 1, 1);
+                m_crtView->setAttribute(Qt::WA_NativeWindow, false);
             }
-            if (m_lineNumberArea)
-                m_lineNumberArea->show();
+            m_crtRefreshTimer.stop();
+            viewport()->releaseMouse(); // 防御：抓取会话不跨显模式残留
             viewport()->update();
             setFocus();
         }
@@ -1228,25 +1238,25 @@ public:
                          qRed(bgPx), qGreen(bgPx), qBlue(bgPx));
                 return false;
             }
-            // 快照几何：单行文档的锐快照只在顶部第一行区域有琥珀像素
-            //（离屏无 GL 上下文，直接调用自绘快照而非 CrtView 的帧）
+            // 快照几何：文字在顶部第一行；此前的涂擦测试留下两个墨水圆点，
+            // 必须同样出现在合成快照里（墨水进光栅 = 显模式下涂/擦可用的回归闸）
             {
                 QImage snapImg(e.viewport()->size(), QImage::Format_ARGB32);
                 snapImg.fill(Qt::transparent);
                 e.paintTextSnapshot(snapImg);
                 const QImage snap = snapImg;
-                int topAmber = 0, lowAmber = 0;
+                int topAmber = 0, inkAmber = 0;
                 for (int y = 0; y < snap.height(); ++y)
                     for (int x = 0; x < snap.width(); ++x) {
                         const QRgb px = snap.pixel(x, y);
                         if (qRed(px) > 150 && qGreen(px) > 80 && qBlue(px) < 90) {
-                            if (y < 40) ++topAmber; else ++lowAmber;
+                            if (y < 40) ++topAmber; else ++inkAmber;
                         }
                     }
-                qInfo("CRT-SNAP amber top=%d below=%d", topAmber, lowAmber);
-                if (topAmber < 50 || lowAmber > topAmber / 4) {
-                    qWarning("selftest FAIL: snapshot text mispositioned (%d top / %d below)",
-                             topAmber, lowAmber);
+                qInfo("CRT-SNAP amber top=%d ink=%d", topAmber, inkAmber);
+                if (topAmber < 10 || inkAmber < 500) {
+                    qWarning("selftest FAIL: snapshot composite broken (text top=%d ink=%d)",
+                             topAmber, inkAmber);
                     return false;
                 }
             }
@@ -1898,6 +1908,8 @@ private:
     {
         QPlainTextEdit::resizeEvent(event);
         updateLineNumberArea();
+        if (m_crtView)
+            m_crtView->syncGeometry(); // 整面覆盖随窗口缩放
     }
 
     void updateLineNumberArea()
@@ -2231,6 +2243,7 @@ private:
     QFont m_crtFont;
     static inline QString s_crtFamily;
     QTimer m_crtSettleTimer;
+    QTimer m_crtRefreshTimer;
 
 #ifdef NAUGHT_WITH_HIGHLIGHT
     KSyntaxHighlighting::Repository *m_repo = nullptr;

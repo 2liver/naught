@@ -55,8 +55,9 @@ void CrtView::markDirty(bool force)
 
 void CrtView::syncGeometry()
 {
-    if (m_editor && m_editor->viewport())
-        setGeometry(m_editor->viewport()->geometry());
+    // 整面覆盖：文字区+行号区+滚动条全部进入光栅（无任何"未覆盖"黑区）
+    if (m_editor)
+        setGeometry(m_editor->rect());
 }
 
 void CrtView::initialize(QRhiCommandBuffer *)
@@ -67,7 +68,7 @@ void CrtView::initialize(QRhiCommandBuffer *)
     // Metal 拒绝写入 → 纹理永远空 → 着色器采不到字）
     // 初始即按视口尺寸创建：之后不再中途重建（SRB 烙的是创建时的
     // 原生资源，重建纹理而不重建 SRB = 采样已销毁资源 = 黑屏）
-    const QSize vsz = m_editor->viewport()->size();
+    const QSize vsz = m_editor->size();
     // 纹理采样路径在 Metal+RHI 上异常（回读证明上传无误），改用
     // 存储缓冲 + 着色器手动取素（绑定与上传均为已验证的 buffer 路径）
     const int pxbytes = qMax(1, vsz.width()) * qMax(1, vsz.height()) * 4;
@@ -133,7 +134,7 @@ void CrtView::render(QRhiCommandBuffer *cb)
 
     // 节流刷新（80ms）：文字快照自绘 + 上传
     if (m_texDirty && (m_forceNow || !m_sinceRefresh.isValid() || m_sinceRefresh.elapsed() >= 80)) {
-        m_pending = QImage(m_editor->viewport()->size(), QImage::Format_ARGB32);
+        m_pending = QImage(m_editor->size(), QImage::Format_ARGB32);
         m_pending.fill(qRgb(12, 9, 3));
         m_editor->paintTextSnapshot(m_pending);
         const QImage up = m_pending.convertToFormat(QImage::Format_RGBA8888);
