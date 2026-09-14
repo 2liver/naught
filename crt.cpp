@@ -114,12 +114,9 @@ void CrtOverlay::refreshGlow()
     snap.fill(Qt::transparent);
     m_editor->paintTextSnapshot(snap);
     m_snap = snap;
-    // 真高斯辉光：半分辨率三轮盒式模糊（真高斯形状；降采样保持宽光晕）
-    const QSize half(qMax(1, vp->width() / 2), qMax(1, vp->height() / 2));
-    QImage glow = Crt::gaussianBlur(
-                      snap.scaled(half, Qt::IgnoreAspectRatio, Qt::SmoothTransformation),
-                      4, 3)
-                      .scaled(vp->size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    // 真高斯辉光：全分辨率三轮盒式模糊（半分辨率版本在放大时出块状稀碎，
+    // 真高斯形状 + 全分辨率 = 任何字号都平滑）
+    QImage glow = Crt::gaussianBlur(snap, 4, 3);
     // 磷粉余晖：同一滚动位置下旧帧 15% 混入；位置变化时晋升为屏幕固定
     // 的残影（渐暗熄灭，不跟着内容跑）
     const QPointF shift = m_editor->crtGlowShift();
@@ -130,7 +127,7 @@ void CrtOverlay::refreshGlow()
     } else if (!m_glow.isNull()) {
         m_ghost = m_glow;
         m_ghostPos = QPointF(vp->pos()) - shift;
-        m_ghostAlpha = qMin(0.5, m_ghostAlpha + 0.45);
+        m_ghostAlpha = qMin(0.3, m_ghostAlpha + 0.25);
         m_fadeTimer.start();
     }
     m_glow = glow;
@@ -189,14 +186,11 @@ void CrtOverlay::paintEvent(QPaintEvent *)
     // 辉光（文字上方的日冕：模糊快照叠在字形上，柔化+发光同源）
     if (!m_glow.isNull()) {
         p.setClipRect(vp->geometry());
-        p.setOpacity(0.5);
+        p.setOpacity(0.35); // 打字动效参考值 0.4 档位；盖在字上要克制
         p.drawImage(QPointF(vp->pos()) - m_editor->crtGlowShift(), m_glow);
         p.setOpacity(1.0);
-        // 真衍射彩边（随同一像素位移）
-        if (!m_edgeR.isNull())
-            p.drawImage(QPointF(vp->pos()) - m_editor->crtGlowShift(), m_edgeR);
-        if (!m_edgeB.isNull())
-            p.drawImage(QPointF(vp->pos()) - m_editor->crtGlowShift(), m_edgeB);
+        // 衍射彩边暂不绘制：放大时字形竖边成灾（"纵向连带"乱纹），
+        // 边差分算法保留并通过自检，待真彩子像素模型上线后以正确方式呈现
         p.setClipping(false);
     }
     // 磷粉激发：单个椭圆径向渐变（柔和光斑，无轮廓）
