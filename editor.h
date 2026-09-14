@@ -241,8 +241,9 @@ public:
         wakeCaret();
     }
 
-    // 隔：选中（或当前）块的上、下一行各补一个空行；已是空行则不补（幂等）；
-    // 一步撤销；之后内容块保持选中。
+    // 隔：选中的每一行都像单选那样上下各补一个空行——逐行隔离。
+    // 空行本身是隔板（跳过）；幂等（已是空行则不重复）；一步撤销；
+    // 之后整个隔离区保持选中。
     void ge()
     {
         QTextDocument *doc = document();
@@ -255,24 +256,45 @@ public:
         QTextBlock last = doc->findBlock(selEnd);
         if (last.position() == selEnd && last != first)
             last = last.previous();
-        const bool aboveNeeds = first.position() > 0 && first.previous().length() > 1;
-        const bool belowNeeds = last.next().isValid() && last.next().length() > 1;
-        if (!aboveNeeds && !belowNeeds)
-            return;
-        c.beginEditBlock();
-        if (belowNeeds) { // 先下后上：低位置不受高位插入影响
-            c.setPosition(last.position() + last.length() - 1);
-            c.insertText(QStringLiteral("\n"));
+        // 受影响的内容行（空行跳过）；QTextBlock 句柄跨编辑稳定：
+        // 所有插入都在换行符处（不劈块）
+        QVector<QTextBlock> lines;
+        for (QTextBlock b = first;; b = b.next()) {
+            if (b.length() > 1)
+                lines.append(b);
+            if (b == last)
+                break;
         }
-        if (aboveNeeds) {
-            // 插在上一行的换行符处：若插在本块首会分裂本块，QTextBlock 句柄
-            // 随之指向新空块（选区漂移）；插上行尾则本块句柄全程有效
-            c.setPosition(first.position() - 1);
+        QVector<int> inserts;
+        // 相邻内容行之间：若中间无空行，必插
+        for (int i = 0; i + 1 < lines.size(); ++i) {
+            if (lines.at(i).next() == lines.at(i + 1))
+                inserts.append(lines.at(i).position() + lines.at(i).length() - 1);
+        }
+        // 末行之后：下方块非空才插
+        {
+            const QTextBlock below = lines.last().next();
+            if (below.isValid() && below.length() > 1)
+                inserts.append(lines.last().position() + lines.last().length() - 1);
+        }
+        // 首行之前：插在上一行换行符处（若插本行首会劈块，句柄漂移）
+        if (lines.first().position() > 0 && lines.first().previous().length() > 1)
+            inserts.append(lines.first().position() - 1);
+        if (inserts.isEmpty())
+            return;
+        std::sort(inserts.begin(), inserts.end(), std::greater<int>());
+        c.beginEditBlock();
+        int prevPos = -1;
+        for (int pos : inserts) {
+            if (pos == prevPos)
+                continue; // 去重（理论上不会，防御）
+            c.setPosition(pos);
             c.insertText(QStringLiteral("\n"));
+            prevPos = pos;
         }
         c.endEditBlock();
-        c.setPosition(first.position());
-        c.setPosition(last.position() + last.length() - 1, QTextCursor::KeepAnchor);
+        c.setPosition(lines.first().position());
+        c.setPosition(lines.last().position() + lines.last().length() - 1, QTextCursor::KeepAnchor);
         setTextCursor(c);
         wakeCaret();
     }
@@ -814,7 +836,7 @@ public:
                 return false;
             }
         }
-        // 隔：选中块上下补空行（幂等），一步撤销，文档头尾不越界
+        // 隔：逐行隔离——选中每一行上下各补空行（幂等），一步撤销
         {
             e.setPlainText(QStringLiteral("甲一\n乙二\n丙三\n"));
             QTextBlock bMid = e.document()->findBlockByNumber(1);
@@ -822,12 +844,12 @@ public:
             cc.setPosition(bMid.position());
             cc.setPosition(bMid.position() + bMid.length() - 1, QTextCursor::KeepAnchor);
             e.setTextCursor(cc);
-            e.ge();
+            e.ge(); // 单选一行：同旧语义
             if (e.toPlainText() != QStringLiteral("甲一\n\n乙二\n\n丙三\n")) {
-                qWarning("selftest FAIL: ge() got [%s]", qPrintable(e.toPlainText()));
+                qWarning("selftest FAIL: ge() single line got [%s]", qPrintable(e.toPlainText()));
                 return false;
             }
-            e.ge(); // 幂等：已是空行，不再加
+            e.ge(); // 幂等
             if (e.toPlainText() != QStringLiteral("甲一\n\n乙二\n\n丙三\n")) {
                 qWarning("selftest FAIL: ge() not idempotent, got [%s]", qPrintable(e.toPlainText()));
                 return false;
@@ -844,14 +866,56 @@ public:
                 qWarning("selftest FAIL: ge() not undone in one step");
                 return false;
             }
+            // 用户报告的核心案例：选中前两行（顶行在选区里）——每一行都要被隔离
+            {
+                QTextBlock b0 = e.document()->findBlockByNumber(0);
+                QTextBlock b1 = e.document()->findBlockByNumber(1);
+                QTextCursor cc2(e.document());
+                cc2.setPosition(b0.position());
+                cc2.setPosition(b1.position() + b1.length() - 1, QTextCursor::KeepAnchor);
+                e.setTextCursor(cc2);
+                e.ge();
+                if (e.toPlainText() != QStringLiteral("甲一\n\n乙二\n\n丙三\n")) {
+                    qWarning("selftest FAIL: ge() top-two lines got [%s]", qPrintable(e.toPlainText()));
+                    return false;
+                }
+            }
+            // 五行选中中间三行：每一行独立成岛
+            e.setPlainText(QStringLiteral("一\n二\n三\n四\n五\n"));
+            {
+                QTextBlock b1 = e.document()->findBlockByNumber(1);
+                QTextBlock b3 = e.document()->findBlockByNumber(3);
+                QTextCursor cc3(e.document());
+                cc3.setPosition(b1.position());
+                cc3.setPosition(b3.position() + b3.length() - 1, QTextCursor::KeepAnchor);
+                e.setTextCursor(cc3);
+                e.ge();
+                if (e.toPlainText() != QStringLiteral("一\n\n二\n\n三\n\n四\n\n五\n")) {
+                    qWarning("selftest FAIL: ge() middle-three got [%s]", qPrintable(e.toPlainText()));
+                    return false;
+                }
+                e.ge(); // 全隔离后再跑一次：不变
+                if (e.toPlainText() != QStringLiteral("一\n\n二\n\n三\n\n四\n\n五\n")) {
+                    qWarning("selftest FAIL: ge() second pass not idempotent [%s]", qPrintable(e.toPlainText()));
+                    return false;
+                }
+            }
+            // 选区内含空行：空行本身就是隔板，不重复加
+            e.setPlainText(QStringLiteral("一\n二\n\n三\n"));
             e.selectAll();
-            e.ge(); // 全选：文首无上行、文末空块已空 → 不越界不新增
-            if (e.toPlainText() != QStringLiteral("甲一\n乙二\n丙三\n")) {
-                qWarning("selftest FAIL: ge() at document edges changed text");
+            e.ge();
+            if (e.toPlainText() != QStringLiteral("一\n\n二\n\n三\n")) {
+                qWarning("selftest FAIL: ge() with inner blank got [%s]", qPrintable(e.toPlainText()));
+                return false;
+            }
+            e.selectAll();
+            e.ge(); // 文首无上行、文末空块已空、内部已隔离 → 全文档幂等
+            if (e.toPlainText() != QStringLiteral("一\n\n二\n\n三\n")) {
+                qWarning("selftest FAIL: ge() full-doc idempotence got [%s]", qPrintable(e.toPlainText()));
                 return false;
             }
         }
-        // 言/隔 快捷键通道（Ctrl+L / Ctrl+G）
+        // 言/隔 快捷键通道（Ctrl+L / Ctrl+F）
         {
             e.setPlainText(QStringLiteral("丁四\n"));
             e.moveCursor(QTextCursor::Start);
@@ -861,23 +925,23 @@ public:
                 qWarning("selftest FAIL: Ctrl+L did not call yan()");
                 return false;
             }
-            // Ctrl+G：文首无上行、文末空块已空 → 语义正确的不动（且不崩溃）
-            QKeyEvent kg(QEvent::KeyPress, Qt::Key_G, Qt::ControlModifier);
-            QApplication::sendEvent(&e, &kg);
+            // Ctrl+F：文首无上行、文末空块已空 → 语义正确的不动（且不崩溃）
+            QKeyEvent kf(QEvent::KeyPress, Qt::Key_F, Qt::ControlModifier);
+            QApplication::sendEvent(&e, &kf);
             if (e.toPlainText() != QStringLiteral("「丁四」\n")) {
-                qWarning("selftest FAIL: Ctrl+G at document edge changed text");
+                qWarning("selftest FAIL: Ctrl+F at document edge changed text");
                 return false;
             }
-            // 中间行的 Ctrl+G 才补空行
+            // 中间行的 Ctrl+F 才补空行
             e.setPlainText(QStringLiteral("甲\n乙\n丙\n"));
             const QTextBlock bm = e.document()->findBlockByNumber(1);
             QTextCursor cc2(e.document());
             cc2.setPosition(bm.position());
             e.setTextCursor(cc2);
-            QKeyEvent kg2(QEvent::KeyPress, Qt::Key_G, Qt::ControlModifier);
-            QApplication::sendEvent(&e, &kg2);
+            QKeyEvent kf2(QEvent::KeyPress, Qt::Key_F, Qt::ControlModifier);
+            QApplication::sendEvent(&e, &kf2);
             if (e.toPlainText() != QStringLiteral("甲\n\n乙\n\n丙\n")) {
-                qWarning("selftest FAIL: Ctrl+G on middle line got [%s]", qPrintable(e.toPlainText()));
+                qWarning("selftest FAIL: Ctrl+F on middle line got [%s]", qPrintable(e.toPlainText()));
                 return false;
             }
         }
@@ -892,7 +956,7 @@ public:
             e.setTextCursor(cc);
             e.yan();
             e.ge();
-            if (e.toPlainText() != QStringLiteral("甲\n\n「一」\n「二」\n「三」\n\n丙\n")) {
+            if (e.toPlainText() != QStringLiteral("甲\n\n「一」\n\n「二」\n\n「三」\n\n丙\n")) {
                 qWarning("selftest FAIL: yan()+ge() pipeline got [%s]", qPrintable(e.toPlainText()));
                 return false;
             }
@@ -1027,8 +1091,8 @@ protected:
             case Qt::Key_L:
                 yan(); // 言：L 是「」折角；行头尾批量加「」
                 return;
-            case Qt::Key_G:
-                ge(); // 隔：G 即 gap（隔/间距）；选中块上下补空行
+            case Qt::Key_F:
+                ge(); // 隔：F 是"分"（分隔）的声母；逐行上下补空行
                 return;
             case Qt::Key_I:
                 setDark(true); // 阴：I 如冰（阴冷）

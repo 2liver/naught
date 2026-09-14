@@ -195,7 +195,7 @@ int main(int argc, char **argv)
         QAction *bYan = fa->addAction(QStringLiteral("言"));
         bYan->setShortcut(QKeySequence(QStringLiteral("Ctrl+L")));
         QAction *bGe = fa->addAction(QStringLiteral("隔"));
-        bGe->setShortcut(QKeySequence(QStringLiteral("Ctrl+G")));
+        bGe->setShortcut(QKeySequence(QStringLiteral("Ctrl+F")));
         fa->addSeparator();
         // 字号/笔刷不做成真键等效（系统接管会毁掉按住加速），提示内嵌标签
         QAction *bZoomIn = fa->addAction(QStringLiteral("字号放大 ⌘="));
