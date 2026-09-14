@@ -241,7 +241,6 @@ protected:
 
     void mousePressEvent(QMouseEvent *event) override
     {
-        // 轨道（非把手）上的左键让位给文字光标：点最右缘即把光标落到行尾
         if (event->button() == Qt::LeftButton && !handleRect().contains(event->position().toPoint())) {
             emit trackClicked(event->position().toPoint());
             return;
@@ -788,7 +787,7 @@ private:
             vpPos = QPointF(qreal(vp->width()) - 1.0, qreal(qMin(pos.y(), vp->height() - 1)));
         else
             vpPos = QPointF(qreal(qMin(pos.x(), vp->width() - 1)), qreal(vp->height()) - 1.0);
-        const int hit = document()->documentLayout()->hitTest(vpPos, Qt::ExactHit);
+        const int hit = document()->documentLayout()->hitTest(vpPos, Qt::FuzzyHit); // 空白处取最近位置（行尾）
         if (hit >= 0) {
             QTextCursor c(document());
             c.setPosition(hit);
