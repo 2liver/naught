@@ -181,6 +181,15 @@ public:
             if (m_codeMode)
                 applyGutterGeometry(); // 行号随横滚移出/复原
         });
+        // 滚动条的出现/消失会改变视口尺寸：着色器层跟随，否则盖住滚动条
+        const auto syncCrtGeo = [this] {
+            if (m_crtView) {
+                m_crtView->syncGeometry();
+                m_crtView->markDirty();
+            }
+        };
+        connect(verticalScrollBar(), &QScrollBar::rangeChanged, this, syncCrtGeo);
+        connect(horizontalScrollBar(), &QScrollBar::rangeChanged, this, syncCrtGeo);
 
         applyScheme();
         applyZoom();
