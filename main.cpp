@@ -234,10 +234,25 @@ protected:
             switch (ng->gestureType()) {
             case Qt::BeginNativeGesture:
                 m_pinchBase = m_size;
+                m_pinchLast = 0.0;
+                m_pinchCalibrated = false;
                 break;
-            case Qt::ZoomNativeGesture:
-                zoomTo(int(std::lround(m_pinchBase * ng->value())));
+            case Qt::ZoomNativeGesture: {
+                const qreal v = ng->value();
+                if (!m_pinchCalibrated) {
+                    // 首个事件只记基准：不同平台 value 起点不同（0 或 1），
+                    // 一律按“相对上一步的倍率”计算，避免瞬间跳变
+                    m_pinchLast = v;
+                    m_pinchCalibrated = true;
+                    break;
+                }
+                if (v == m_pinchLast)
+                    break;
+                const qreal factor = (1.0 + v) / (1.0 + m_pinchLast);
+                m_pinchLast = v;
+                zoomTo(int(std::lround(m_size * factor)));
                 break;
+            }
             default:
                 break;
             }
@@ -304,6 +319,8 @@ private:
     int m_holdInterval = 70;
     int m_wheelAccum = 0;
     int m_pinchBase = 12;
+    qreal m_pinchLast = 0.0;
+    bool m_pinchCalibrated = false;
 };
 
 int main(int argc, char **argv)
