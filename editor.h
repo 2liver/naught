@@ -1549,12 +1549,22 @@ private:
         // O(1)：只改文档默认字号并标脏，重排由 Qt 惰性完成（仅可见区域）。
         QFont f = activeFont();
         document()->setDefaultFont(f);
-        document()->markContentsDirty(0, document()->characterCount());
+        if (document()->characterCount() > 1)
+            document()->markContentsDirty(0, document()->characterCount());
+        // 空文档不标脏：构造期（尚无绘制设备）同步排版会在 QFont 解析时崩溃
+        //（DiagnosticReports 里的启动 SIGSEGV 即此路径）
         setFont(f);
         // 笔刷与字号脱钩：只由 Cmd/Ctrl+Shift+= / - / 0 控制
         updateGutterWidth(); // 行号区宽度随缩放重算（否则放大溢出、打字缩回）
-        if (m_crtBackdrop)
+        if (m_crtBackdrop) {
             m_crtBackdrop->forceGlow(); // 光晕立即随缩放重拍（影子不跟缩放就是这个漏了）
+            // 自归位：布局与滚动在数帧后才彻底落定，120ms 后补拍一次
+            //（纯重渲染，不做任何缩放），消除"定格时影子还在字外"的残影
+            QTimer::singleShot(120, this, [this] {
+                if (m_crt && m_crtBackdrop)
+                    m_crtBackdrop->forceGlow();
+            });
+        }
     }
 
     void setCodeMode(bool on)
@@ -1839,30 +1849,33 @@ private:
     }
 
     // 锚定缩放：指哪大哪。关键事实（Qt 源码）：vbar 的值是**视觉行号**；
-    // markContentsDirty 后所有块被 clearLayout（lineCount=0），而 layout 版
-    // blockBoundingRect 在 lineCount==0 时必然强制该块重排——因此可完全同步：
-    // 自首块累积新字号下的视觉行号，让锚点行仍落在鼠标 y 附近。
+    // 且 Qt 的 relayout 会在画帧时按自己的状态覆写 vbar——补偿必须晚于它
+    //（下一事件循环回合），否则真机上被覆写回"左上锚定"（离屏自检时序侥幸通过）。
+    // markContentsDirty 后所有块被 clearLayout（lineCount=0），layout 版
+    // blockBoundingRect 在 lineCount==0 时强制该块重排，因此补偿本身无需等待布局。
     void applyAnchoredZoom(qreal newSize)
     {
         const QPointF anchor = zoomAnchor();
         const int pos = positionAtViewport(anchor);
         m_size = std::clamp<qreal>(newSize, 6, 1024);
         applyZoom();
-        QAbstractTextDocumentLayout *layout = document()->documentLayout();
-        const QTextBlock target = document()->findBlock(pos);
-        layout->blockBoundingRect(target); // 强制锚点块按新字号重排
-        int line = 0;
-        for (QTextBlock b = document()->firstBlock(); b.isValid() && b != target; b = b.next()) {
-            layout->blockBoundingRect(b); // 强制重排（lineCount==0 必触发）
-            line += b.lineCount();
-        }
-        const int lineInBlock = visualLineInBlock(target, pos);
-        line += lineInBlock;
-        const QTextLayout *tl = target.layout();
-        const qreal lineH = (tl && tl->lineCount() > 0)
-            ? tl->lineAt(lineInBlock).height()
-            : 16.0;
-        verticalScrollBar()->setValue(qMax(0, line - int(anchor.y() / lineH)));
+        QTimer::singleShot(0, this, [this, pos, y = anchor.y()] {
+            QAbstractTextDocumentLayout *layout = document()->documentLayout();
+            const QTextBlock target = document()->findBlock(pos);
+            layout->blockBoundingRect(target); // 强制锚点块按新字号重排
+            int line = 0;
+            for (QTextBlock b = document()->firstBlock(); b.isValid() && b != target; b = b.next()) {
+                layout->blockBoundingRect(b); // 强制重排（lineCount==0 必触发）
+                line += b.lineCount();
+            }
+            const int lineInBlock = visualLineInBlock(target, pos);
+            line += lineInBlock;
+            const QTextLayout *tl = target.layout();
+            const qreal lineH = (tl && tl->lineCount() > 0)
+                ? tl->lineAt(lineInBlock).height()
+                : 16.0;
+            verticalScrollBar()->setValue(qMax(0, line - int(y / lineH)));
+        });
     }
 
     // 视口点所在视觉行的行尾落点（边缘窄带点击与轨道点击共用）
