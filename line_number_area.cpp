@@ -31,10 +31,12 @@ void LineNumberArea::paintEvent(QPaintEvent *event)
     QPainter painter(this);
     painter.setPen(m_editor->isDark() ? QColor(0x6a, 0x6a, 0x6a) : QColor(0xb0, 0xb0, 0xb0));
     painter.setFont(m_editor->codeFont());
-    // 光学对齐：数字无升部，相对小写文字略下沉 (cap-x)/2
     const QFontMetricsF fm(painter.font());
-    const int optical = int((fm.capHeight() - fm.xHeight()) / 2.0);
+    const qreal rightEdge = width() - 6.0;
 
+    // 几何对齐 = 结构对齐：行号落在文字自己的基线上。
+    // 基线 = 块顶 + 首行 y + QTextLine::ascent —— 与 QPlainTextEdit 内部
+    // QTextLine::draw 完全同一坐标，无任何启发式偏移（废除 optical 下沉）。
     QTextBlock block = m_editor->firstVisibleBlockPub();
     int blockNumber = block.blockNumber();
     qreal top = m_editor->blockBoundingGeometryPub(block)
@@ -42,10 +44,22 @@ void LineNumberArea::paintEvent(QPaintEvent *event)
                     .top();
     qreal bottom = top + m_editor->blockBoundingRectPub(block).height();
     while (block.isValid() && top <= event->rect().bottom()) {
-        if (block.isVisible() && bottom >= event->rect().top()) {
-            painter.drawText(0, int(top) + optical, width() - 6,
-                             m_editor->fontMetrics().height(), Qt::AlignRight,
-                             QString::number(blockNumber + 1));
+        // 文末空块是"纸的余白"：文字侧零视觉高度（不可入），行号也不画——
+        // 否则它会以 blockBoundingRect 的完整行高（19px）撑出一个幽灵行号
+        const bool phantomTail = block == m_editor->document()->lastBlock()
+            && block.length() == 1 && m_editor->document()->characterCount() >= 2;
+        if (block.isVisible() && bottom >= event->rect().top() && !phantomTail) {
+            qreal baseline = top;
+            const QTextLayout *tl = block.layout();
+            if (tl && tl->lineCount() > 0) {
+                const QTextLine line = tl->lineAt(0);
+                baseline += line.y() + line.ascent();
+            } else {
+                baseline += fm.ascent();
+            }
+            const QString number = QString::number(blockNumber + 1);
+            // drawText(QPointF)：y 即基线；右缘由精确字符宽度推进，等宽/变宽皆准
+            painter.drawText(QPointF(rightEdge - fm.horizontalAdvance(number), baseline), number);
         }
         block = block.next();
         top = bottom;

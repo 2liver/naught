@@ -563,8 +563,19 @@ public:
             qWarning("selftest FAIL: code mode gutter missing");
             return false;
         }
-        // 像素级对齐验证：把编模式渲染成图像，比较数字与文字的像素行范围
+        // 基线对齐硬验证：行号与文字共用同一 QTextLayout 基线（结构恒等），
+        // 像素级用同字形比对（行号数字 vs 文字数字），真机/离屏渲染取向无关
         {
+            QString digitDoc;
+            for (int i = 0; i < 8; ++i)
+                digitDoc += QStringLiteral("111111111111\n");
+            e.setPlainText(digitDoc);
+            QApplication::processEvents();
+            // 光标净化：清焦点后 QPlainTextEdit 隐藏光标，像素比对才纯净
+            e.setFocus();
+            QApplication::processEvents();
+            e.clearFocus();
+            QApplication::processEvents();
             QImage img(e.size(), QImage::Format_ARGB32);
             img.fill(Qt::white);
             e.render(&img);
@@ -580,13 +591,17 @@ public:
                         }
                 return qMakePair(lo, hi);
             };
-            const auto num = darkRange(2, qMax(3, g - 2), 0, 60);
-            const auto txt = darkRange(g + 4, g + 80, 0, 60);
-            qInfo("PIXEL gutter=%d num_y=[%d,%d] text_y=[%d,%d]", g,
+            const auto num = darkRange(2, qMax(3, g - 2), 0, e.height());
+            const auto txt = darkRange(g + 4, g + 120, 0, e.height());
+            qInfo("GUTTER-ALIGN gutter=%d num_y=[%d,%d] text_y=[%d,%d]", g,
                   num.first, num.second, txt.first, txt.second);
-            // 离屏与真机的字体度量取向相反（真机才作数），此项仅诊断输出
-            if (num.first >= 0 && txt.first >= 0)
-                qInfo("PIXEL-CHECK number/text top: %d vs %d", num.first, txt.first);
+            if (num.first < 0 || txt.first < 0
+                || qAbs(num.first - txt.first) > 1
+                || qAbs(num.second - txt.second) > 1) {
+                qWarning("selftest FAIL: gutter baselines misaligned: [%d,%d] vs [%d,%d]",
+                         num.first, num.second, txt.first, txt.second);
+                return false;
+            }
             e.zoomReset();
         }
         e.toggleCodeMode();
