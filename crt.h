@@ -1,10 +1,12 @@
 // crt.h —— 「显」显像管层：零 UI、单一琥珀磷光模式、纯画面拟真。
-// 两层：CrtBackdrop（视口之下：磷底 + 辉光快照）与 CrtOverlay
-// （最上：扫描线 / 噪声 / 暗角玻璃 / 暖机脉冲）。全部同生命周期可逆。
-// 实现见 crt.cpp（需要 Editor 完整类型）。
+// 架构（二期修复后）：视口不透明（Base=kBg），所有光效为文字上方
+// 的纯 SourceOver 层。真机的窗口合成器对透明视口会产生未初始化
+// 内存的"绿洞"（render/grab 亦全空），透明架构已整体废除。
+// 文字快照由 Editor::paintTextSnapshot 自绘（块走查几何，引擎无关）。
 #pragma once
 
 #include <QColor>
+#include <QElapsedTimer>
 #include <QImage>
 #include <QTimer>
 #include <QWidget>
@@ -109,40 +111,8 @@ inline QImage gaussianBlur(const QImage &src, int radius, int iterations)
 }
 } // namespace Crt
 
-// 辉光层：视口快照降采样模糊成磷光辉光，垫在透明视口之下。
-// 滚动小位移时辉光短暂滞后（磷粉惰性，正是要的味道），超位移或内容脏时追上。
-class CrtBackdrop : public QWidget {
-public:
-    explicit CrtBackdrop(Editor *editor);
-    void invalidateGlow();
-    void refreshGlow();
-    // 缩放等必须立即重拍的场景：绕过打字节流
-    void forceGlow();
-    QImage glowImage() const { return m_glow; }
-    QPoint glowScroll() const { return m_glowScroll; }
-    // 二期：衍射彩边掩膜（锐快照差分的竖直边，R/B 各一侧）
-    QImage edgeImage(bool right) const { return right ? m_edgeR : m_edgeB; }
-
-protected:
-    void paintEvent(QPaintEvent *event) override;
-
-private:
-    Editor *m_editor = nullptr;
-    QImage m_glow;
-    QPoint m_glowScroll;
-    QElapsedTimer m_sinceRefresh;
-    bool m_dirty = true;
-    bool m_forceRefresh = false;
-    QImage m_edgeR; // 右缘红边（alpha 掩膜）
-    QImage m_edgeB; // 左缘蓝边（alpha 掩膜）
-    // 残影：旧光晕留在原屏幕位置渐暗熄灭（灯泡慢慢灭，不是开关）
-    QImage m_ghost;
-    QPointF m_ghostPos;
-    qreal m_ghostAlpha = 0.0;
-    QTimer m_fadeTimer;
-};
-
-// 效果层：扫描线 + 噪声 + 暗角玻璃 + 暖机脉冲。事件穿透。
+// 效果层（唯一一层）：辉光（含残影）+ 衍射彩边 + 磷粉激发 +
+// 玻璃/扫描线 + 噪声 + 刷新带 + 暖机。事件穿透，纯 SourceOver。
 class CrtOverlay : public QWidget {
 public:
     explicit CrtOverlay(Editor *editor);
@@ -150,6 +120,15 @@ public:
     void stop();
     // 磷粉激发：新敲入的字符短暂更亮，然后回落（视口坐标矩形）
     void excite(const QRect &viewportRect);
+    void invalidateGlow();
+    void refreshGlow();
+    void forceGlow();
+    QImage glowImage() const { return m_glow; }
+    QPoint glowScroll() const { return m_glowScroll; }
+    QImage edgeImage(bool right) const { return right ? m_edgeR : m_edgeB; }
+    QImage snapImage() const { return m_snap; }
+    QImage glassImage() const { return m_glass; }
+    QImage noiseImage(int f) const { return m_noise[f]; }
 
 protected:
     void paintEvent(QPaintEvent *event) override;
@@ -168,4 +147,17 @@ private:
     QTimer m_warmTimer;
     QRect m_exciteRect;      // 磷粉激发区（视口坐标）
     qreal m_exciteAge = 0.0; // 1=刚激发 → 0=回落
+    // 辉光管线（原 CrtBackdrop 移入）
+    QImage m_glow;
+    QPoint m_glowScroll;
+    QElapsedTimer m_sinceRefresh;
+    bool m_dirty = true;
+    bool m_forceRefresh = false;
+    QImage m_snap;  // 锐快照
+    QImage m_edgeR; // 右缘红边
+    QImage m_edgeB; // 左缘蓝边
+    QImage m_ghost; // 残影（屏幕固定渐暗）
+    QPointF m_ghostPos;
+    qreal m_ghostAlpha = 0.0;
+    QTimer m_fadeTimer;
 };

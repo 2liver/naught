@@ -1,4 +1,5 @@
 // crt.cpp —— 「显」显像管层实现。全部效果同生命周期，随关闭零残留。
+// 架构（二期修复后）：视口不透明，本层为文字上方唯一效果层，纯 SourceOver。
 #include "crt.h"
 
 #include "editor.h"
@@ -8,143 +9,6 @@
 #include <QElapsedTimer>
 #include <QPainter>
 #include <QScrollBar>
-
-// ---------- CrtBackdrop ----------
-
-CrtBackdrop::CrtBackdrop(Editor *editor)
-    : QWidget(editor)
-    , m_editor(editor)
-{
-    setAttribute(Qt::WA_NoSystemBackground);
-    setAttribute(Qt::WA_TransparentForMouseEvents);
-    setAutoFillBackground(false);
-    // 残影渐暗：30ms 一拍，约 250ms 熄灭——渐变包络，不是开关
-    m_fadeTimer.setInterval(30);
-    connect(&m_fadeTimer, &QTimer::timeout, this, [this] {
-        if (m_ghostAlpha <= 0.0) {
-            m_fadeTimer.stop();
-            m_ghost = QImage();
-            return;
-        }
-        m_ghostAlpha -= 0.06;
-        update();
-    });
-}
-
-// 内容/缩放变化：标记脏，等间隔过后重拍
-void CrtBackdrop::invalidateGlow()
-{
-    m_dirty = true;
-    update();
-}
-
-// 缩放等场景：下一次绘制立即重拍（光晕必须与当前字号严格一致，
-// 否则旧字号的光晕会残留在新文字之外——"影子"）
-void CrtBackdrop::forceGlow()
-{
-    m_forceRefresh = true;
-    m_dirty = true;
-    update();
-}
-
-void CrtBackdrop::refreshGlow()
-{
-    if (!m_forceRefresh && m_sinceRefresh.isValid()
-        && m_sinceRefresh.elapsed() < Crt::kGlowMinIntervalMs) {
-        m_dirty = true; // 打字连发时别每键重拍：漏掉的内容由脏标记兜底
-        return;
-    }
-    m_forceRefresh = false;
-    QWidget *vp = m_editor->viewport();
-    if (!vp || vp->width() <= 0 || vp->height() <= 0)
-        return;
-    QImage snap(vp->size(), QImage::Format_ARGB32);
-    snap.fill(Qt::transparent);
-    vp->render(&snap);
-    // 真高斯辉光：半分辨率三轮盒式模糊（真高斯形状；降采样保持宽光晕，
-    // 平滑放大回原尺寸）
-    const QSize half(qMax(1, vp->width() / 2), qMax(1, vp->height() / 2));
-    QImage glow = Crt::gaussianBlur(
-                      snap.scaled(half, Qt::IgnoreAspectRatio, Qt::SmoothTransformation),
-                      4, 3)
-                      .scaled(vp->size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-    // 二期真衍射：锐快照差分的竖直亮边，R 在右缘、B 在左缘（±1px、色相相反）。
-    // 着色用纯字节写入——不用任何合成模式（DestinationIn+Alpha8 掩膜在
-    // 真机引擎上产生未初始化通道垃圾：黑轮廓/花屏绿块的元凶）
-    {
-        const auto tintEdge = [](const QImage &mask, const QColor &c) {
-            QImage out(mask.size(), QImage::Format_ARGB32);
-            for (int y = 0; y < mask.height(); ++y) {
-                const uchar *m = mask.constScanLine(y);
-                uchar *o = out.scanLine(y);
-                for (int x = 0; x < mask.width(); ++x) {
-                    o[x * 4 + 0] = uchar(c.blue());
-                    o[x * 4 + 1] = uchar(c.green());
-                    o[x * 4 + 2] = uchar(c.red());
-                    o[x * 4 + 3] = uchar(m[x] * c.alpha() / 255);
-                }
-            }
-            return out;
-        };
-        m_edgeR = tintEdge(Crt::edgeDiff(snap, +1), QColor(255, 70, 20, int(255 * Crt::kDiffAlpha)));
-        m_edgeB = tintEdge(Crt::edgeDiff(snap, -1), QColor(50, 90, 255, int(255 * Crt::kDiffAlpha)));
-    }
-    // 磷粉余晖：同一滚动位置下，旧帧 15% 混入（打字/编辑留下短暂残影）；
-    // 滚动位置变化（像素位移 > 0）时晋升为屏幕固定的残影（渐暗熄灭）
-    const QPointF shift = m_editor->crtGlowShift(); // 基于旧快照的像素位移
-    if (!m_glow.isNull() && shift.manhattanLength() <= 0.5) {
-        QPainter pg(&glow);
-        pg.setOpacity(0.15);
-        pg.drawImage(0, 0, m_glow);
-    } else if (!m_glow.isNull()) {
-        m_ghost = m_glow;
-        m_ghostPos = QPointF(vp->pos()) - shift;
-        m_ghostAlpha = qMin(0.5, m_ghostAlpha + 0.45);
-        m_fadeTimer.start();
-    }
-    m_glow = glow;
-    m_glowScroll = QPoint(m_editor->horizontalScrollBar()->value(),
-                          m_editor->verticalScrollBar()->value());
-    m_sinceRefresh.restart();
-    m_dirty = false;
-    update();
-}
-
-void CrtBackdrop::paintEvent(QPaintEvent *)
-{
-    QWidget *par = parentWidget();
-    if (par && size() != par->size())
-        setGeometry(par->rect());
-    QPainter p(this);
-    if (!p.isActive())
-        return;
-    p.fillRect(rect(), Crt::kBg);
-    QWidget *vp = m_editor->viewport();
-    if (!vp)
-        return;
-    if (m_glow.isNull()) {
-        refreshGlow();
-    } else {
-        const QPointF shift = m_editor->crtGlowShift(); // 像素位移（vbar 是行号单位）
-        if (m_forceRefresh || shift.manhattanLength() >= Crt::kGlowMinScroll)
-            refreshGlow();
-        else if (m_dirty && m_sinceRefresh.elapsed() > Crt::kGlowMinIntervalMs)
-            refreshGlow();
-    }
-    // 残影：屏幕固定、渐暗熄灭（滚动时光慢慢消散在玻璃上）
-    if (!m_ghost.isNull() && m_ghostAlpha > 0.01) {
-        p.setOpacity(m_ghostAlpha);
-        p.drawImage(m_ghostPos, m_ghost);
-        p.setOpacity(1.0);
-    }
-    if (!m_glow.isNull()) {
-        // 环境底光：弱化的快照垫底（日冕由效果层叠加在文字上方）
-        p.setOpacity(0.35);
-        p.drawImage(QPointF(vp->pos()) - m_editor->crtGlowShift(), m_glow);
-    }
-}
-
-// ---------- CrtOverlay ----------
 
 CrtOverlay::CrtOverlay(Editor *editor)
     : QWidget(editor)
@@ -160,15 +24,9 @@ CrtOverlay::CrtOverlay(Editor *editor)
     for (int y = 0; y < Crt::kScanPeriod; ++y)
         m_scanMask.setPixelColor(0, y, QColor(0, 0, 0, rows[y]));
 
-    // 噪声两帧：1×256 的行亮度抖动条（真实 CRT 的噪声是扫描线明暗起伏，
-    // 不是撒白点）；拉伸到全屏 = 逐行 ±几级灰度，固定种子 = 同一台机器
-    for (int f = 0; f < 2; ++f) {
-        m_noise[f] = QImage(1, 256, QImage::Format_ARGB32);
-        m_noise[f].fill(Qt::transparent);
-        std::mt19937 rng(0x5C4E00u + f);
-        for (int y = 0; y < 256; ++y)
-            m_noise[f].setPixelColor(0, y, QColor(0, 0, 0, int(rng() % 19)));
-    }
+    // 噪声两帧：行亮度抖动（真实 CRT 的噪声是扫描线明暗起伏，不是撒白点）。
+    // 全尺寸预生成、1:1 绘制——此前 1×256 拉伸到全窗的极端缩放是
+    // 真机红竖条纹的元凶（引擎对 1px 宽图像的插值产生垃圾列）
 
     m_noiseTimer.setInterval(120);
     connect(&m_noiseTimer, &QTimer::timeout, this, [this] {
@@ -185,6 +43,17 @@ CrtOverlay::CrtOverlay(Editor *editor)
         update();
         if (m_warm <= 0.0)
             m_warmTimer.stop();
+    });
+    // 残影渐暗：30ms 一拍，约 250ms 熄灭——渐变包络，不是开关
+    m_fadeTimer.setInterval(30);
+    connect(&m_fadeTimer, &QTimer::timeout, this, [this] {
+        if (m_ghostAlpha <= 0.0) {
+            m_fadeTimer.stop();
+            m_ghost = QImage();
+            return;
+        }
+        m_ghostAlpha -= 0.06;
+        update();
     });
 }
 
@@ -213,6 +82,83 @@ void CrtOverlay::excite(const QRect &viewportRect)
     update();
 }
 
+// 内容/缩放变化：标记脏，等间隔过后重拍
+void CrtOverlay::invalidateGlow()
+{
+    m_dirty = true;
+    update();
+}
+
+// 缩放等场景：下一次绘制立即重拍
+void CrtOverlay::forceGlow()
+{
+    m_forceRefresh = true;
+    m_dirty = true;
+    update();
+}
+
+void CrtOverlay::refreshGlow()
+{
+    if (!m_forceRefresh && m_sinceRefresh.isValid()
+        && m_sinceRefresh.elapsed() < Crt::kGlowMinIntervalMs) {
+        m_dirty = true; // 打字连发时别每键重拍：漏掉的内容由脏标记兜底
+        return;
+    }
+    m_forceRefresh = false;
+    QWidget *vp = m_editor->viewport();
+    if (!vp || vp->width() <= 0 || vp->height() <= 0)
+        return;
+    // 文字快照由 Editor 自绘（真机的视口 re-render 不可靠：透明架构下
+    // render/grab 全空；块走查几何与落点自检同一模型，引擎无关）
+    QImage snap(vp->size(), QImage::Format_ARGB32);
+    snap.fill(Qt::transparent);
+    m_editor->paintTextSnapshot(snap);
+    m_snap = snap;
+    // 真高斯辉光：半分辨率三轮盒式模糊（真高斯形状；降采样保持宽光晕）
+    const QSize half(qMax(1, vp->width() / 2), qMax(1, vp->height() / 2));
+    QImage glow = Crt::gaussianBlur(
+                      snap.scaled(half, Qt::IgnoreAspectRatio, Qt::SmoothTransformation),
+                      4, 3)
+                      .scaled(vp->size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    // 磷粉余晖：同一滚动位置下旧帧 15% 混入；位置变化时晋升为屏幕固定
+    // 的残影（渐暗熄灭，不跟着内容跑）
+    const QPointF shift = m_editor->crtGlowShift();
+    if (!m_glow.isNull() && shift.manhattanLength() <= 0.5) {
+        QPainter pg(&glow);
+        pg.setOpacity(0.15);
+        pg.drawImage(0, 0, m_glow);
+    } else if (!m_glow.isNull()) {
+        m_ghost = m_glow;
+        m_ghostPos = QPointF(vp->pos()) - shift;
+        m_ghostAlpha = qMin(0.5, m_ghostAlpha + 0.45);
+        m_fadeTimer.start();
+    }
+    m_glow = glow;
+    m_glowScroll = QPoint(m_editor->horizontalScrollBar()->value(),
+                          m_editor->verticalScrollBar()->value());
+    // 真衍射：竖直亮边 R 右 / B 左。着色用纯字节写入（合成模式在真机
+    // 引擎上产生未初始化通道垃圾：黑轮廓/花屏绿块的元凶）
+    const auto tintEdge = [](const QImage &mask, const QColor &c) {
+        QImage out(mask.size(), QImage::Format_ARGB32);
+        for (int y = 0; y < mask.height(); ++y) {
+            const uchar *m = mask.constScanLine(y);
+            uchar *o = out.scanLine(y);
+            for (int x = 0; x < mask.width(); ++x) {
+                o[x * 4 + 0] = uchar(c.blue());
+                o[x * 4 + 1] = uchar(c.green());
+                o[x * 4 + 2] = uchar(c.red());
+                o[x * 4 + 3] = uchar(m[x] * c.alpha() / 255);
+            }
+        }
+        return out;
+    };
+    m_edgeR = tintEdge(Crt::edgeDiff(snap, +1), QColor(255, 70, 20, int(255 * Crt::kDiffAlpha)));
+    m_edgeB = tintEdge(Crt::edgeDiff(snap, -1), QColor(50, 90, 255, int(255 * Crt::kDiffAlpha)));
+    m_sinceRefresh.restart();
+    m_dirty = false;
+    update();
+}
+
 void CrtOverlay::paintEvent(QPaintEvent *)
 {
     QWidget *par = parentWidget();
@@ -221,39 +167,41 @@ void CrtOverlay::paintEvent(QPaintEvent *)
     QPainter p(this);
     if (!p.isActive())
         return;
-    // 磷粉日冕：模糊快照叠在文字上方——表面与光晕同源，锐利的字获得
-    // 真实管子的光晕包络。磷底近黑，alpha 混合与加法混合视觉等价但快数倍
-    const QImage glow = m_editor->crtGlowImage();
-    if (!glow.isNull()) {
-        const QPointF at = QPointF(m_editor->viewport()->pos())
-            - m_editor->crtGlowShift(); // 像素位移（vbar 是行号单位）
-        // 裁剪到视口：滚动滞后时旧快照的边缘不许溢出到行号区/边界之外
-        // （否则文字外面会残留一圈影子）
-        p.save();
-        p.setClipRect(m_editor->viewport()->geometry());
-        p.setOpacity(0.42);
-        p.drawImage(at, glow);
-        p.restore();
+    QWidget *vp = m_editor->viewport();
+    if (!vp)
+        return;
+    // 辉光刷新判定（像素位移）
+    if (m_glow.isNull()) {
+        refreshGlow();
+    } else {
+        const QPointF shift = m_editor->crtGlowShift();
+        if (m_forceRefresh || shift.manhattanLength() >= Crt::kGlowMinScroll)
+            refreshGlow();
+        else if (m_dirty && m_sinceRefresh.elapsed() > Crt::kGlowMinIntervalMs)
+            refreshGlow();
+    }
+    // 残影：屏幕固定、渐暗熄灭
+    if (!m_ghost.isNull() && m_ghostAlpha > 0.01) {
+        p.setOpacity(m_ghostAlpha);
+        p.drawImage(m_ghostPos, m_ghost);
         p.setOpacity(1.0);
     }
-    // 真衍射彩边：锐快照的竖直亮边 R 在右、B 在左（±1px、色相相反，
-    // 随内容同一位移；裁剪到视口）
-    const QImage edgeR = m_editor->crtEdgeImage(true);
-    const QImage edgeB = m_editor->crtEdgeImage(false);
-    if (!edgeR.isNull() || !edgeB.isNull()) {
-        const QPointF eat = QPointF(m_editor->viewport()->pos()) - m_editor->crtGlowShift();
-        p.save();
-        p.setClipRect(m_editor->viewport()->geometry());
-        if (!edgeR.isNull())
-            p.drawImage(eat, edgeR);
-        if (!edgeB.isNull())
-            p.drawImage(eat, edgeB);
-        p.restore();
+    // 辉光（文字上方的日冕：模糊快照叠在字形上，柔化+发光同源）
+    if (!m_glow.isNull()) {
+        p.setClipRect(vp->geometry());
+        p.setOpacity(0.5);
+        p.drawImage(QPointF(vp->pos()) - m_editor->crtGlowShift(), m_glow);
+        p.setOpacity(1.0);
+        // 真衍射彩边（随同一像素位移）
+        if (!m_edgeR.isNull())
+            p.drawImage(QPointF(vp->pos()) - m_editor->crtGlowShift(), m_edgeR);
+        if (!m_edgeB.isNull())
+            p.drawImage(QPointF(vp->pos()) - m_editor->crtGlowShift(), m_edgeB);
+        p.setClipping(false);
     }
-    // 磷粉激发：新敲入的字符短暂更亮——单个椭圆径向渐变（柔和光斑，
-    // 无同心圆轮廓；此前三圈圆角矩形叠加出"暗绿方块+翠绿线条"观感）
+    // 磷粉激发：单个椭圆径向渐变（柔和光斑，无轮廓）
     if (m_exciteAge > 0.02 && !m_exciteRect.isNull()) {
-        const QRectF r = QRectF(QPointF(m_editor->viewport()->pos()) + m_exciteRect.topLeft(),
+        const QRectF r = QRectF(QPointF(vp->pos()) + m_exciteRect.topLeft(),
                                 m_exciteRect.size())
                              .adjusted(-8, -8, 8, 8);
         QRadialGradient g(r.center(), qMax(r.width(), r.height()));
@@ -268,9 +216,10 @@ void CrtOverlay::paintEvent(QPaintEvent *)
         rebuildGlass();
     if (!m_glass.isNull())
         p.drawImage(0, 0, m_glass);
-    // 行亮度抖动（两帧交替：扫描线起伏，机器活着）
+    // 行亮度抖动（两帧交替：扫描线起伏，机器活着；1:1 全尺寸，无缩放）
     p.setOpacity(0.55);
-    p.drawImage(rect(), m_noise[m_noiseFrame]);
+    if (!m_noise[m_noiseFrame].isNull())
+        p.drawImage(0, 0, m_noise[m_noiseFrame]);
     p.setOpacity(1.0);
     // 滚动刷新带：3px 暗带 3 秒自上而下扫过（老式扫描的"呼吸"）
     const int bandY = int(m_bandPhase * height());
@@ -286,6 +235,22 @@ void CrtOverlay::rebuildGlass()
         return;
     m_glass = QImage(size(), QImage::Format_ARGB32);
     m_glass.fill(Qt::transparent);
+    // 噪声帧随尺寸重建（每行一个随机暗度，固定种子 = 同一台机器）
+    for (int f = 0; f < 2; ++f) {
+        m_noise[f] = QImage(size(), QImage::Format_ARGB32);
+        m_noise[f].fill(Qt::transparent);
+        std::mt19937 rng(0x5C4E00u + f);
+        for (int y = 0; y < m_noise[f].height(); ++y) {
+            uchar *row = m_noise[f].scanLine(y);
+            const int a = int(rng() % 19);
+            for (int x = 0; x < m_noise[f].width(); ++x) {
+                row[x * 4 + 0] = 0;
+                row[x * 4 + 1] = 0;
+                row[x * 4 + 2] = 0;
+                row[x * 4 + 3] = uchar(a);
+            }
+        }
+    }
     QPainter p(&m_glass);
     // 管面中央微暖亮（磷粉底光从中心散开）
     QRadialGradient warm(rect().center(), qMax(width(), height()) * 0.62);

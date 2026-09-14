@@ -94,8 +94,8 @@ public:
         // 显的自归位补拍（合并式单发；见 applyZoom）
         m_crtSettleTimer.setSingleShot(true);
         connect(&m_crtSettleTimer, &QTimer::timeout, this, [this] {
-            if (m_crt && m_crtBackdrop)
-                m_crtBackdrop->forceGlow();
+            if (m_crt && m_crtOverlay)
+                m_crtOverlay->forceGlow();
         });
 
         // 换成自绘滚动条：命中区恒 18px，把手闲置 10px / 悬停 18px
@@ -129,9 +129,8 @@ public:
             // 行号区：文档一变立即重绘，否则清空/换行不会刷新（假行号）
             m_canvas->update();
             updateGutterWidth();
-            if (m_crtBackdrop)
-                m_crtBackdrop->invalidateGlow();
             if (m_crtOverlay) {
+                m_crtOverlay->invalidateGlow();
                 m_crtOverlay->update(); // 日冕随文字即时刷新
                 if (m_crt)
                     m_crtOverlay->excite(cursorRect()); // 磷粉激发：新字符短暂更亮
@@ -171,10 +170,8 @@ public:
         m_canvas->setBrushWidth(m_brushSize);
         const auto syncInkOffset = [this](int) {
             m_canvas->setScrollOffset(QPointF(horizontalScrollBar()->value(), verticalScrollBar()->value()));
-            if (m_crtBackdrop)
-                m_crtBackdrop->update(); // 辉光层随滚动重排
             if (m_crtOverlay)
-                m_crtOverlay->update(); // 日冕随滚动对齐
+                m_crtOverlay->update(); // 辉光层随滚动重排/对齐
         };
         connect(verticalScrollBar(), &QScrollBar::valueChanged, this, syncInkOffset);
         connect(horizontalScrollBar(), &QScrollBar::valueChanged, this, syncInkOffset);
@@ -373,6 +370,37 @@ public:
     }
     // 行号区用的显示字体：编=等宽，显=像素磷光（其余同文字）
     QFont displayFont() const { return activeFont(); }
+
+    // 文字快照自绘：块走查几何（与 lineEndForY 同一模型，落点自检已证明），
+    // 引擎无关——真机的视口 re-render（render/grab）不可靠，快照必须自己画。
+    void paintTextSnapshot(QImage &img) const
+    {
+        QPainter p(&img);
+        if (!p.isActive())
+            return;
+        p.setFont(displayFont());
+        p.setPen(Crt::kInk);
+        QAbstractTextDocumentLayout *layout = document()->documentLayout();
+        QTextBlock block = document()->firstBlock();
+        qreal top = 0;
+        const qreal vscroll = pixelScrollBefore(verticalScrollBar()->value());
+        const qreal xoff = contentOffset().x(); // 页边距 + 横滚
+        const qreal h = viewport()->height();
+        while (block.isValid() && top - vscroll <= h) {
+            const qreal bh = layout->blockBoundingRect(block).height();
+            if (top - vscroll + bh >= 0) {
+                QTextLayout *tl = block.layout();
+                if (tl) {
+                    for (int i = 0; i < tl->lineCount(); ++i) {
+                        const QTextLine line = tl->lineAt(i);
+                        line.draw(&p, QPointF(xoff, top + line.y() - vscroll));
+                    }
+                }
+            }
+            top += bh;
+            block = block.next();
+        }
+    }
     qreal brushSize() const { return m_brushSize; }
 
     void brushUp() { brushStep(+1); }
@@ -387,18 +415,22 @@ public:
 
     bool codeMode() const { return m_codeMode; }
     bool crtOn() const { return m_crt; }
-    QImage crtGlowImage() const { return m_crtBackdrop ? m_crtBackdrop->glowImage() : QImage(); }
-    QPoint crtGlowScroll() const { return m_crtBackdrop ? m_crtBackdrop->glowScroll() : QPoint(); }
+    QImage crtGlowImage() const { return m_crtOverlay ? m_crtOverlay->glowImage() : QImage(); }
+    QPoint crtGlowScroll() const { return m_crtOverlay ? m_crtOverlay->glowScroll() : QPoint(); }
     QImage crtEdgeImage(bool right) const
     {
-        return m_crtBackdrop ? m_crtBackdrop->edgeImage(right) : QImage();
+        return m_crtOverlay ? m_crtOverlay->edgeImage(right) : QImage();
+    }
+    QImage crtSnapImage() const
+    {
+        return m_crtOverlay ? m_crtOverlay->snapImage() : QImage();
     }
     // 光晕快照与当前滚动之间的**像素位移**（vbar 是行号单位，不能直接相减）
     QPointF crtGlowShift() const
     {
-        if (!m_crtBackdrop)
+        if (!m_crtOverlay)
             return QPointF();
-        const QPoint gs = m_crtBackdrop->glowScroll();
+        const QPoint gs = m_crtOverlay->glowScroll();
         const qreal dy = pixelScrollBefore(verticalScrollBar()->value())
             - pixelScrollBefore(gs.y());
         return QPointF(horizontalScrollBar()->value() - gs.x(), dy);
@@ -409,25 +441,40 @@ public:
     {
         m_crt = !m_crt;
         if (m_crt) {
-            if (!m_crtBackdrop) {
-                m_crtBackdrop = new CrtBackdrop(this);
-                m_crtBackdrop->stackUnder(viewport());
-            }
-            m_crtBackdrop->show();
+            // 视口保持不透明：透明视口在真机窗口合成器上产生未初始化
+            // 内存的"绿洞"（render/grab 亦全空）——所有光效在文字上方
             if (!m_crtOverlay) {
                 m_crtOverlay = new CrtOverlay(this);
                 m_crtOverlay->stackUnder(verticalScrollBar());
             }
             m_crtOverlay->show();
             m_crtOverlay->raise();
-            viewport()->setAttribute(Qt::WA_NoSystemBackground);
-            viewport()->setAutoFillBackground(false);
             m_crtOverlay->warmUp();
+            // 临时取证：开显 1.2 秒后把整窗与各层存成 PNG（真机诊断）
+            QTimer::singleShot(1200, this, [this] {
+                if (!m_crt)
+                    return;
+                QImage full(size(), QImage::Format_ARGB32);
+                full.fill(QColor(255, 0, 255));
+                render(&full);
+                full.save(QStringLiteral("/tmp/naught-crt-full.png"));
+                if (m_crtOverlay) {
+                    QImage ov(size(), QImage::Format_ARGB32);
+                    ov.fill(QColor(255, 0, 255));
+                    m_crtOverlay->render(&ov);
+                    ov.save(QStringLiteral("/tmp/naught-crt-overlay.png"));
+                }
+                crtGlowImage().save(QStringLiteral("/tmp/naught-crt-glow.png"));
+                crtEdgeImage(true).save(QStringLiteral("/tmp/naught-crt-edgeR.png"));
+                crtEdgeImage(false).save(QStringLiteral("/tmp/naught-crt-edgeB.png"));
+                crtSnapImage().save(QStringLiteral("/tmp/naught-crt-snap.png"));
+                if (m_crtOverlay) {
+                    m_crtOverlay->glassImage().save(QStringLiteral("/tmp/naught-crt-glass.png"));
+                    m_crtOverlay->noiseImage(0).save(QStringLiteral("/tmp/naught-crt-noise0.png"));
+                }
+                viewport()->grab().toImage().save(QStringLiteral("/tmp/naught-crt-vpgrab.png"));
+            });
         } else {
-            viewport()->setAttribute(Qt::WA_NoSystemBackground, false);
-            viewport()->setAutoFillBackground(true);
-            if (m_crtBackdrop)
-                m_crtBackdrop->hide();
             if (m_crtOverlay) {
                 m_crtOverlay->hide();
                 m_crtOverlay->stop();
@@ -1140,8 +1187,8 @@ public:
                 qWarning("selftest FAIL: CRT text color not amber");
                 return false;
             }
-            if (!e.viewport()->testAttribute(Qt::WA_NoSystemBackground)) {
-                qWarning("selftest FAIL: CRT viewport not transparent");
+            if (e.palette().color(QPalette::Base) != Crt::kBg) {
+                qWarning("selftest FAIL: CRT base not the opaque phosphor background");
                 return false;
             }
             // 画面：文字区出现琥珀磷光像素；空区是近黑磷底（不是白）
@@ -1171,6 +1218,24 @@ public:
                 qWarning("selftest FAIL: CRT background not dark (%d,%d,%d)",
                          qRed(bgPx), qGreen(bgPx), qBlue(bgPx));
                 return false;
+            }
+            // 快照几何：单行文档的锐快照只在顶部第一行区域有琥珀像素
+            {
+                const QImage snap = e.crtSnapImage();
+                int topAmber = 0, lowAmber = 0;
+                for (int y = 0; y < snap.height(); ++y)
+                    for (int x = 0; x < snap.width(); ++x) {
+                        const QRgb px = snap.pixel(x, y);
+                        if (qRed(px) > 150 && qGreen(px) > 80 && qBlue(px) < 90) {
+                            if (y < 40) ++topAmber; else ++lowAmber;
+                        }
+                    }
+                qInfo("CRT-SNAP amber top=%d below=%d", topAmber, lowAmber);
+                if (topAmber < 50 || lowAmber > topAmber / 4) {
+                    qWarning("selftest FAIL: snapshot text mispositioned (%d top / %d below)",
+                             topAmber, lowAmber);
+                    return false;
+                }
             }
             // 颜色分类取证：绿主导/红主导/蓝主导像素计数（坏液晶 = 绿色块泛滥）
             {
@@ -1210,10 +1275,10 @@ public:
             qInfo("CRT-SCANLINE rows: %f vs %f", m0, m1);
             e.toggleCrt();
             QApplication::processEvents();
-            if (e.viewport()->testAttribute(Qt::WA_NoSystemBackground)
+            if (e.palette().color(QPalette::Base) == Crt::kBg
                 || e.document()->defaultFont().family()
                     != QFontDatabase::systemFont(QFontDatabase::GeneralFont).family()) {
-                qWarning("selftest FAIL: CRT toggle-off did not restore font/viewport");
+                qWarning("selftest FAIL: CRT toggle-off did not restore font/palette");
                 return false;
             }
         }
@@ -1626,9 +1691,10 @@ private:
     {
         QPalette pal = palette();
         if (m_crt) {
-            // 磷光模式自成一套配色（无视阴/阳）：视口透明，透出辉光层
+            // 磷光模式自成一套配色（无视阴/阳）：视口**不透明**（透明视口
+            // 在真机窗口合成器上产生未初始化内存的"绿洞"——已废除此架构）
             pal.setColor(QPalette::Window, Crt::kBg);
-            pal.setColor(QPalette::Base, Qt::transparent);
+            pal.setColor(QPalette::Base, Crt::kBg);
             pal.setColor(QPalette::Text, Crt::kInk);
             pal.setColor(QPalette::Highlight, QColor(0x5C, 0x3E, 0x00, 0xB0));
             pal.setColor(QPalette::HighlightedText, Crt::kInk);
@@ -1675,8 +1741,8 @@ private:
         setFont(f);
         // 笔刷与字号脱钩：只由 Cmd/Ctrl+Shift+= / - / 0 控制
         updateGutterWidth(); // 行号区宽度随缩放重算（否则放大溢出、打字缩回）
-        if (m_crtBackdrop) {
-            m_crtBackdrop->forceGlow(); // 光晕立即随缩放重拍（影子不跟缩放就是这个漏了）
+        if (m_crtOverlay) {
+            m_crtOverlay->forceGlow(); // 光晕立即随缩放重拍（影子不跟缩放就是这个漏了）
             // 自归位：布局与滚动在数帧后才彻底落定；延迟放长到 400ms——
             // 磷粉本来就有惰性。合并式定时器：连发缩放只留最后一次补拍
             //（否则每次缩放各排一个定时器，堆积后把缩放拖到 100ms+）
@@ -2139,7 +2205,6 @@ private:
     QFont m_codeFont;
     LineNumberArea *m_lineNumberArea = nullptr;
     bool m_crt = false;
-    CrtBackdrop *m_crtBackdrop = nullptr;
     CrtOverlay *m_crtOverlay = nullptr;
     QFont m_crtFont;
     static inline QString s_crtFamily;
