@@ -95,13 +95,13 @@ public:
 
     void zoom(int delta)
     {
-        m_size = std::clamp(m_size + delta, 6, 1024);
+        m_size = std::clamp<qreal>(m_size + delta, 6, 1024);
         applyZoom();
     }
 
-    void zoomTo(int size)
+    void zoomTo(qreal size)
     {
-        m_size = std::clamp(size, 6, 1024);
+        m_size = std::clamp<qreal>(size, 6, 1024);
         applyZoom();
     }
 
@@ -231,30 +231,12 @@ protected:
         // 触控板捏合缩放（macOS 原生手势；Windows 精确触摸板同路径）
         if (watched == viewport() && event->type() == QEvent::NativeGesture) {
             const auto *ng = static_cast<QNativeGestureEvent *>(event);
-            switch (ng->gestureType()) {
-            case Qt::BeginNativeGesture:
-                m_pinchBase = m_size;
-                m_pinchLast = 0.0;
-                m_pinchCalibrated = false;
-                break;
-            case Qt::ZoomNativeGesture: {
+            // value 语义：相对上一事件的增量倍率（macOS NSEvent magnification）。
+            // 直接按 (1+v) 累积到字号，浮点存储，缓慢张开也持续生效。
+            if (ng->gestureType() == Qt::ZoomNativeGesture) {
                 const qreal v = ng->value();
-                if (!m_pinchCalibrated) {
-                    // 首个事件只记基准：不同平台 value 起点不同（0 或 1），
-                    // 一律按“相对上一步的倍率”计算，避免瞬间跳变
-                    m_pinchLast = v;
-                    m_pinchCalibrated = true;
-                    break;
-                }
-                if (v == m_pinchLast)
-                    break;
-                const qreal factor = (1.0 + v) / (1.0 + m_pinchLast);
-                m_pinchLast = v;
-                zoomTo(int(std::lround(m_size * factor)));
-                break;
-            }
-            default:
-                break;
+                if (v != 0.0)
+                    zoomTo(m_size * (1.0 + v));
             }
             return true;
         }
@@ -297,7 +279,7 @@ private:
     {
         // O(1)：只改文档默认字号并标脏，重排由 Qt 惰性完成（仅可见区域）。
         QFont f = m_baseFont;
-        f.setPointSize(m_size);
+        f.setPointSizeF(m_size);
         document()->setDefaultFont(f);
         document()->markContentsDirty(0, document()->characterCount());
         setFont(f);
@@ -312,15 +294,12 @@ private:
 
     QFont m_baseFont;
     int m_baseSize = 12;
-    int m_size = 12;
+    qreal m_size = 12.0;
     bool m_dark = false;
     QTimer m_holdTimer;
     int m_holdDir = 1;
     int m_holdInterval = 70;
     int m_wheelAccum = 0;
-    int m_pinchBase = 12;
-    qreal m_pinchLast = 0.0;
-    bool m_pinchCalibrated = false;
 };
 
 int main(int argc, char **argv)
