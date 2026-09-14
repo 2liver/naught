@@ -789,6 +789,27 @@ public:
                 return false;
             }
         }
+        // 满行段落：文字区最右缘窄带内点击 = 该视觉行行尾
+        e.setPlainText(longLine + QStringLiteral("\n短行\n短行\n"));
+        e.resize(400, 300);
+        e.show();
+        QApplication::processEvents();
+        {
+            QTextBlock blk = e.document()->firstBlock();
+            QTextLayout *tl = blk.layout();
+            const QTextLine line0 = tl->lineAt(0);
+            const int want = blk.position() + line0.textStart() + line0.textLength();
+            QWidget *vp = e.viewport();
+            const QPointF edge(vp->width() - 2.0, 5.0);
+            QMouseEvent press(QEvent::MouseButtonPress, edge, vp->mapToGlobal(edge.toPoint()),
+                              Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(vp, &press);
+            if (e.textCursor().position() != want) {
+                qWarning("selftest FAIL: full-line edge-zone click lands at %d, want %d",
+                         e.textCursor().position(), want);
+                return false;
+            }
+        }
         return true;
     }
 
@@ -797,16 +818,10 @@ protected:
     {
         QMenu menu(this);
         QAction *aMo = menu.addAction(QStringLiteral("摹"));
-        aMo->setShortcut(QKeySequence(QStringLiteral("Ctrl+S")));
-        aMo->setShortcutVisibleInContextMenu(true);
         QAction *aKong = menu.addAction(QStringLiteral("空"));
-        aKong->setShortcut(QKeySequence(QStringLiteral("Ctrl+N")));
-        aKong->setShortcutVisibleInContextMenu(true);
         menu.addSeparator();
         QAction *aYin = menu.addAction(QStringLiteral("阴"));
         QAction *aYang = menu.addAction(QStringLiteral("阳"));
-        aYin->setShortcut(QKeySequence(QStringLiteral("Ctrl+I")));
-        aYang->setShortcut(QKeySequence(QStringLiteral("Ctrl+O")));
         aYin->setCheckable(true);
         aYang->setCheckable(true);
         aYin->setChecked(m_dark);
@@ -819,14 +834,8 @@ protected:
 
         menu.addSeparator();
         QAction *aTu = menu.addAction(QStringLiteral("涂"));
-        aTu->setShortcut(QKeySequence(QStringLiteral("Ctrl+D")));
-        aTu->setShortcutVisibleInContextMenu(true);
         QAction *aCa = menu.addAction(QStringLiteral("擦"));
-        aCa->setShortcut(QKeySequence(QStringLiteral("Ctrl+E")));
-        aCa->setShortcutVisibleInContextMenu(true);
         QAction *aXiao = menu.addAction(QStringLiteral("消"));
-        aXiao->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+E")));
-        aXiao->setShortcutVisibleInContextMenu(true);
         aTu->setCheckable(true);
         aCa->setCheckable(true);
         aTu->setChecked(m_mode == Mode::Draw);
@@ -1041,6 +1050,19 @@ protected:
             if (event->type() == QEvent::Leave && m_mode != Mode::Normal) {
                 m_canvas->endStroke(); // 拖出窗口时收笔
                 m_canvas->setFootprintVisible(false);
+            }
+            // 正常模式下，文字区最右缘窄带内的点击 = 行尾意图（满行时系统
+            // 会判给最后一个字的右半格，这里统一为"落行尾"）
+            if (m_mode == Mode::Normal && event->type() == QEvent::MouseButtonPress) {
+                const auto *me = static_cast<QMouseEvent *>(event);
+                if (me->button() == Qt::LeftButton
+                    && me->position().x() >= qreal(viewport()->width()) - EDGE_CLICK_ZONE) {
+                    QTextCursor c(document());
+                    c.setPosition(lineEndForY(me->position()));
+                    setTextCursor(c);
+                    wakeCaret();
+                    return true;
+                }
             }
             // 涂/擦模式：左键在画布层作画或擦除，文本光标不随点击移动
             if (m_mode != Mode::Normal) {
@@ -1271,6 +1293,7 @@ private:
     static constexpr qreal PINCH_GAIN = 1.4;  // 捏合增量增益：边缘弱增量也够用
     static constexpr qreal PINCH_SMOOTH_A = 0.5; // 指数平滑系数：滤抖
     static constexpr qreal BRUSH_SCALE = 1.5; // 笔刷直径 = 1.5 × 字号
+    static constexpr qreal EDGE_CLICK_ZONE = 10.0; // 文字区最右缘窄带：点击=行尾
 };
 
 int main(int argc, char **argv)
@@ -1294,7 +1317,7 @@ int main(int argc, char **argv)
     // Windows/Linux 不设菜单栏（无），其右键菜单为 Qt 自绘、自带快捷键列。
     {
         QMenuBar *menuBar = new QMenuBar(nullptr);
-        QMenu *fa = menuBar->addMenu(QStringLiteral("法"));
+        QMenu *fa = menuBar->addMenu(QStringLiteral("快捷键"));
         QAction *bMo = fa->addAction(QStringLiteral("摹"));
         bMo->setShortcut(QKeySequence(QStringLiteral("Ctrl+S")));
         QAction *bKong = fa->addAction(QStringLiteral("空"));
