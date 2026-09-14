@@ -181,15 +181,7 @@ public:
             if (m_codeMode)
                 applyGutterGeometry(); // 行号随横滚移出/复原
         });
-        // 滚动条的出现/消失会改变视口尺寸：着色器层跟随，否则盖住滚动条
-        const auto syncCrtGeo = [this] {
-            if (m_crtView) {
-                m_crtView->syncGeometry();
-                m_crtView->markDirty();
-            }
-        };
-        connect(verticalScrollBar(), &QScrollBar::rangeChanged, this, syncCrtGeo);
-        connect(horizontalScrollBar(), &QScrollBar::rangeChanged, this, syncCrtGeo);
+
 
         applyScheme();
         applyZoom();
@@ -413,26 +405,6 @@ public:
             top += bh;
             block = block.next();
         }
-        // 编模式行号：行号区是独立控件，着色器层盖住它——快照里自绘
-        if (m_codeMode && m_gutterWidth > 0) {
-            p.setPen(Crt::kInkDim);
-            const QFontMetricsF fm(displayFont());
-            QTextBlock nb = document()->firstBlock();
-            int num = 1;
-            qreal ntop = 16.0; // 与文字同款顶部留白
-            QAbstractTextDocumentLayout *nl = document()->documentLayout();
-            while (nb.isValid() && ntop - vscroll <= h) {
-                const qreal bh = nl->blockBoundingRect(nb).height();
-                if (ntop - vscroll + bh >= 0) {
-                    p.drawText(QRectF(4, ntop - vscroll, m_gutterWidth - 8, fm.height()),
-                               Qt::AlignRight, QString::number(num));
-                }
-                ntop += bh;
-                ++num;
-                nb = nb.next();
-            }
-            p.setPen(Crt::kInk);
-        }
         // 打字光标：2px 竖线（有焦点时）
         if (hasFocus()) {
             const QRect cr = cursorRect();
@@ -467,45 +439,28 @@ public:
     {
         m_crt = !m_crt;
         if (m_crt) {
-            // B 路线：真光学着色器层（QOpenGLWidget），盖在视口之上，
-            // 逐像素渲染——CPU 光栅的引擎坑从根上消失
-            if (!m_crtView) {
-                m_crtView = new CrtView(this);
+            // 架构重写：着色器控件本身就是视口（setViewport 原生替换）。
+            // 无覆盖层、无几何同步、无自绘行号——滚动条/行号/事件全是
+            // Qt 的默认机制，衍生复杂度全部删除。
+            // 离屏自检无 RHI 后端：跳过替换，只应用配色/字体
+            if (QGuiApplication::platformName() != QLatin1String("offscreen")) {
+                if (!m_crtView) {
+                    m_crtView = new CrtView(this);
+                    m_crtView->installEventFilter(this);
+                }
+                setViewport(m_crtView);
+                m_crtView->markDirty(true);
+                setFocus();
             }
-            m_crtView->syncGeometry();
-            m_crtView->show();
-            m_crtView->raise();
-            m_crtView->markDirty();
-            if (m_lineNumberArea)
-                m_lineNumberArea->hide(); // 行号由快照自绘，避免两套
-            setFocus(); // 原生子窗口可能扰动首响应者：焦点还给编辑器
-            activateWindow();
-            // 临时取证：开显 1.2 秒后把着色器帧缓冲与快照存成 PNG
-            QTimer::singleShot(1200, this, [this] {
-                if (!m_crt || !m_crtView)
-                    return;
-                m_crtView->grabFramebuffer().save(QStringLiteral("/tmp/naught-crt-frame.png"));
-                m_crtView->grab().save(QStringLiteral("/tmp/naught-crt-present.png"));
-                QFile f(QStringLiteral("/tmp/naught-crt-geo.log"));
-                f.open(QIODevice::Append);
-                f.write(QStringLiteral("geo=%1 visible=%2 hidden=%3 size=%4x%5 vp=%6\n")
-                            .arg(m_crtView->geometry().x())
-                            .arg(m_crtView->isVisible())
-                            .arg(m_crtView->isHidden())
-                            .arg(m_crtView->width())
-                            .arg(m_crtView->height())
-                            .arg(viewport()->geometry().x())
-                            .toUtf8());
-                f.close();
-            });
         } else {
-            // 原生子窗口即使隐藏也持续干扰（滚动栏/滚轮/鼠标点击全失效）：
-            // 关闭即彻底销毁，恢复原生状态的编辑器
-            m_crtView->deleteLater(); // 事件处理中途销毁原生窗口会死锁 RHI
-            m_crtView = nullptr;
-            if (m_lineNumberArea)
-                m_lineNumberArea->show();
-            viewport()->update();
+            // 离屏自检：跳过视口替换（无绘制设备时字体会崩）
+            if (QGuiApplication::platformName() != QLatin1String("offscreen")) {
+                QWidget *plain = new QWidget;
+                setViewport(plain);
+                plain->installEventFilter(this);
+                m_crtView = nullptr; // setViewport 已接管/删除旧视口
+                viewport()->update();
+            }
         }
         applyScheme();
         applyZoom();
@@ -1797,10 +1752,8 @@ private:
             m_lineNumberArea->show();
             m_lineNumberArea->raise();
             updateLineNumberArea();
-            if (m_crtView) {
-                m_crtView->syncGeometry();
-                m_crtView->markDirty();
-            }
+            if (m_crtView)
+                m_crtView->markDirty(true);
 #ifdef NAUGHT_WITH_HIGHLIGHT
             startHighlight();
 #endif
@@ -1809,10 +1762,8 @@ private:
             setViewportMargins(0, 0, 0, 0);
             if (m_lineNumberArea)
                 m_lineNumberArea->hide();
-            if (m_crtView) {
-                m_crtView->syncGeometry();
-                m_crtView->markDirty();
-            }
+            if (m_crtView)
+                m_crtView->markDirty(true);
 #ifdef NAUGHT_WITH_HIGHLIGHT
             stopHighlight();
 #endif
