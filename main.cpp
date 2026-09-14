@@ -803,7 +803,15 @@ private:
             const QRectF r = layout->blockBoundingRect(block);
             if (pt.y() < r.bottom()) {
                 QTextLayout *tl = block.layout();
-                const QTextLine line = tl->lineForY(pt.y() - r.top());
+                const qreal relY = pt.y() - r.top();
+                QTextLine line = tl->lineAt(0);
+                for (int i = 1; i < tl->lineCount(); ++i) {
+                    const QTextLine l = tl->lineAt(i);
+                    if (relY >= l.y())
+                        line = l;
+                    else
+                        break;
+                }
                 const qreal x = std::clamp<qreal>(pt.x() - r.left(), 0.0, qMax(1.0, r.width()));
                 return block.position() + line.xToCursor(x);
             }
