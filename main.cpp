@@ -219,7 +219,7 @@ int main(int argc, char **argv)
         QAction *bXian = fa->addAction(QStringLiteral("显"));
         bXian->setShortcut(QKeySequence(QStringLiteral("Ctrl+T")));
         bXian->setCheckable(true);
-        QAction *bLock = fa->addAction(QStringLiteral("视角锁定"));
+        QAction *bLock = fa->addAction(QStringLiteral("追随视角锁定"));
         bLock->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+T")));
         bLock->setCheckable(true);
         bLock->setChecked(true);

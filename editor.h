@@ -544,7 +544,8 @@ public:
     }
     // 人眼代理：鼠标在视口内的位置（反光视差追踪用）
     QPointF lastMouseViewport() const { return m_lastMouse; }
-    // 视角锁定（M1）：true = 居中视角（视差关闭）；进「显」时重置为 true
+    // 追随视角锁定（M1）：true = 复现鼠标离开窗口后的"完美视角"
+    // （内容完整不被裁剪）；进「显」时重置为 true
     bool crtViewLocked() const { return m_viewLock; }
     void toggleViewLock() { m_viewLock = !m_viewLock; }
 

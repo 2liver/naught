@@ -232,10 +232,11 @@ void CrtView::renderFrame()
         m_forceNow = false;
         m_sinceRefresh.restart();
     }
-    // 观察者 = 鼠标（视差每帧更新，不受快照节流）；锁定（M1）= 真居中
+    // 观察者 = 鼠标（视差每帧更新，不受快照节流）；锁定（M1）= 复现鼠标
+    // 离开窗口后的"完美视角"（观察者站在屏幕正前方，内容完整不被裁剪）
     QPointF view;
     if (m_editor->crtViewLocked()) {
-        view = QPointF(0, 0); // 锁定：曲线对称居中，无视差
+        view = QPointF(-0.25, -0.12); // 与无鼠标默认分支同值
     } else {
         view = m_editor->lastMouseViewport();
         if (view.x() < 0) {
