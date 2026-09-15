@@ -29,13 +29,14 @@
 
 ## 里程碑细节
 
-### M1 视角锁定
+### M1 追随视角锁定
 - `Editor` 持 `m_viewLock`（默认 true）；`toggleCrt()` 进入显时**重置为 true**。
-- 锁定 = view uniform 恒 (0,0)（真居中、shader 曲线对称）；解锁 = 鼠标驱动
-  （现状 lastMouseViewport 路径）。
-- 「项」菜单加「视角锁定」（Cmd/Ctrl+Shift+T，可勾选，仅显模式有意义）；
-  Windows/Linux 键处理（keyPressEvent）同步支持。
-- 验收：进显居中、动鼠标不动；Cmd+Shift+T 后跟随鼠标；退出重进 → 重新锁定。
+- 锁定 = view uniform 恒 **(-0.25, -0.12)**——复现鼠标离开窗口后的"完美视角"
+  （观察者站在屏幕正前方，内容完整不被裁剪）；解锁 = 鼠标驱动（lastMouseViewport 路径）。
+- 「项」菜单名：**「追随视角锁定」**（自释性，避免与未来图片功能的缩放语义
+  冲突；Cmd/Ctrl+Shift+T，可勾选，仅显模式有意义）；Windows/Linux 键处理同步。
+- 验收：进显 = 与鼠标离开窗口时同一画面；Cmd+Shift+T 后跟随鼠标；
+  退出重进 → 重新锁定。
 
 ### M2 绿磷模式
 - `Crt::Palette { ink, inkDim, cursorBlock, bg, scanTint, refl, dust }` +
