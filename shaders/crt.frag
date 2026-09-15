@@ -4,6 +4,7 @@ layout(location = 0) out vec4 frag;
 layout(std140, binding = 0) uniform buf {
     vec2 view;
     vec2 texSize;
+    vec2 timeInfo;   // x = 运行秒数，y = 暖机毫秒（-1 = 非暖机期）
 } ubuf;
 layout(std430, binding = 1) buffer Pixels { uint p[]; } px;
 
@@ -30,40 +31,89 @@ vec2 curve(vec2 uv) {
     return c * (1.0 + 0.05 * r2) + 0.5;
 }
 
+float hash21(vec2 p)
+{
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+}
+
 void main()
 {
-    // 曲率 + 视差；输入先内缩 1.75% 防曲率越界，但越界区域钳制采样
-    //（不再填暗色壳边——暗条与滚动条同宽，视觉上像"左边多了一条滚动条"）
-    vec2 uv = clamp(curve(v_uv * 0.965 + 0.0175), 0.0, 1.0);
-    vec2 pxpos = uv * ubuf.texSize;
+    // ---- 内容空间：弯曲的电子图像（含视差）。栅网/扫描线/玻璃都在
+    // 屏幕空间——真机上它们是固定在玻璃上的，不随视差移动 ----
+    vec2 cuv = clamp(curve(v_uv * 0.965 + 0.0175), 0.0, 1.0);
+    vec3 col = sampleAt(cuv);
 
-    // 荧光粉竖纹：1 物理像素周期（DPR 感知管线），深度可见——
-    // 光栅质感回来，但不再是粗线条
-    float stripe = 1.0 - 0.22 * step(0.5, fract(pxpos.x));
-    vec3 col = sampleAt(uv);
-
-    // 真衍射（二期三件套·回接）：N=3 磷粉栅的竖直亮边 ±1px R/B 彩边。
-    // 模型与 Crt::edgeDiff 同源：bright(x)−bright(x±1)>0 处即亮边，
-    // 亮边右侧出红、左侧出蓝（色相相反），强度 kDiffAlpha=0.20。
+    // 真衍射：内容空间亮边 ±1px R/B 彩边（bright(x)−bright(x±1) 差分，
+    // 与 Crt::edgeDiff 同模型，强度 kDiffAlpha=0.30）
     {
         const float px = 1.0 / ubuf.texSize.x;
-        vec3 lm = sampleAt(clamp(uv - vec2(px, 0.0), 0.0, 1.0));
-        vec3 rp = sampleAt(clamp(uv + vec2(px, 0.0), 0.0, 1.0));
+        vec3 lm = sampleAt(clamp(cuv - vec2(px, 0.0), 0.0, 1.0));
+        vec3 rp = sampleAt(clamp(cuv + vec2(px, 0.0), 0.0, 1.0));
         const vec3 w = vec3(0.333);
         float eR = max(0.0, dot(col, w) - dot(rp, w));
         float eB = max(0.0, dot(col, w) - dot(lm, w));
         col += vec3(1.0, 0.15, 0.02) * eR * 0.30;
         col += vec3(0.02, 0.15, 1.0) * eB * 0.30;
     }
-    col *= stripe;
 
-    // 扫描线：每行一条，暗行掺一丝上行残辉
-    float scanline = step(0.5, fract(pxpos.y));
+    // 束斑物理：束流越强束斑越宽——亮度高的像素把光溢给邻域
+    //（加法溢出：亮字核心保持饱和、四周变软变晕，暗处不动）
+    {
+        const vec2 off = 1.0 / ubuf.texSize;
+        vec3 blur = (sampleAt(clamp(cuv + vec2( off.x, 0.0), 0.0, 1.0))
+                   + sampleAt(clamp(cuv - vec2( off.x, 0.0), 0.0, 1.0))
+                   + sampleAt(clamp(cuv + vec2(0.0,  off.y), 0.0, 1.0))
+                   + sampleAt(clamp(cuv + vec2(0.0, -off.y), 0.0, 1.0))) * 0.25;
+        float lum = dot(col, vec3(0.333));
+        col = clamp(col + blur * smoothstep(0.12, 0.85, lum) * 0.40, 0.0, 1.0);
+    }
+
+    // ---- 屏幕空间：固定不动的磷粉栅、扫描线（真玻璃结构）----
+    vec2 sp = v_uv * ubuf.texSize; // 屏幕物理像素
+    float stripe = 1.0 - 0.22 * step(0.5, fract(sp.x));
+    col *= stripe;
+    float scanline = step(0.5, fract(sp.y));
     col *= 1.0 - 0.18 * scanline;
     col *= 1.0 - 0.06 * scanline * vec3(0.35, 0.4, 0.25);
 
-    // 暗角（克制）
-    float d = length(uv - 0.5) * 1.5;
+    // 噪声与灰尘：细颗粒闪烁 + 稀疏灰尘点（时间驱动，极克制）
+    {
+        float t = ubuf.timeInfo.x;
+        float grain = (hash21(sp + fract(t) * 61.7) - 0.5) * 0.05;
+        float dust = step(0.9992, hash21(floor(sp * 0.05) + floor(t * 8.0)))
+                     * (0.5 + 0.5 * hash21(floor(sp * 0.05)));
+        col += grain + dust * vec3(0.9, 0.8, 0.6) * 0.10;
+    }
+
+    // 玻璃反光带：一道对角淡白反光，随观察者移动（真玻璃反射）
+    {
+        vec2 n = normalize(vec2(ubuf.view.x * 0.8, 0.6));
+        float refl = pow(max(0.0, 1.0 - abs(dot(n, vec2(0.35, 0.94)) - 0.62) * 3.2), 2.0);
+        col += vec3(1.0, 0.88, 0.62) * refl * 0.045;
+    }
+
+    // 滚动刷新带：暗带 3 秒扫一周（屏幕空间，扫描时序）
+    {
+        float phase = fract(ubuf.timeInfo.x * 0.333);
+        float band = 1.0 - smoothstep(0.0, 0.035, abs(v_uv.y - phase));
+        col *= 1.0 - 0.22 * (1.0 - band);
+    }
+
+    // 入场暖机：由暗到亮的一次预热脉冲（过冲后回落，~1.4s 结束）
+    if (ubuf.timeInfo.y >= 0.0 && ubuf.timeInfo.y < 1400.0) {
+        float t = ubuf.timeInfo.y;
+        float wk = 1.0;
+        if (t < 600.0)
+            wk = 0.1 + 0.9 * (t / 600.0);            // 暗 → 亮
+        else if (t < 900.0)
+            wk = 1.0 + 0.08 * (1.0 - (t - 600.0) / 300.0); // 过冲脉冲
+        else
+            wk = 1.0 + 0.08 * (1.0 - (t - 900.0) / 500.0); // 回落到 1.0
+        col *= wk;
+    }
+
+    // 暗角（克制，屏幕空间——玻璃固定）
+    float d = length(v_uv - 0.5) * 1.5;
     col *= 1.0 - 0.22 * smoothstep(0.4, 1.0, d);
 
     frag = vec4(clamp(col, 0.0, 1.0), 1.0);

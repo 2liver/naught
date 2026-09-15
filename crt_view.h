@@ -55,6 +55,8 @@ private:
     bool m_forceNow = false;
     bool m_readbackInFlight = false;
     QElapsedTimer m_sinceRefresh;
+    QElapsedTimer m_clock;    // 运行秒数（噪声/刷新带的时间源）
+    QElapsedTimer m_warmClock; // 入场暖机（showEvent 起拍）
     QSize m_texSize;
     QTimer m_frameTimer;
 };

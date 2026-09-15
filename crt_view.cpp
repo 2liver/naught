@@ -39,6 +39,7 @@ CrtView::CrtView(Editor *editor)
     // 帧循环：视差/光标闪烁/足迹圆点 30fps；快照上传由 80ms 节流
     m_frameTimer.setInterval(33);
     connect(&m_frameTimer, &QTimer::timeout, this, &CrtView::renderFrame);
+    m_clock.start(); // 运行秒数：噪声/滚动刷新带的时间源
 }
 
 CrtView::~CrtView()
@@ -65,6 +66,7 @@ void CrtView::syncGeometry()
 void CrtView::showEvent(QShowEvent *)
 {
     ensureRhi();
+    m_warmClock.start(); // 入场暖机：由暗到亮的一次预热脉冲
     m_frameTimer.start();
 }
 
@@ -137,8 +139,8 @@ void CrtView::ensureRhi()
     const int pxbytes = m_texSize.width() * m_texSize.height() * 4;
     m_pxbuf = m_r->newBuffer(QRhiBuffer::Static, QRhiBuffer::StorageBuffer, pxbytes);
     m_pxbuf->create();
-    // 常量缓冲：view + texSize（std140：两个 vec2）
-    m_ubuf = m_r->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, 16);
+    // 常量缓冲：view + texSize + timeInfo（std140：三个 vec2 = 32 字节）
+    m_ubuf = m_r->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, 32);
     m_ubuf->create();
 
     // 管线：全屏三角形
@@ -209,6 +211,8 @@ void CrtView::renderFrame()
         Crt::phosphorPersistence(m_pending, m_prev); // 一期：磷粉余晖（滚动残影）
         m_prev = m_pending; // 浅拷贝：下帧余晖源 = 本帧无辉光内容（写入时分离）
         Crt::phosphorBloom(m_pending); // 二期三件套：真高斯辉光（快照重建时烘焙）
+        // 入场暖机：因子由 shader 按 timeInfo.y 计算（CPU 逐像素循环
+        // 曾引发帧循环冻结，已整体移入 GPU）
         {
             const QImage up = m_pending.convertToFormat(QImage::Format_RGBA8888);
             const int nbytes = up.sizeInBytes();
@@ -237,8 +241,11 @@ void CrtView::renderFrame()
             (view.x() / qMax(1.0, qreal(m_editor->viewport()->width())) - 0.5) * 2.0,
             (view.y() / qMax(1.0, qreal(m_editor->viewport()->height())) - 0.5) * 2.0);
     }
-    const float ub[4] = { float(view.x()), float(view.y()),
-                          float(m_texSize.width()), float(m_texSize.height()) };
+    const float ub[8] = { float(view.x()), float(view.y()),
+                          float(m_texSize.width()), float(m_texSize.height()),
+                          float(m_clock.elapsed() / 1000.0),
+                          m_warmClock.isValid() ? float(m_warmClock.elapsed()) : -1.0f,
+                          0.0f, 0.0f };
     u->updateDynamicBuffer(m_ubuf, 0, sizeof(ub), ub);
 
     QRhiCommandBuffer *cb = nullptr;
