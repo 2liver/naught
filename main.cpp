@@ -223,6 +223,9 @@ int main(int argc, char **argv)
         bLock->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+T")));
         bLock->setCheckable(true);
         bLock->setChecked(true);
+        QAction *bGreen = fa->addAction(QStringLiteral("绿磷"));
+        bGreen->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+M")));
+        bGreen->setCheckable(true);
         fa->addSeparator(); // 视图轴（编·显）与格式化（言·隔）分区
         QAction *bYan = fa->addAction(QStringLiteral("言"));
         bYan->setShortcut(QKeySequence(QStringLiteral("Ctrl+L")));
@@ -251,6 +254,7 @@ int main(int argc, char **argv)
         QObject::connect(bBian, &QAction::triggered, &editor, [&editor] { editor.toggleCodeMode(); });
         QObject::connect(bXian, &QAction::triggered, &editor, [&editor] { editor.toggleCrt(); });
         QObject::connect(bLock, &QAction::triggered, &editor, [&editor] { editor.toggleViewLock(); });
+        QObject::connect(bGreen, &QAction::triggered, &editor, [&editor] { editor.toggleMachine(); });
         QObject::connect(bYan, &QAction::triggered, &editor, [&editor] { editor.yan(); });
         QObject::connect(bGe, &QAction::triggered, &editor, [&editor] { editor.ge(); });
         QObject::connect(bZoomIn, &QAction::triggered, &editor, [&editor] { editor.zoom(1); });
@@ -261,7 +265,7 @@ int main(int argc, char **argv)
         QObject::connect(bBrush0, &QAction::triggered, &editor, [&editor] { editor.brushDefault(); });
         QObject::connect(bUndo, &QAction::triggered, &editor, [&editor] { editor.undoAll(); });
         QObject::connect(bRedo, &QAction::triggered, &editor, [&editor] { editor.redoAll(); });
-        QObject::connect(fa, &QMenu::aboutToShow, &editor, [&editor, bYin, bYang, bTu, bCa, bBian, bXian, bLock] {
+        QObject::connect(fa, &QMenu::aboutToShow, &editor, [&editor, bYin, bYang, bTu, bCa, bBian, bXian, bLock, bGreen] {
             bYin->setChecked(editor.isDark());
             bYang->setChecked(!editor.isDark());
             bTu->setChecked(editor.mode() == Editor::Mode::Draw);
@@ -270,6 +274,8 @@ int main(int argc, char **argv)
             bXian->setChecked(editor.crtOn());
             bLock->setChecked(editor.crtViewLocked());
             bLock->setEnabled(editor.crtOn()); // 锁定只在显会话内有意义
+            bGreen->setChecked(editor.machineGreen());
+            bGreen->setEnabled(editor.crtOn());
         });
     }
 #endif

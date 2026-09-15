@@ -30,7 +30,7 @@ void LineNumberArea::paintEvent(QPaintEvent *event)
 {
     QPainter painter(this);
     painter.setPen(m_editor->crtOn()
-                       ? Crt::kInkDim
+                       ? m_editor->crtPalette().inkDim // 随调色板（M2：琥珀/绿磷）
                        : (m_editor->isDark() ? QColor(0x6a, 0x6a, 0x6a)
                                              : QColor(0xb0, 0xb0, 0xb0)));
     painter.setFont(m_editor->displayFont());

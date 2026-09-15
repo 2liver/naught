@@ -5,6 +5,10 @@ layout(std140, binding = 0) uniform buf {
     vec2 view;
     vec2 texSize;
     vec2 timeInfo;   // x = 运行秒数，y = 暖机毫秒（-1 = 非暖机期）
+    vec2 _pad;
+    vec4 scanTint;   // 扫描线暗行掺色（调色板）
+    vec4 refl;       // 玻璃反光色（调色板）
+    vec4 dustCol;    // 灰尘点色（调色板）
 } ubuf;
 layout(std430, binding = 1) buffer Pixels { uint p[]; } px;
 
@@ -88,7 +92,7 @@ void main()
     }
     float scanline = step(0.5, fract(sp.y));
     col *= 1.0 - 0.18 * scanline;
-    col *= 1.0 - 0.06 * scanline * vec3(0.35, 0.4, 0.25);
+    col *= 1.0 - 0.06 * scanline * ubuf.scanTint.rgb;
 
     // 噪声与灰尘：细颗粒闪烁 + 稀疏灰尘点（时间驱动，极克制）
     {
@@ -96,14 +100,14 @@ void main()
         float grain = (hash21(sp + fract(t) * 61.7) - 0.5) * 0.05;
         float dust = step(0.9992, hash21(floor(sp * 0.05) + floor(t * 8.0)))
                      * (0.5 + 0.5 * hash21(floor(sp * 0.05)));
-        col += grain + dust * vec3(0.9, 0.8, 0.6) * 0.10;
+        col += grain + dust * ubuf.dustCol.rgb * 0.10;
     }
 
     // 玻璃反光带：一道对角淡白反光，随观察者移动（真玻璃反射）
     {
         vec2 n = normalize(vec2(ubuf.view.x * 0.8, 0.6));
         float refl = pow(max(0.0, 1.0 - abs(dot(n, vec2(0.35, 0.94)) - 0.62) * 3.2), 2.0);
-        col += vec3(1.0, 0.88, 0.62) * refl * 0.045;
+        col += ubuf.refl.rgb * refl * 0.045;
     }
 
     // 滚动刷新带：暗带 3 秒扫一周（屏幕空间，扫描时序）

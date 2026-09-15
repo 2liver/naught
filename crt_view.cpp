@@ -139,8 +139,9 @@ void CrtView::ensureRhi()
     const int pxbytes = m_texSize.width() * m_texSize.height() * 4;
     m_pxbuf = m_r->newBuffer(QRhiBuffer::Static, QRhiBuffer::StorageBuffer, pxbytes);
     m_pxbuf->create();
-    // 常量缓冲：view + texSize + timeInfo（std140：三个 vec2 = 32 字节）
-    m_ubuf = m_r->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, 32);
+    // 常量缓冲：view + texSize + timeInfo + 调色板染色（std140：2×vec2 +
+    // pad + 3×vec4 = 80 字节）
+    m_ubuf = m_r->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, 80);
     m_ubuf->create();
 
     // 管线：全屏三角形
@@ -206,7 +207,7 @@ void CrtView::renderFrame()
     if (m_forceNow || !throttled) {
         m_pending = QImage(m_texSize, QImage::Format_ARGB32);
         m_pending.setDevicePixelRatio(devicePixelRatioF());
-        m_pending.fill(qRgb(12, 9, 3));
+        m_pending.fill(m_editor->crtPalette().bg); // 随调色板（M2）
         m_editor->paintTextSnapshot(m_pending);
         Crt::phosphorPersistence(m_pending, m_prev); // 一期：磷粉余晖（滚动残影）
         m_prev = m_pending; // 浅拷贝：下帧余晖源 = 本帧无辉光内容（写入时分离）
@@ -247,11 +248,15 @@ void CrtView::renderFrame()
                 (view.y() / qMax(1.0, qreal(m_editor->viewport()->height())) - 0.5) * 2.0);
         }
     }
-    const float ub[8] = { float(view.x()), float(view.y()),
-                          float(m_texSize.width()), float(m_texSize.height()),
-                          float(m_clock.elapsed() / 1000.0),
-                          m_warmClock.isValid() ? float(m_warmClock.elapsed()) : -1.0f,
-                          0.0f, 0.0f };
+    const Crt::Palette &pal = m_editor->crtPalette();
+    const float ub[20] = { float(view.x()), float(view.y()),
+                           float(m_texSize.width()), float(m_texSize.height()),
+                           float(m_clock.elapsed() / 1000.0),
+                           m_warmClock.isValid() ? float(m_warmClock.elapsed()) : -1.0f,
+                           0.0f, 0.0f, // pad
+                           pal.scanTint.redF(), pal.scanTint.greenF(), pal.scanTint.blueF(), 1.0f,
+                           pal.refl.redF(), pal.refl.greenF(), pal.refl.blueF(), 1.0f,
+                           pal.dust.redF(), pal.dust.greenF(), pal.dust.blueF(), 1.0f };
     u->updateDynamicBuffer(m_ubuf, 0, sizeof(ub), ub);
 
     QRhiCommandBuffer *cb = nullptr;

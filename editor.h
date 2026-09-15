@@ -407,7 +407,7 @@ public:
             QPainter p(&img);
             if (!p.isActive())
                 return;
-            p.fillRect(img.rect(), Crt::kBg); // 磷光底：行号列条/滚动条槽也同色
+            p.fillRect(img.rect(), crtPalette().bg); // 磷光底：行号列条/滚动条槽也同色
             // DPR：调用方把图像按物理像素建好并 setDevicePixelRatio(dpr)。
             // Qt 6.8+ 的 QImage 画笔会在引擎层自动应用图像 DPR（经验证：
             // 有效缩放 = 画笔变换 × 图像 DPR），所以这里绝不能手动再
@@ -465,8 +465,9 @@ public:
         const int x1 = qCeil((cell.x() + cell.width()) * dpr);
         const int y1 = qCeil((cell.y() + cell.height()) * dpr);
         // 双色反相：t = 像素亮度在 底→墨 间的归一位置；out = lerp(块, 底, t)
-        const int bgSum = Crt::kBg.red() + Crt::kBg.green() + Crt::kBg.blue();
-        const int inkSum = Crt::kInk.red() + Crt::kInk.green() + Crt::kInk.blue();
+        const Crt::Palette &pp = crtPalette();
+        const int bgSum = pp.bg.red() + pp.bg.green() + pp.bg.blue();
+        const int inkSum = pp.ink.red() + pp.ink.green() + pp.ink.blue();
         const int span = inkSum - bgSum;
         const int w = img.width(), h = img.height();
         // 注意：ARGB32 内存布局为 BGRA，字节直接寻址（见 edgeDiff 同款注释）
@@ -476,9 +477,9 @@ public:
                 const int i = x * 4;
                 const int sum = line[i] + line[i + 1] + line[i + 2];
                 const qreal t = qBound(0.0, qreal(sum - bgSum) / qreal(span), 1.0);
-                line[i + 2] = uchar(Crt::kCursorBlock.red() + (Crt::kBg.red() - Crt::kCursorBlock.red()) * t);
-                line[i + 1] = uchar(Crt::kCursorBlock.green() + (Crt::kBg.green() - Crt::kCursorBlock.green()) * t);
-                line[i] = uchar(Crt::kCursorBlock.blue() + (Crt::kBg.blue() - Crt::kCursorBlock.blue()) * t);
+                line[i + 2] = uchar(pp.cursorBlock.red() + (pp.bg.red() - pp.cursorBlock.red()) * t);
+                line[i + 1] = uchar(pp.cursorBlock.green() + (pp.bg.green() - pp.cursorBlock.green()) * t);
+                line[i] = uchar(pp.cursorBlock.blue() + (pp.bg.blue() - pp.cursorBlock.blue()) * t);
             }
         }
     }
@@ -513,11 +514,12 @@ public:
         p.save();
         p.setCompositionMode(QPainter::CompositionMode_Plus);
         p.setPen(Qt::NoPen);
+        const Crt::Palette &pp = crtPalette();
         const qreal amps[3] = { a, a * 0.45, a * 0.2 };
         const int grow[3] = { 1, 3, 6 };
         for (int i = 0; i < 3; ++i) {
-            p.setBrush(QColor(Crt::kCursorBlock.red(), Crt::kCursorBlock.green(),
-                              Crt::kCursorBlock.blue(), qRound(255.0 * amps[i])));
+            p.setBrush(QColor(pp.cursorBlock.red(), pp.cursorBlock.green(),
+                              pp.cursorBlock.blue(), qRound(255.0 * amps[i])));
             const int g = grow[i];
             p.drawRoundedRect(cell.adjusted(-g, -g, g, g), 4 + g, 4 + g);
         }
@@ -548,6 +550,22 @@ public:
     // （内容完整不被裁剪）；进「显」时重置为 true
     bool crtViewLocked() const { return m_viewLock; }
     void toggleViewLock() { m_viewLock = !m_viewLock; }
+
+    // 切换计算机（M2）：琥珀（Osborne Executive）↔ 绿磷（IBM 5100）
+    const Crt::Palette &crtPalette() const { return m_machineGreen ? Crt::kGreen : Crt::kAmber; }
+    bool machineGreen() const { return m_machineGreen; }
+    void toggleMachine()
+    {
+        m_machineGreen = !m_machineGreen;
+        applyScheme();
+        viewport()->update();
+        if (m_canvas)
+            m_canvas->update();
+        if (m_lineNumberArea)
+            m_lineNumberArea->update();
+        if (m_crtView)
+            m_crtView->markDirty(true);
+    }
 
 
 
@@ -1329,6 +1347,25 @@ public:
                 qWarning("selftest FAIL: view lock re-toggle failed");
                 return false;
             }
+            // M2：切换计算机——默认琥珀，切绿磷（文字/底色随调色板），切回
+            if (e.crtPalette().ink != Crt::kInk) {
+                qWarning("selftest FAIL: default machine not amber");
+                return false;
+            }
+            e.toggleMachine();
+            if (e.crtPalette().ink != Crt::kGreen.ink
+                || e.palette().color(QPalette::Text) != Crt::kGreen.ink
+                || e.palette().color(QPalette::Base) != Crt::kGreen.bg) {
+                qWarning("selftest FAIL: green machine palette not applied");
+                return false;
+            }
+            e.toggleMachine();
+            if (e.crtPalette().ink != Crt::kInk
+                || e.palette().color(QPalette::Text) != Crt::kInk
+                || e.palette().color(QPalette::Base) != Crt::kBg) {
+                qWarning("selftest FAIL: amber machine not restored");
+                return false;
+            }
             // 画面：文字区出现琥珀磷光像素；空区是近黑磷底（不是白）
             // 先等暖机脉冲走完（黑幕约 0.5s 退尽），否则整屏被压黑
             {
@@ -1601,9 +1638,13 @@ protected:
                 return;
             case Qt::Key_T:
                 if (event->modifiers() & Qt::ShiftModifier)
-                    toggleViewLock(); // 显·视角锁定：T 家族 Shift 变体
+                    toggleViewLock(); // 显·追随视角锁定：T 家族 Shift 变体
                 else
                     toggleCrt(); // 显：T 是 Tube / Time——显像管，回到过去
+                return;
+            case Qt::Key_M:
+                if (event->modifiers() & Qt::ShiftModifier)
+                    toggleMachine(); // 显·切换计算机：M = Machine（琥珀 ↔ 绿磷）
                 return;
             case Qt::Key_I:
                 setDark(true); // 阴：I 如冰（阴冷）
@@ -1857,13 +1898,14 @@ private:
     void applyScheme()
     {
         QPalette pal = palette();
+        const Crt::Palette &pp = crtPalette(); // 调色板（M2：琥珀/绿磷）
         if (m_crt) {
             // 磷光模式配色（着色器层盖住视口，此为兜底）
-            pal.setColor(QPalette::Window, Crt::kBg);
-            pal.setColor(QPalette::Base, Crt::kBg);
-            pal.setColor(QPalette::Text, Crt::kInk);
+            pal.setColor(QPalette::Window, pp.bg);
+            pal.setColor(QPalette::Base, pp.bg);
+            pal.setColor(QPalette::Text, pp.ink);
             pal.setColor(QPalette::Highlight, QColor(0x5C, 0x3E, 0x00, 0xB0));
-            pal.setColor(QPalette::HighlightedText, Crt::kInk);
+            pal.setColor(QPalette::HighlightedText, pp.ink);
         } else if (m_dark) {
             pal.setColor(QPalette::Window, QColor(0, 0, 0));
             pal.setColor(QPalette::Base, QColor(0, 0, 0));
@@ -1881,7 +1923,7 @@ private:
         if (auto *h = qobject_cast<ZenScrollBar *>(horizontalScrollBar()))
             h->setDark(darkish);
         if (m_canvas)
-            m_canvas->setInk(m_crt ? Crt::kInk : (m_dark ? QColor(255, 255, 255) : QColor(0, 0, 0)));
+            m_canvas->setInk(m_crt ? pp.ink : (m_dark ? QColor(255, 255, 255) : QColor(0, 0, 0)));
         if (m_mode != Mode::Normal)
             updateModeCursor(); // 光标跟随墨色与当前笔刷
         if (m_lineNumberArea)
@@ -2377,7 +2419,8 @@ private:
     Mode m_mode = Mode::Normal;
     qreal m_brushSize = 20.0;
     QPointF m_lastMouse = QPointF(-1, -1);
-    bool m_viewLock = true; // 显·视角锁定（M1）：进显重置，Cmd+Shift+T 切换
+    bool m_viewLock = true; // 显·追随视角锁定（M1）：进显重置，Cmd+Shift+T 切换
+    bool m_machineGreen = false; // 显·切换计算机（M2）：绿磷（IBM 5100）
     struct InkOp {
         QVector<Canvas::InkStroke> before;
         QVector<Canvas::InkStroke> after;

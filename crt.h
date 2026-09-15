@@ -14,10 +14,45 @@
 class Editor;
 
 namespace Crt {
-inline const QColor kInk(0xFF, 0xB0, 0x00);      // 磷粉核心亮色（琥珀）
-inline const QColor kInkDim(0x8C, 0x5E, 0x00);   // 暗磷（行号等次要元素）
-inline const QColor kCursorBlock(0xFF, 0xE2, 0xA0); // 炽磷块光标：满格激发，比文字更亮更白
-inline const QColor kBg(0x0C, 0x09, 0x03);       // 近黑暖底
+// 调色板（M2）：一台机器一套磷光——文字、行号、笔迹、块光标、底色，
+// 以及 shader 侧的扫描线掺色、玻璃反光色、灰尘色。加机器 = 加预设。
+struct Palette {
+    QColor ink;         // 磷粉核心亮色
+    QColor inkDim;      // 暗磷（行号等次要元素）
+    QColor cursorBlock; // 炽磷块光标（满格激发）
+    QColor bg;          // 近黑底
+    QColor scanTint;    // 扫描线暗行掺色（归一化 RGB 送 shader）
+    QColor refl;        // 玻璃反光色
+    QColor dust;        // 灰尘点色
+};
+
+// 琥珀（Osborne Executive 1982）：出厂机器
+inline const Palette kAmber{
+    QColor(0xFF, 0xB0, 0x00), // ink
+    QColor(0x8C, 0x5E, 0x00), // inkDim
+    QColor(0xFF, 0xE2, 0xA0), // cursorBlock
+    QColor(0x0C, 0x09, 0x03), // bg
+    QColor(0x59, 0x66, 0x40), // scanTint (0.35,0.4,0.25)
+    QColor(0xFF, 0xE0, 0x9E), // refl (1.0,0.88,0.62)
+    QColor(0xE6, 0xCC, 0x99), // dust (0.9,0.8,0.6)
+};
+
+// 绿磷（IBM 5100 1975）：P1 经典终端绿 #33FF33 系
+inline const Palette kGreen{
+    QColor(0x33, 0xFF, 0x33), // ink
+    QColor(0x1C, 0x8C, 0x1C), // inkDim
+    QColor(0xD0, 0xFF, 0xE0), // cursorBlock（白绿炽磷）
+    QColor(0x03, 0x0A, 0x04), // bg（微绿黑）
+    QColor(0x40, 0x66, 0x59), // scanTint (0.25,0.4,0.35)
+    QColor(0xBF, 0xEA, 0xCC), // refl (0.75,0.92,0.8)
+    QColor(0xB3, 0xE6, 0xBF), // dust (0.7,0.9,0.75)
+};
+
+// 兼容别名（出厂琥珀；自检黄金参考沿用）
+inline const QColor kInk = kAmber.ink;
+inline const QColor kInkDim = kAmber.inkDim;
+inline const QColor kCursorBlock = kAmber.cursorBlock;
+inline const QColor kBg = kAmber.bg;
 inline constexpr int kScanPeriod = 3;            // 扫描线周期 px
 inline constexpr int kGlowMinScroll = 24;        // 滚动超过该位移才追辉光
 inline constexpr qint64 kGlowMinIntervalMs = 80; // 辉光刷新最小间隔
