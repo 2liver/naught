@@ -206,6 +206,7 @@ void CrtView::renderFrame()
         m_pending.setDevicePixelRatio(devicePixelRatioF());
         m_pending.fill(qRgb(12, 9, 3));
         m_editor->paintTextSnapshot(m_pending);
+        Crt::phosphorBloom(m_pending); // 二期三件套：真高斯辉光（快照重建时烘焙）
         {
             const QImage up = m_pending.convertToFormat(QImage::Format_RGBA8888);
             const int nbytes = up.sizeInBytes();

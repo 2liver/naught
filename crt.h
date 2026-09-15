@@ -54,8 +54,10 @@ inline void boxBlurH(const QImage &src, QImage &dst, int radius)
         const uchar *row = src.constScanLine(y);
         uchar *out = dst.scanLine(y);
         int r = 0, g = 0, b = 0, a = 0;
-        for (int x = 0; x <= radius; ++x) {
-            const int i = qMin(x, w - 1) * 4;
+        // 边缘钳制窗口 [-r..r]：0 号像素计 (r+1) 次——少计会让滑动和
+        // 在亮块尾缘失衡变负，uchar() 回绕成 253 涂满整行
+        for (int x = -radius; x <= radius; ++x) {
+            const int i = qBound(0, x, w - 1) * 4;
             r += row[i + 2]; g += row[i + 1]; b += row[i]; a += row[i + 3];
         }
         for (int x = 0; x < w; ++x) {
@@ -78,8 +80,8 @@ inline void boxBlurV(const QImage &src, QImage &dst, int radius)
     const int w = src.width(), h = src.height(), denom = 2 * radius + 1;
     for (int x = 0; x < w; ++x) {
         int r = 0, g = 0, b = 0, a = 0;
-        for (int y = 0; y <= radius; ++y) {
-            const uchar *row = src.constScanLine(qMin(y, h - 1));
+        for (int y = -radius; y <= radius; ++y) { // 边缘钳制窗口，同上
+            const uchar *row = src.constScanLine(qBound(0, y, h - 1));
             const int i = x * 4;
             r += row[i + 2]; g += row[i + 1]; b += row[i]; a += row[i + 3];
         }
@@ -109,5 +111,32 @@ inline QImage gaussianBlur(const QImage &src, int radius, int iterations)
         boxBlurV(b, a, radius);
     }
     return a;
+}
+
+// 磷光辉光（二期三件套·回接）：1/4 降采样往返 + 三轮分离盒式模糊
+// （真高斯形状），再以 lighten（max）叠回——文字核心保持全亮、
+// 四周长出磷粉光晕。整图字节直写，绕开 QImage 画笔的引擎层 DPR
+// 二次缩放；只在快照重建（80ms 节流）时执行。
+inline void phosphorBloom(QImage &img, qreal alpha = 0.42)
+{
+    if (img.isNull() || img.width() < 8 || img.height() < 8)
+        return;
+    QImage glow = img.scaled(img.size() / 4, Qt::IgnoreAspectRatio,
+                             Qt::SmoothTransformation)
+                      .convertToFormat(QImage::Format_ARGB32);
+    glow = gaussianBlur(glow, 1, 3);
+    glow = glow.scaled(img.size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    const int w = qMin(img.width(), glow.width());
+    const int h = qMin(img.height(), glow.height());
+    for (int y = 0; y < h; ++y) {
+        uchar *dst = img.scanLine(y);
+        const uchar *g = glow.constScanLine(y);
+        for (int x = 0; x < w; ++x) {
+            const int i = x * 4; // BGRA
+            dst[i] = qMax(dst[i], uchar(g[i] * alpha));
+            dst[i + 1] = qMax(dst[i + 1], uchar(g[i + 1] * alpha));
+            dst[i + 2] = qMax(dst[i + 2], uchar(g[i + 2] * alpha));
+        }
+    }
 }
 } // namespace Crt

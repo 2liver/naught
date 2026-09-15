@@ -127,6 +127,14 @@ public:
         connect(document(), &QTextDocument::contentsChanged, this, [this] {
             wakeCaret();
             m_lastWasInk = false;
+            // 磷粉激发（二期三件套·回接）：插入的新字符记下位置与时刻，
+            // 快照在 ~900ms 内给它画三圈软边增亮（指数回落）
+            const int cc = document()->characterCount();
+            if (cc > m_lastCharCount && textCursor().position() > 0) {
+                m_excitePos = textCursor().position() - 1;
+                m_exciteClock.start();
+            }
+            m_lastCharCount = cc;
             // 行号区：文档一变立即重绘，否则清空/换行不会刷新（假行号）
             m_canvas->update();
             updateGutterWidth();
@@ -407,6 +415,7 @@ public:
             // 完全消失、文字只剩左上象限的根源），逻辑坐标交给引擎映射。
             if (viewport())
                 viewport()->render(&p, viewport()->pos());
+            paintExcitation(p); // 磷粉激发：新字符在文字之上加色增亮（900ms 内）
             if (m_canvas && m_canvas->isVisible())
                 m_canvas->render(&p, m_canvas->pos());
             // 行号区：编模式下真实组件已隐藏（防双层），合成仍渲染它——
@@ -472,6 +481,47 @@ public:
             }
         }
     }
+    // 磷粉激发：新字符三圈软边增亮，~500ms 指数回落（二期三件套·回接）。
+    // 在文字之上做加色混合（CompositionMode_Plus）——真机上是磷粉
+    // 刚被打中时的过量发光，随后按指数回落到常态。
+    void paintExcitation(QPainter &p) const
+    {
+        if (!m_exciteClock.isValid())
+            return;
+        const qint64 t = m_exciteClock.elapsed();
+        if (t < 0 || t >= 900)
+            return;
+        const qreal a = 0.45 * qExp(-qreal(t) / 500.0);
+        if (a < 0.02)
+            return;
+        const int pos = qBound(0, m_excitePos, document()->characterCount() - 1);
+        QTextCursor cc = textCursor();
+        cc.setPosition(pos);
+        QRect cell;
+        if (cc.atEnd()) {
+            cell = cursorRect(cc);
+            cell.setWidth(qCeil(fontMetrics().horizontalAdvance(QLatin1Char('M'))));
+        } else {
+            QTextCursor sel(cc);
+            sel.movePosition(QTextCursor::NextCharacter, QTextCursor::KeepAnchor);
+            cell = cursorRect(sel);
+        }
+        if (cell.isNull())
+            return;
+        p.save();
+        p.setCompositionMode(QPainter::CompositionMode_Plus);
+        p.setPen(Qt::NoPen);
+        const qreal amps[3] = { a, a * 0.45, a * 0.2 };
+        const int grow[3] = { 1, 3, 6 };
+        for (int i = 0; i < 3; ++i) {
+            p.setBrush(QColor(Crt::kCursorBlock.red(), Crt::kCursorBlock.green(),
+                              Crt::kCursorBlock.blue(), qRound(255.0 * amps[i])));
+            const int g = grow[i];
+            p.drawRoundedRect(cell.adjusted(-g, -g, g, g), 4 + g, 4 + g);
+        }
+        p.restore();
+    }
+
     qreal brushSize() const { return m_brushSize; }
 
     void brushUp() { brushStep(+1); }
@@ -2281,6 +2331,9 @@ private:
     int m_blinkHalf = 0;
     QTimer m_scrollHideTimer;
     QTimer m_fadeTimer;
+    QElapsedTimer m_exciteClock; // 磷粉激发：最后插入时刻
+    int m_excitePos = 0;
+    int m_lastCharCount = 1;
     QGraphicsOpacityEffect *m_vFade = nullptr;
     QGraphicsOpacityEffect *m_hFade = nullptr;
     qreal m_fadeOpacity = 1.0;

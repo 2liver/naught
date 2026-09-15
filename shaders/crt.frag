@@ -40,7 +40,22 @@ void main()
     // 荧光粉竖纹：1 物理像素周期（DPR 感知管线），深度可见——
     // 光栅质感回来，但不再是粗线条
     float stripe = 1.0 - 0.22 * step(0.5, fract(pxpos.x));
-    vec3 col = sampleAt(uv) * stripe;
+    vec3 col = sampleAt(uv);
+
+    // 真衍射（二期三件套·回接）：N=3 磷粉栅的竖直亮边 ±1px R/B 彩边。
+    // 模型与 Crt::edgeDiff 同源：bright(x)−bright(x±1)>0 处即亮边，
+    // 亮边右侧出红、左侧出蓝（色相相反），强度 kDiffAlpha=0.20。
+    {
+        const float px = 1.0 / ubuf.texSize.x;
+        vec3 lm = sampleAt(clamp(uv - vec2(px, 0.0), 0.0, 1.0));
+        vec3 rp = sampleAt(clamp(uv + vec2(px, 0.0), 0.0, 1.0));
+        const vec3 w = vec3(0.333);
+        float eR = max(0.0, dot(col, w) - dot(rp, w));
+        float eB = max(0.0, dot(col, w) - dot(lm, w));
+        col += vec3(1.0, 0.15, 0.02) * eR * 0.20;
+        col += vec3(0.02, 0.15, 1.0) * eB * 0.20;
+    }
+    col *= stripe;
 
     // 扫描线：每行一条，暗行掺一丝上行残辉
     float scanline = step(0.5, fract(pxpos.y));
