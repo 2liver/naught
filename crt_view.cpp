@@ -211,7 +211,7 @@ void CrtView::renderFrame()
         m_editor->paintTextSnapshot(m_pending);
         Crt::phosphorPersistence(m_pending, m_prev); // 一期：磷粉余晖（滚动残影）
         m_prev = m_pending; // 浅拷贝：下帧余晖源 = 本帧无辉光内容（写入时分离）
-        Crt::phosphorBloom(m_pending); // 二期三件套：真高斯辉光（快照重建时烘焙）
+        Crt::phosphorBloom(m_pending, m_editor->crtPalette().glowAlpha); // 二期三件套：真高斯辉光（随调色板）
         // 入场暖机：因子由 shader 按 timeInfo.y 计算（CPU 逐像素循环
         // 曾引发帧循环冻结，已整体移入 GPU）
         {

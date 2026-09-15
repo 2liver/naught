@@ -24,6 +24,7 @@ struct Palette {
     QColor scanTint;    // 扫描线暗行掺色（归一化 RGB 送 shader）
     QColor refl;        // 玻璃反光色
     QColor dust;        // 灰尘点色
+    qreal glowAlpha;    // 辉光叠加强度（1a7s39ge 实例参考）
 };
 
 // 琥珀（Osborne Executive 1982）：出厂机器
@@ -35,17 +36,21 @@ inline const Palette kAmber{
     QColor(0x59, 0x66, 0x40), // scanTint (0.35,0.4,0.25)
     QColor(0xFF, 0xE0, 0x9E), // refl (1.0,0.88,0.62)
     QColor(0xE6, 0xCC, 0x99), // dust (0.9,0.8,0.6)
+    0.42,                     // glowAlpha
 };
 
-// 绿磷（IBM 5100 1975）：P1 经典终端绿 #33FF33 系
+// 绿磷（IBM 5100 1975）：按 1a7s39ge 实例「终端绿」主题校准
+// （bg #0a0a0a / text #33ff33 / textDim #1a8a1a / cursor #00ff00 /
+//  glow rgba(0,255,0,0.35)）
 inline const Palette kGreen{
     QColor(0x33, 0xFF, 0x33), // ink
-    QColor(0x1C, 0x8C, 0x1C), // inkDim
-    QColor(0xD0, 0xFF, 0xE0), // cursorBlock（白绿炽磷）
-    QColor(0x03, 0x0A, 0x04), // bg（微绿黑）
+    QColor(0x1A, 0x8A, 0x1A), // inkDim（行号暗绿）
+    QColor(0x00, 0xFF, 0x00), // cursorBlock（纯绿，实例同款）
+    QColor(0x0A, 0x0A, 0x0A), // bg（中性近黑，实例同款）
     QColor(0x40, 0x66, 0x59), // scanTint (0.25,0.4,0.35)
     QColor(0xBF, 0xEA, 0xCC), // refl (0.75,0.92,0.8)
     QColor(0xB3, 0xE6, 0xBF), // dust (0.7,0.9,0.75)
+    0.35,                     // glowAlpha（实例同款）
 };
 
 // 兼容别名（出厂琥珀；自检黄金参考沿用）
