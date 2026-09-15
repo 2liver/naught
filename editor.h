@@ -451,6 +451,7 @@ public:
     {
         const QTextCursor c = textCursor();
         QRect cell = cursorRect(c); // 插入位（宽度为 0 的落点矩形）
+        cell.translate(viewport()->pos()); // 视口坐标 → 编辑器坐标（编模式有行号槽偏移）
         if (cell.isNull())          // 零宽合法（isValid 要求宽高>0，会误拒）
             return;
         const QChar ch = document()->characterAt(c.position());
@@ -506,6 +507,7 @@ public:
             sel.movePosition(QTextCursor::NextCharacter, QTextCursor::KeepAnchor);
             cell = cursorRect(sel);
         }
+        cell.translate(viewport()->pos()); // 视口坐标 → 编辑器坐标（编模式有行号槽偏移）
         if (cell.isNull())
             return;
         p.save();
