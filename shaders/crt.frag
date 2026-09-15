@@ -56,22 +56,36 @@ void main()
         col += vec3(0.02, 0.15, 1.0) * eB * 0.30;
     }
 
-    // 束斑物理：束流越强束斑越宽——亮度高的像素把光溢给邻域
-    //（加法溢出：亮字核心保持饱和、四周变软变晕，暗处不动）
+    // 亮度（束斑宽度与栅条调制的共同输入）
+    float lum = dot(col, vec3(0.333));
+
+    // 束斑物理：水平扫描把束斑沿扫描方向拉长（不对称核：水平 6 抽头
+    // 重、垂直 2 抽头轻），亮度越高束斑越宽——加法溢出：亮字核心
+    // 饱和、四周变软变晕，暗处不动
     {
         const vec2 off = 1.0 / ubuf.texSize;
         vec3 blur = (sampleAt(clamp(cuv + vec2( off.x, 0.0), 0.0, 1.0))
-                   + sampleAt(clamp(cuv - vec2( off.x, 0.0), 0.0, 1.0))
-                   + sampleAt(clamp(cuv + vec2(0.0,  off.y), 0.0, 1.0))
-                   + sampleAt(clamp(cuv + vec2(0.0, -off.y), 0.0, 1.0))) * 0.25;
-        float lum = dot(col, vec3(0.333));
+                   + sampleAt(clamp(cuv - vec2( off.x, 0.0), 0.0, 1.0))) * 0.24
+                  + (sampleAt(clamp(cuv + vec2( off.x * 2.0, 0.0), 0.0, 1.0))
+                   + sampleAt(clamp(cuv - vec2( off.x * 2.0, 0.0), 0.0, 1.0))) * 0.14
+                  + (sampleAt(clamp(cuv + vec2(0.0,  off.y), 0.0, 1.0))
+                   + sampleAt(clamp(cuv + vec2(0.0, -off.y), 0.0, 1.0))) * 0.12;
         col = clamp(col + blur * smoothstep(0.12, 0.85, lum) * 0.40, 0.0, 1.0);
     }
 
     // ---- 屏幕空间：固定不动的磷粉栅、扫描线（真玻璃结构）----
     vec2 sp = v_uv * ubuf.texSize; // 屏幕物理像素
-    float stripe = 1.0 - 0.22 * step(0.5, fract(sp.x));
-    col *= stripe;
+    // 磷粉栅：束斑扫过栅条的软调制——束斑越宽（亮处）暗带越宽；
+    // 束斑水平偏转（内容水平梯度）让栅相位微移，斜边出摩尔纹
+    {
+        const float px = 1.0 / ubuf.texSize.x;
+        float lumL = dot(sampleAt(clamp(cuv - vec2(px, 0.0), 0.0, 1.0)), vec3(0.333));
+        float lumR = dot(sampleAt(clamp(cuv + vec2(px, 0.0), 0.0, 1.0)), vec3(0.333));
+        float beamW = mix(0.12, 0.42, smoothstep(0.05, 0.9, lum));
+        float maskPhase = fract(sp.x + (lumL - lumR) * 0.5);
+        float stripe = 1.0 - 0.22 * smoothstep(0.5 - beamW, 0.5 + beamW, maskPhase);
+        col *= stripe;
+    }
     float scanline = step(0.5, fract(sp.y));
     col *= 1.0 - 0.18 * scanline;
     col *= 1.0 - 0.06 * scanline * vec3(0.35, 0.4, 0.25);

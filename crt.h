@@ -113,9 +113,10 @@ inline QImage gaussianBlur(const QImage &src, int radius, int iterations)
     return a;
 }
 
-// 磷粉余晖（一期·回接）：上一帧内容混入新帧（max 混合）——滚动/打字
-// 留下原位渐暗的磷粉残影，随每帧重建指数衰减。分通道权重：红磷拖尾
-// 最长、绿次之、蓝最快（琥珀磷粉的真实余热色调），残影因此偏暖。
+// 磷粉余晖（一期·回接）：上一帧内容以加法混入新帧——光是叠加的，
+// 滚动/打字留下原位渐暗的残影，静态画面微微增亮（磷粉永不完全
+// 熄灭），随每帧重建指数衰减。分通道权重：红磷拖尾最长、绿次之、
+// 蓝最快（琥珀磷粉的真实余热色调），残影因此偏暖。
 inline void phosphorPersistence(QImage &img, const QImage &prev)
 {
     if (prev.isNull() || prev.size() != img.size())
@@ -126,9 +127,9 @@ inline void phosphorPersistence(QImage &img, const QImage &prev)
         const uchar *src = prev.constScanLine(y);
         for (int x = 0; x < w; ++x) {
             const int i = x * 4; // BGRA
-            dst[i] = qMax(dst[i], uchar(src[i] * 0.06));
-            dst[i + 1] = qMax(dst[i + 1], uchar(src[i + 1] * 0.13));
-            dst[i + 2] = qMax(dst[i + 2], uchar(src[i + 2] * 0.20));
+            dst[i] = qMin(255, dst[i] + int(src[i] * 0.05));
+            dst[i + 1] = qMin(255, dst[i + 1] + int(src[i + 1] * 0.12));
+            dst[i + 2] = qMin(255, dst[i + 2] + int(src[i + 2] * 0.18));
         }
     }
 }
