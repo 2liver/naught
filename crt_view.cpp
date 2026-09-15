@@ -206,6 +206,8 @@ void CrtView::renderFrame()
         m_pending.setDevicePixelRatio(devicePixelRatioF());
         m_pending.fill(qRgb(12, 9, 3));
         m_editor->paintTextSnapshot(m_pending);
+        Crt::phosphorPersistence(m_pending, m_prev); // 一期：磷粉余晖（滚动残影）
+        m_prev = m_pending; // 浅拷贝：下帧余晖源 = 本帧无辉光内容（写入时分离）
         Crt::phosphorBloom(m_pending); // 二期三件套：真高斯辉光（快照重建时烘焙）
         {
             const QImage up = m_pending.convertToFormat(QImage::Format_RGBA8888);

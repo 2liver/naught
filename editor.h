@@ -491,7 +491,7 @@ public:
         const qint64 t = m_exciteClock.elapsed();
         if (t < 0 || t >= 900)
             return;
-        const qreal a = 0.45 * qExp(-qreal(t) / 500.0);
+        const qreal a = 0.6 * qExp(-qreal(t) / 500.0); // 激发峰值 0.6，500ms 指数回落
         if (a < 0.02)
             return;
         const int pos = qBound(0, m_excitePos, document()->characterCount() - 1);

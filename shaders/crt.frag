@@ -52,8 +52,8 @@ void main()
         const vec3 w = vec3(0.333);
         float eR = max(0.0, dot(col, w) - dot(rp, w));
         float eB = max(0.0, dot(col, w) - dot(lm, w));
-        col += vec3(1.0, 0.15, 0.02) * eR * 0.20;
-        col += vec3(0.02, 0.15, 1.0) * eB * 0.20;
+        col += vec3(1.0, 0.15, 0.02) * eR * 0.30;
+        col += vec3(0.02, 0.15, 1.0) * eB * 0.30;
     }
     col *= stripe;
 

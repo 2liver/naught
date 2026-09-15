@@ -50,6 +50,7 @@ private:
     QRhiBuffer *m_pxbuf = nullptr;
     QRhiBuffer *m_ubuf = nullptr;
     QImage m_pending; // CPU 合成快照（上传源）
+    QImage m_prev;    // 上一帧快照（磷粉余晖混入源，浅拷贝）
     QImage m_shown;   // 最近一帧 GPU 输出（paintEvent 绘制）
     bool m_forceNow = false;
     bool m_readbackInFlight = false;

@@ -21,7 +21,7 @@ inline const QColor kBg(0x0C, 0x09, 0x03);       // 近黑暖底
 inline constexpr int kScanPeriod = 3;            // 扫描线周期 px
 inline constexpr int kGlowMinScroll = 24;        // 滚动超过该位移才追辉光
 inline constexpr qint64 kGlowMinIntervalMs = 80; // 辉光刷新最小间隔
-inline constexpr qreal kDiffAlpha = 0.20;        // 衍射彩边强度
+inline constexpr qreal kDiffAlpha = 0.30;        // 衍射彩边强度
 
 // 竖直边差分：bright(x) − bright(x±1) > 0 处即竖直亮边。
 // 磷粉三色栅是 N=3 的竖直二元光栅：只竖直边衍射，sinc 包络把彩边
@@ -113,6 +113,25 @@ inline QImage gaussianBlur(const QImage &src, int radius, int iterations)
     return a;
 }
 
+// 磷粉余晖（一期·回接）：上一帧内容 15% 混入新帧（max 混合）——滚动/打字
+// 留下原位渐暗的磷粉残影，随每帧重建指数衰减。字节直写。
+inline void phosphorPersistence(QImage &img, const QImage &prev, qreal alpha = 0.15)
+{
+    if (prev.isNull() || prev.size() != img.size())
+        return;
+    const int w = img.width(), h = img.height();
+    for (int y = 0; y < h; ++y) {
+        uchar *dst = img.scanLine(y);
+        const uchar *src = prev.constScanLine(y);
+        for (int x = 0; x < w; ++x) {
+            const int i = x * 4; // BGRA
+            dst[i] = qMax(dst[i], uchar(src[i] * alpha));
+            dst[i + 1] = qMax(dst[i + 1], uchar(src[i + 1] * alpha));
+            dst[i + 2] = qMax(dst[i + 2], uchar(src[i + 2] * alpha));
+        }
+    }
+}
+
 // 磷光辉光（二期三件套·回接）：1/4 降采样往返 + 三轮分离盒式模糊
 // （真高斯形状），再以 lighten（max）叠回——文字核心保持全亮、
 // 四周长出磷粉光晕。整图字节直写，绕开 QImage 画笔的引擎层 DPR
@@ -124,7 +143,7 @@ inline void phosphorBloom(QImage &img, qreal alpha = 0.42)
     QImage glow = img.scaled(img.size() / 4, Qt::IgnoreAspectRatio,
                              Qt::SmoothTransformation)
                       .convertToFormat(QImage::Format_ARGB32);
-    glow = gaussianBlur(glow, 1, 3);
+    glow = gaussianBlur(glow, 2, 3); // 半径 2（1/4 图 = 全图 8px 光晕）
     glow = glow.scaled(img.size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
     const int w = qMin(img.width(), glow.width());
     const int h = qMin(img.height(), glow.height());
