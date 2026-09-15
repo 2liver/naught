@@ -226,6 +226,8 @@ int main(int argc, char **argv)
         QAction *bGreen = fa->addAction(QStringLiteral("绿磷"));
         bGreen->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+M")));
         bGreen->setCheckable(true);
+        QAction *bAscii = fa->addAction(QStringLiteral("拖入图片 → 字符画"));
+        bAscii->setEnabled(false); // 自释性提示：隐藏功能，README 不写
         fa->addSeparator(); // 视图轴（编·显）与格式化（言·隔）分区
         QAction *bYan = fa->addAction(QStringLiteral("言"));
         bYan->setShortcut(QKeySequence(QStringLiteral("Ctrl+L")));

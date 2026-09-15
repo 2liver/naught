@@ -9,6 +9,8 @@
 #include <QColor>
 #include <QContextMenuEvent>
 #include <QCoreApplication>
+#include <QDragEnterEvent>
+#include <QDropEvent>
 #include <QEvent>
 #include <QEventLoop>
 #include <QFile>
@@ -21,6 +23,7 @@
 #include <QImage>
 #include <QKeyEvent>
 #include <QMenu>
+#include <QMimeData>
 #include <QMouseEvent>
 #include <QNativeGestureEvent>
 #include <QPainterPath>
@@ -45,6 +48,7 @@
 #include <KSyntaxHighlighting/Theme>
 #endif
 
+#include "ascii_art.h"
 #include "canvas.h"
 #include "crt.h"
 #include "crt_view.h"
@@ -59,6 +63,7 @@ public:
     {
         setFrameShape(QFrame::NoFrame);
         setTabChangesFocus(true);
+        setAcceptDrops(true); // M3：拖图片 → 字符画（隐藏功能）
         setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
 
         m_baseFont = QFontDatabase::systemFont(QFontDatabase::GeneralFont);
@@ -100,6 +105,13 @@ public:
                 m_crtView->markDirty();
         });
 
+        // M3：字符画随窗口缩放防抖重渲染
+        m_asciiSettleTimer.setSingleShot(true);
+        connect(&m_asciiSettleTimer, &QTimer::timeout, this, [this] {
+            if (m_asciiActive)
+                renderAsciiArt();
+        });
+
         // 换成自绘滚动条：命中区恒 18px，把手闲置 10px / 悬停 18px
         auto *vsb = new ZenScrollBar(Qt::Vertical);
         auto *hsb = new ZenScrollBar(Qt::Horizontal);
@@ -127,6 +139,11 @@ public:
         connect(document(), &QTextDocument::contentsChanged, this, [this] {
             wakeCaret();
             m_lastWasInk = false;
+            // M3：用户在字符画上动笔 = 画作回归普通文本（程序重渲染不受影响）
+            if (!m_settingAscii && m_asciiActive) {
+                m_asciiActive = false;
+                setLineWrapMode(QPlainTextEdit::WidgetWidth);
+            }
             // 磷粉激发（二期三件套·回接）：插入的新字符记下位置与时刻，
             // 快照在 ~900ms 内给它画三圈软边增亮（指数回落）
             const int cc = document()->characterCount();
@@ -565,6 +582,36 @@ public:
             m_lineNumberArea->update();
         if (m_crtView)
             m_crtView->markDirty(true);
+    }
+
+    // ---- M3：拖图片 → 字符画（隐藏功能，README 不提及）----
+    void loadAsciiImage(const QImage &img)
+    {
+        if (img.isNull())
+            return;
+        m_asciiImage = img;
+        m_asciiActive = true;
+        renderAsciiArt();
+    }
+    // 字符画行列数随窗口/字号自适应：列 = 视口宽/字宽，行按图片
+    // 宽高比与字符格宽高比换算（保持原图比例）
+    void renderAsciiArt()
+    {
+        if (!m_asciiActive || m_asciiImage.isNull())
+            return;
+        const QFontMetricsF fm(activeFont());
+        const qreal cw = qMax(1.0, fm.horizontalAdvance(QLatin1Char('M')));
+        const qreal ch = qMax(1.0, fm.height());
+        const int cols = qMax(2, int(viewport()->width() / cw));
+        const int rows = qMax(2, int(cols * (qreal(m_asciiImage.height()) / m_asciiImage.width())
+                                     * (cw / ch)));
+        const QString art = Ascii::imageToText(m_asciiImage, cols, rows);
+        m_settingAscii = true;
+        setLineWrapMode(QPlainTextEdit::NoWrap); // 字符画不重排
+        setPlainText(art);
+        m_settingAscii = false;
+        if (m_crtView)
+            m_crtView->markDirty();
     }
 
 
@@ -1480,6 +1527,49 @@ public:
                 return false;
             }
         }
+        // M3：图片 → 字符画（纯函数验证：合成左白右黑图 → 粗梯度映射）
+        {
+            QImage simg(64, 32, QImage::Format_ARGB32);
+            simg.fill(Qt::black);
+            {
+                QPainter pp(&simg);
+                pp.fillRect(QRect(0, 0, 32, 32), Qt::white);
+            }
+            const QString art = Ascii::imageToText(simg, 8, 4);
+            const QStringList lines = art.split(QLatin1Char('\n'));
+            if (lines.size() != 5 || lines[0].size() != 8 || lines[3].size() != 8) {
+                qWarning("selftest FAIL: ascii art grid wrong (%d lines, sizes %d/%d)",
+                         int(lines.size()), lines.isEmpty() ? -1 : lines[0].size(),
+                         lines.size() < 4 ? -1 : lines[3].size());
+                return false;
+            }
+            if (lines[0].at(0) == QLatin1Char(' ') || lines[0].at(7) != QLatin1Char(' ')) {
+                qWarning("selftest FAIL: ascii art luminance mapping wrong (left='%c' right='%c')",
+                         lines[0].at(0).toLatin1(), lines[0].at(7).toLatin1());
+                return false;
+            }
+            // 编辑器路径冒烟：loadAsciiImage → 文档变为纯字符画 → 还原
+            e.loadAsciiImage(simg);
+            const QString doc = e.toPlainText();
+            const QStringList dl = doc.split(QLatin1Char('\n'));
+            if (dl.size() < 3 || dl[0].isEmpty()) {
+                qWarning("selftest FAIL: ascii art editor path produced empty doc");
+                return false;
+            }
+            const QString rampChars = QStringLiteral(" .:*#@.,-~:;=!*#$@");
+            bool onlyRamp = true;
+            for (const QChar ch : doc) {
+                if (ch != QLatin1Char('\n') && !rampChars.contains(ch)) {
+                    onlyRamp = false;
+                    break;
+                }
+            }
+            if (!onlyRamp) {
+                qWarning("selftest FAIL: ascii art editor path has non-ramp chars");
+                return false;
+            }
+            e.setPlainText(QStringLiteral("無\n")); // 还原，防污染后续
+        }
         // 真衍射的边差分：合成白块的左右竖直边界各产出一条彩边掩膜
         {
             QImage synth(40, 20, QImage::Format_ARGB32);
@@ -1584,6 +1674,43 @@ protected:
             endInkSession();
         }
         QPlainTextEdit::focusOutEvent(event);
+    }
+
+    // M3：拖入图片文件 → 字符画；其余拖放按原生文字行为
+    static bool isImageUrl(const QMimeData *mime)
+    {
+        if (!mime || !mime->hasUrls())
+            return false;
+        const QList<QUrl> urls = mime->urls();
+        for (const QUrl &u : urls) {
+            const QString path = u.toLocalFile().toLower();
+            if (path.endsWith(QLatin1String(".png")) || path.endsWith(QLatin1String(".jpg"))
+                || path.endsWith(QLatin1String(".jpeg")) || path.endsWith(QLatin1String(".gif"))
+                || path.endsWith(QLatin1String(".webp")) || path.endsWith(QLatin1String(".bmp")))
+                return true;
+        }
+        return false;
+    }
+    void dragEnterEvent(QDragEnterEvent *event) override
+    {
+        if (isImageUrl(event->mimeData()))
+            event->acceptProposedAction();
+        else
+            QPlainTextEdit::dragEnterEvent(event);
+    }
+    void dropEvent(QDropEvent *event) override
+    {
+        if (isImageUrl(event->mimeData())) {
+            for (const QUrl &u : event->mimeData()->urls()) {
+                const QImage img(u.toLocalFile());
+                if (!img.isNull()) {
+                    loadAsciiImage(img);
+                    event->acceptProposedAction();
+                    return;
+                }
+            }
+        }
+        QPlainTextEdit::dropEvent(event);
     }
 
     void keyPressEvent(QKeyEvent *event) override
@@ -1949,6 +2076,8 @@ private:
         setFont(f);
         // 笔刷与字号脱钩：只由 Cmd/Ctrl+Shift+= / - / 0 控制
         updateGutterWidth(); // 行号区宽度随缩放重算（否则放大溢出、打字缩回）
+        if (m_asciiActive)
+            renderAsciiArt(); // M3：字符画随字号重渲染（内部缩放）
         if (m_crtView) {
             m_crtView->markDirty(true); // 缩放强制重拍（节流会让新旧帧交叠）
             m_crtSettleTimer.start(400);
@@ -2095,6 +2224,8 @@ private:
         updateLineNumberArea();
         if (m_crtView)
             m_crtView->syncGeometry(); // 整面覆盖随窗口缩放
+        if (m_asciiActive)
+            m_asciiSettleTimer.start(200); // M3：防抖，拖拽窗口期间不重渲染
     }
 
     void updateLineNumberArea()
@@ -2421,6 +2552,10 @@ private:
     QPointF m_lastMouse = QPointF(-1, -1);
     bool m_viewLock = true; // 显·追随视角锁定（M1）：进显重置，Cmd+Shift+T 切换
     bool m_machineGreen = false; // 显·切换计算机（M2）：绿磷（IBM 5100）
+    QImage m_asciiImage;         // M3：字符画源图
+    bool m_asciiActive = false;  // 源图在场且未被手动编辑
+    bool m_settingAscii = false; // 程序重渲染期间置位（抑制 contentsChanged 反激活）
+    QTimer m_asciiSettleTimer;   // 窗口缩放防抖重渲染
     struct InkOp {
         QVector<Canvas::InkStroke> before;
         QVector<Canvas::InkStroke> after;
