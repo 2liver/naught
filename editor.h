@@ -115,15 +115,14 @@ public:
 
         // 光标：闪烁由我们自己驱动（原生闪烁器已关，见 main），保证完整对称——
         // 亮 BLINK_HALF_MS / 灭 BLINK_HALF_MS 为一拍，完成 SLEEP_BLINKS 次后恰好休眠，无残拍
-        setCursorWidth(2);
         m_blinkTimer.setSingleShot(true);
         connect(&m_blinkTimer, &QTimer::timeout, this, [this] {
             if (++m_blinkHalf >= SLEEP_BLINKS * 2) {
-                setCursorWidth(0); // 第 N 次闪烁的“灭”拍即休眠
-                m_blinkTimer.stop();
+                m_blinkTimer.stop(); // 第 N 次闪烁的“灭”拍即休眠
+                syncNativeCaretWidth();
                 return;
             }
-            setCursorWidth(m_blinkHalf % 2 ? 0 : 2);
+            syncNativeCaretWidth();
         });
         connect(document(), &QTextDocument::contentsChanged, this, [this] {
             wakeCaret();
@@ -392,26 +391,85 @@ public:
     // 光栅不再有"看不全/点不到"的黑区。
     void paintTextSnapshot(QImage &img) const
     {
-        QPainter p(&img);
-        if (!p.isActive())
+        // 块状反相光标：只在显模式、有焦点、眨眼"亮"拍时画（休眠 = 隐去，
+        // 与原生光标同一节拍；见 syncNativeCaretWidth）。
+        const bool cursorBlock = m_crt && hasFocus()
+            && m_blinkTimer.isActive() && m_blinkHalf % 2 == 0;
+        {
+            QPainter p(&img);
+            if (!p.isActive())
+                return;
+            p.fillRect(img.rect(), Crt::kBg); // 磷光底：行号列条/滚动条槽也同色
+            // DPR：调用方把图像按物理像素建好并 setDevicePixelRatio(dpr)。
+            // Qt 6.8+ 的 QImage 画笔会在引擎层自动应用图像 DPR（经验证：
+            // 有效缩放 = 画笔变换 × 图像 DPR），所以这里绝不能手动再
+            // p.scale(dpr)——二次相乘会把内容放大推出画面（右侧滚动条把手
+            // 完全消失、文字只剩左上象限的根源），逻辑坐标交给引擎映射。
+            if (viewport())
+                viewport()->render(&p, viewport()->pos());
+            if (m_canvas && m_canvas->isVisible())
+                m_canvas->render(&p, m_canvas->pos());
+            // 行号区：编模式下真实组件已隐藏（防双层），合成仍渲染它——
+            // 行号只存在于光栅内；非编模式不渲染（残留的隐藏组件会在
+            // 旧位置叠在字上）
+            if (m_codeMode && m_lineNumberArea)
+                m_lineNumberArea->render(&p, m_lineNumberArea->pos());
+            if (m_fadeOpacity > 0.02) {
+                p.save();
+                p.setOpacity(m_fadeOpacity);
+                // 滚动条直接画把手几何：不走 QWidget::render。Qt 6.9 起滚动条
+                // 住在 QAbstractScrollArea 的私有容器 QWidget 里，pos() 只是
+                // 容器内坐标（恒 (0,0)）——按 pos() 平移 = 把手画到窗口左缘
+                // （"左侧镜像滚动条"）。必须 mapTo 换算到编辑器坐标；
+                // 隐藏的滚动条不画（防隐藏条的把手残留在窗口左上角）。
+                if (auto *v = qobject_cast<ZenScrollBar *>(verticalScrollBar()))
+                    if (v->isVisible())
+                        v->paintOnto(p, v->mapTo(this, QPoint(0, 0)));
+                if (auto *h = qobject_cast<ZenScrollBar *>(horizontalScrollBar()))
+                    if (h->isVisible())
+                        h->paintOnto(p, h->mapTo(this, QPoint(0, 0)));
+                p.restore();
+            }
+        } // 画家析构后直接回写像素，避免与光栅引擎缓存交错
+        if (cursorBlock)
+            paintCrtCursor(img);
+    }
+
+    // 块状反相光标（真机时代的整格闪烁块）：落点所在字格满格点亮成
+    // 炽磷色，字符像素按亮度线性映射回底色（保 AA）——反相视频的
+    // 双色精确版。原生 I 形在显模式恒不画（syncNativeCaretWidth）。
+    void paintCrtCursor(QImage &img) const
+    {
+        const QTextCursor c = textCursor();
+        QRect cell = cursorRect(c); // 插入位（宽度为 0 的落点矩形）
+        if (cell.isNull())          // 零宽合法（isValid 要求宽高>0，会误拒）
             return;
-        p.fillRect(img.rect(), Crt::kBg); // 磷光底：行号列条/滚动条槽也同色
-        if (viewport())
-            viewport()->render(&p, viewport()->pos());
-        if (m_canvas && m_canvas->isVisible())
-            m_canvas->render(&p, m_canvas->pos());
-        // 行号区：编模式下真实组件已隐藏（防双层），合成仍渲染它——
-        // 行号只存在于光栅内；非编模式不渲染（残留的隐藏组件会在
-        // 旧位置叠在字上）
-        if (m_codeMode && m_lineNumberArea)
-            m_lineNumberArea->render(&p, m_lineNumberArea->pos());        if (m_fadeOpacity > 0.02) {
-            p.save();
-            p.setOpacity(m_fadeOpacity);
-            if (verticalScrollBar() && verticalScrollBar()->isVisible())
-                verticalScrollBar()->render(&p, verticalScrollBar()->pos());
-            if (horizontalScrollBar() && horizontalScrollBar()->isVisible())
-                horizontalScrollBar()->render(&p, horizontalScrollBar()->pos());
-            p.restore();
+        const QChar ch = document()->characterAt(c.position());
+        const qreal adv = (ch.isNull() || ch == QChar::ParagraphSeparator)
+                              ? fontMetrics().horizontalAdvance(QLatin1Char('M'))
+                              : fontMetrics().horizontalAdvance(ch);
+        cell.setWidth(qMax(1, qCeil(adv)));
+        // 逻辑 → 物理像素（引擎层 DPR 映射：物理 = 逻辑 × dpr）
+        const qreal dpr = img.devicePixelRatio();
+        const int x0 = qFloor(cell.x() * dpr), y0 = qFloor(cell.y() * dpr);
+        const int x1 = qCeil((cell.x() + cell.width()) * dpr);
+        const int y1 = qCeil((cell.y() + cell.height()) * dpr);
+        // 双色反相：t = 像素亮度在 底→墨 间的归一位置；out = lerp(块, 底, t)
+        const int bgSum = Crt::kBg.red() + Crt::kBg.green() + Crt::kBg.blue();
+        const int inkSum = Crt::kInk.red() + Crt::kInk.green() + Crt::kInk.blue();
+        const int span = inkSum - bgSum;
+        const int w = img.width(), h = img.height();
+        // 注意：ARGB32 内存布局为 BGRA，字节直接寻址（见 edgeDiff 同款注释）
+        for (int y = y0; y < y1 && y < h; ++y) {
+            uchar *line = img.scanLine(y);
+            for (int x = x0; x < x1 && x < w; ++x) {
+                const int i = x * 4;
+                const int sum = line[i] + line[i + 1] + line[i + 2];
+                const qreal t = qBound(0.0, qreal(sum - bgSum) / qreal(span), 1.0);
+                line[i + 2] = uchar(Crt::kCursorBlock.red() + (Crt::kBg.red() - Crt::kCursorBlock.red()) * t);
+                line[i + 1] = uchar(Crt::kCursorBlock.green() + (Crt::kBg.green() - Crt::kCursorBlock.green()) * t);
+                line[i] = uchar(Crt::kCursorBlock.blue() + (Crt::kBg.blue() - Crt::kCursorBlock.blue()) * t);
+            }
         }
     }
     qreal brushSize() const { return m_brushSize; }
@@ -487,6 +545,7 @@ public:
             viewport()->update();
             setFocus();
         }
+        syncNativeCaretWidth(); // 显：原生 I 形退场，块光标接管；退出时恢复
         applyScheme();
         applyZoom();
     }
@@ -1231,6 +1290,12 @@ public:
             // 快照几何：文字在顶部第一行；此前的涂擦测试留下两个墨水圆点，
             // 必须同样出现在合成快照里（墨水进光栅 = 显模式下涂/擦可用的回归闸）
             {
+                // 块状反相光标有焦点时会把首字格反相、吃掉顶部琥珀——
+                // 光标挪到文末，让顶部断言照旧测文字本身
+                QTextCursor endC = e.textCursor();
+                endC.movePosition(QTextCursor::End);
+                e.setTextCursor(endC);
+                QApplication::processEvents();
                 QImage snapImg(e.viewport()->size(), QImage::Format_ARGB32);
                 snapImg.fill(Qt::transparent);
                 e.paintTextSnapshot(snapImg);
@@ -2170,9 +2235,17 @@ private:
 
     void wakeCaret()
     {
-        setCursorWidth(2);
         m_blinkHalf = 0;
         m_blinkTimer.start(BLINK_HALF_MS);
+        syncNativeCaretWidth();
+    }
+
+    // 原生 I 形光标的宽度：显模式下恒 0（块状反相光标由光栅快照自绘，
+    // 相位与休眠仍由同一眨眼节拍驱动）；其余模式亮 2px、灭 0、休眠 0。
+    void syncNativeCaretWidth()
+    {
+        const bool awake = m_blinkTimer.isActive() && m_blinkHalf % 2 == 0;
+        setCursorWidth((m_crt || !awake) ? 0 : 2);
     }
 
     void scrollActivity()

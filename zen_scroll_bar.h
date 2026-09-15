@@ -30,6 +30,24 @@ public:
         m_asleep = a;
     }
 
+    // 供合成快照直接绘制把手几何（offset 必须是滚动条在目标画布
+    // 坐标系里的位置；见 Editor::paintTextSnapshot 的 mapTo 换算）。
+    // 绕过 QWidget::render 的效果层缓存/变换路径，直接画把手。
+    void paintOnto(QPainter &p, const QPoint &offset) const
+    {
+        const QRect h = handleRect();
+        if (h.isEmpty())
+            return;
+        p.save();
+        p.translate(offset);
+        p.setRenderHint(QPainter::Antialiasing);
+        p.setPen(Qt::NoPen);
+        p.setBrush(m_dark ? QColor(0x4a, 0x4a, 0x4a) : QColor(0xb8, 0xb8, 0xb8));
+        const int rad = qMin(h.width(), h.height()) / 2;
+        p.drawRoundedRect(h, rad, rad);
+        p.restore();
+    }
+
 signals:
     void hovered(bool on);
     void trackClicked(QPoint pos);
@@ -86,15 +104,8 @@ protected:
 
     void paintEvent(QPaintEvent *) override
     {
-        const QRect h = handleRect();
-        if (h.isEmpty())
-            return;
         QPainter p(this);
-        p.setRenderHint(QPainter::Antialiasing);
-        p.setPen(Qt::NoPen);
-        p.setBrush(m_dark ? QColor(0x4a, 0x4a, 0x4a) : QColor(0xb8, 0xb8, 0xb8));
-        const int rad = qMin(h.width(), h.height()) / 2;
-        p.drawRoundedRect(h, rad, rad);
+        paintOnto(p, QPoint(0, 0)); // 屏幕绘制与合成快照共用同一几何
     }
 
 private:

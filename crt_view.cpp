@@ -119,8 +119,11 @@ void CrtView::ensureRhi()
         return;
     }
 
-    // 颜色目标（离屏，无交换链）
-    m_colorTex = m_r->newTexture(QRhiTexture::RGBA8, size(), 1,
+    // 颜色目标（离屏，无交换链）；物理像素级：纹理/缓冲/快照全部按
+    // devicePixelRatio 放大，纹路在视网膜上保持真正的 1 物理像素
+    const qreal dpr = devicePixelRatioF();
+    m_texSize = QSize(qMax(1, int(width() * dpr)), qMax(1, int(height() * dpr)));
+    m_colorTex = m_r->newTexture(QRhiTexture::RGBA8, m_texSize, 1,
                                  QRhiTexture::RenderTarget | QRhiTexture::UsedAsTransferSource);
     if (!m_colorTex->create()) {
         shaderLog(QStringLiteral("TEX CREATE FAIL"));
@@ -131,7 +134,7 @@ void CrtView::ensureRhi()
     m_rt->setRenderPassDescriptor(m_rp);
 
     // 像素输入：存储缓冲（buffer 路径已在 Metal+RHI 上验证）
-    const int pxbytes = qMax(1, width()) * qMax(1, height()) * 4;
+    const int pxbytes = m_texSize.width() * m_texSize.height() * 4;
     m_pxbuf = m_r->newBuffer(QRhiBuffer::Static, QRhiBuffer::StorageBuffer, pxbytes);
     m_pxbuf->create();
     // 常量缓冲：view + texSize（std140：两个 vec2）
@@ -170,9 +173,10 @@ void CrtView::ensureRhi()
     else
         shaderLog(QStringLiteral("PS CREATE OK"));
 
-    m_texSize = size();
+    m_texSize = QSize(qMax(1, int(width() * dpr)), qMax(1, int(height() * dpr)));
     m_forceNow = true;
     m_pending = QImage(m_texSize, QImage::Format_ARGB32);
+    m_pending.setDevicePixelRatio(dpr);
     m_pending.fill(qRgb(12, 9, 3));
 }
 
@@ -183,7 +187,9 @@ void CrtView::renderFrame()
     ensureRhi();
     if (!m_r || !m_ps || !m_srb || !m_pxbuf || !m_ubuf || m_readbackInFlight)
         return;
-    if (size() != m_texSize) {
+    const QSize want(qMax(1, int(width() * devicePixelRatioF())),
+                     qMax(1, int(height() * devicePixelRatioF())));
+    if (want != m_texSize) {
         releaseGpu(); // 帧边界安全重建（此刻无在途回读）
         ensureRhi();
         if (!m_ps)
@@ -197,6 +203,7 @@ void CrtView::renderFrame()
     const bool throttled = m_sinceRefresh.isValid() && m_sinceRefresh.elapsed() < 80;
     if (m_forceNow || !throttled) {
         m_pending = QImage(m_texSize, QImage::Format_ARGB32);
+        m_pending.setDevicePixelRatio(devicePixelRatioF());
         m_pending.fill(qRgb(12, 9, 3));
         m_editor->paintTextSnapshot(m_pending);
         {
@@ -252,6 +259,7 @@ void CrtView::renderFrame()
             if (!img.isNull() && !rb->data.isEmpty())
                 memcpy(img.bits(), rb->data.constData(),
                        qMin(size_t(img.sizeInBytes()), size_t(rb->data.size())));
+            img.setDevicePixelRatio(devicePixelRatioF()); // 物理像素：1:1 落屏
             m_shown = std::move(img);
             m_readbackInFlight = false;
             delete rb;

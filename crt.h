@@ -16,6 +16,7 @@ class Editor;
 namespace Crt {
 inline const QColor kInk(0xFF, 0xB0, 0x00);      // 磷粉核心亮色（琥珀）
 inline const QColor kInkDim(0x8C, 0x5E, 0x00);   // 暗磷（行号等次要元素）
+inline const QColor kCursorBlock(0xFF, 0xE2, 0xA0); // 炽磷块光标：满格激发，比文字更亮更白
 inline const QColor kBg(0x0C, 0x09, 0x03);       // 近黑暖底
 inline constexpr int kScanPeriod = 3;            // 扫描线周期 px
 inline constexpr int kGlowMinScroll = 24;        // 滚动超过该位移才追辉光

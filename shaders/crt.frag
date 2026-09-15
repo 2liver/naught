@@ -37,16 +37,15 @@ void main()
     vec2 uv = clamp(curve(v_uv * 0.965 + 0.0175), 0.0, 1.0);
     vec2 pxpos = uv * ubuf.texSize;
 
-    // 荧光粉竖纹：1px 周期的细密交替（此前 3px 周期 = 间距太宽），
-    // 颜色原样透出——琥珀磷光
-    float stripe = 0.92 + 0.08 * step(0.5, fract(pxpos.x));
+    // 荧光粉竖纹：1 物理像素周期（DPR 感知管线），深度可见——
+    // 光栅质感回来，但不再是粗线条
+    float stripe = 1.0 - 0.22 * step(0.5, fract(pxpos.x));
     vec3 col = sampleAt(uv) * stripe;
 
-    // 扫描线：每行一条（密度拉满），暗行掺一丝上行残辉
-    float row = fract(pxpos.y);
-    float scanline = step(0.5, row);
-    col *= 1.0 - 0.14 * scanline;
-    col *= 1.0 - 0.05 * scanline * vec3(0.35, 0.4, 0.25);
+    // 扫描线：每行一条，暗行掺一丝上行残辉
+    float scanline = step(0.5, fract(pxpos.y));
+    col *= 1.0 - 0.18 * scanline;
+    col *= 1.0 - 0.06 * scanline * vec3(0.35, 0.4, 0.25);
 
     // 暗角（克制）
     float d = length(uv - 0.5) * 1.5;
