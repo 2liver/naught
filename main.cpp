@@ -219,6 +219,10 @@ int main(int argc, char **argv)
         QAction *bXian = fa->addAction(QStringLiteral("显"));
         bXian->setShortcut(QKeySequence(QStringLiteral("Ctrl+T")));
         bXian->setCheckable(true);
+        QAction *bLock = fa->addAction(QStringLiteral("视角锁定"));
+        bLock->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+T")));
+        bLock->setCheckable(true);
+        bLock->setChecked(true);
         fa->addSeparator(); // 视图轴（编·显）与格式化（言·隔）分区
         QAction *bYan = fa->addAction(QStringLiteral("言"));
         bYan->setShortcut(QKeySequence(QStringLiteral("Ctrl+L")));
@@ -246,6 +250,7 @@ int main(int argc, char **argv)
         QObject::connect(bXiao, &QAction::triggered, &editor, [&editor] { editor.clearInk(); });
         QObject::connect(bBian, &QAction::triggered, &editor, [&editor] { editor.toggleCodeMode(); });
         QObject::connect(bXian, &QAction::triggered, &editor, [&editor] { editor.toggleCrt(); });
+        QObject::connect(bLock, &QAction::triggered, &editor, [&editor] { editor.toggleViewLock(); });
         QObject::connect(bYan, &QAction::triggered, &editor, [&editor] { editor.yan(); });
         QObject::connect(bGe, &QAction::triggered, &editor, [&editor] { editor.ge(); });
         QObject::connect(bZoomIn, &QAction::triggered, &editor, [&editor] { editor.zoom(1); });
@@ -256,13 +261,15 @@ int main(int argc, char **argv)
         QObject::connect(bBrush0, &QAction::triggered, &editor, [&editor] { editor.brushDefault(); });
         QObject::connect(bUndo, &QAction::triggered, &editor, [&editor] { editor.undoAll(); });
         QObject::connect(bRedo, &QAction::triggered, &editor, [&editor] { editor.redoAll(); });
-        QObject::connect(fa, &QMenu::aboutToShow, &editor, [&editor, bYin, bYang, bTu, bCa, bBian, bXian] {
+        QObject::connect(fa, &QMenu::aboutToShow, &editor, [&editor, bYin, bYang, bTu, bCa, bBian, bXian, bLock] {
             bYin->setChecked(editor.isDark());
             bYang->setChecked(!editor.isDark());
             bTu->setChecked(editor.mode() == Editor::Mode::Draw);
             bCa->setChecked(editor.mode() == Editor::Mode::Erase);
             bBian->setChecked(editor.codeMode());
             bXian->setChecked(editor.crtOn());
+            bLock->setChecked(editor.crtViewLocked());
+            bLock->setEnabled(editor.crtOn()); // 锁定只在显会话内有意义
         });
     }
 #endif

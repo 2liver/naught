@@ -232,14 +232,19 @@ void CrtView::renderFrame()
         m_forceNow = false;
         m_sinceRefresh.restart();
     }
-    // 观察者 = 鼠标（视差每帧更新，不受快照节流）
-    QPointF view = m_editor->lastMouseViewport();
-    if (view.x() < 0) {
-        view = QPointF(-0.25, -0.12);
+    // 观察者 = 鼠标（视差每帧更新，不受快照节流）；锁定（M1）= 真居中
+    QPointF view;
+    if (m_editor->crtViewLocked()) {
+        view = QPointF(0, 0); // 锁定：曲线对称居中，无视差
     } else {
-        view = QPointF(
-            (view.x() / qMax(1.0, qreal(m_editor->viewport()->width())) - 0.5) * 2.0,
-            (view.y() / qMax(1.0, qreal(m_editor->viewport()->height())) - 0.5) * 2.0);
+        view = m_editor->lastMouseViewport();
+        if (view.x() < 0) {
+            view = QPointF(-0.25, -0.12);
+        } else {
+            view = QPointF(
+                (view.x() / qMax(1.0, qreal(m_editor->viewport()->width())) - 0.5) * 2.0,
+                (view.y() / qMax(1.0, qreal(m_editor->viewport()->height())) - 0.5) * 2.0);
+        }
     }
     const float ub[8] = { float(view.x()), float(view.y()),
                           float(m_texSize.width()), float(m_texSize.height()),

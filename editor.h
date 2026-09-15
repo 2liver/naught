@@ -544,6 +544,9 @@ public:
     }
     // 人眼代理：鼠标在视口内的位置（反光视差追踪用）
     QPointF lastMouseViewport() const { return m_lastMouse; }
+    // 视角锁定（M1）：true = 居中视角（视差关闭）；进「显」时重置为 true
+    bool crtViewLocked() const { return m_viewLock; }
+    void toggleViewLock() { m_viewLock = !m_viewLock; }
 
 
 
@@ -552,6 +555,7 @@ public:
     {
         m_crt = !m_crt;
         if (m_crt) {
+            m_viewLock = true; // 进显即锁定居中视角（退出重进 = 再次锁定）
             // B 路线：真光学着色器层（自有 QRhi·Metal 离屏渲染 + 回读），
             // 盖住编辑器整面。普通 alien 覆盖层：指针天然穿透、无原生窗口，
             // 开关即 show/hide，没有任何拆装竞态。
@@ -1309,6 +1313,21 @@ public:
                 qWarning("selftest FAIL: CRT base not the phosphor background");
                 return false;
             }
+            // M1：视角锁定——进显即锁定，切换翻转，退出重进再次锁定
+            if (!e.crtViewLocked()) {
+                qWarning("selftest FAIL: view lock not default-on");
+                return false;
+            }
+            e.toggleViewLock();
+            if (e.crtViewLocked()) {
+                qWarning("selftest FAIL: view lock toggle failed");
+                return false;
+            }
+            e.toggleViewLock();
+            if (!e.crtViewLocked()) {
+                qWarning("selftest FAIL: view lock re-toggle failed");
+                return false;
+            }
             // 画面：文字区出现琥珀磷光像素；空区是近黑磷底（不是白）
             // 先等暖机脉冲走完（黑幕约 0.5s 退尽），否则整屏被压黑
             {
@@ -1410,6 +1429,16 @@ public:
                 || e.document()->defaultFont().family()
                     != QFontDatabase::systemFont(QFontDatabase::GeneralFont).family()) {
                 qWarning("selftest FAIL: CRT toggle-off did not restore font/palette");
+                return false;
+            }
+            // M1：退出重进显 → 视角锁定重置
+            e.toggleCrt();
+            QApplication::processEvents();
+            const bool relocked = e.crtViewLocked();
+            e.toggleCrt();
+            QApplication::processEvents();
+            if (!relocked) {
+                qWarning("selftest FAIL: view lock not reset on re-entering CRT");
                 return false;
             }
         }
@@ -1570,7 +1599,10 @@ protected:
                 ge(); // 隔：F 是"分"（分隔）的声母；逐行上下补空行
                 return;
             case Qt::Key_T:
-                toggleCrt(); // 显：T 是 Tube / Time——显像管，回到过去
+                if (event->modifiers() & Qt::ShiftModifier)
+                    toggleViewLock(); // 显·视角锁定：T 家族 Shift 变体
+                else
+                    toggleCrt(); // 显：T 是 Tube / Time——显像管，回到过去
                 return;
             case Qt::Key_I:
                 setDark(true); // 阴：I 如冰（阴冷）
@@ -2344,6 +2376,7 @@ private:
     Mode m_mode = Mode::Normal;
     qreal m_brushSize = 20.0;
     QPointF m_lastMouse = QPointF(-1, -1);
+    bool m_viewLock = true; // 显·视角锁定（M1）：进显重置，Cmd+Shift+T 切换
     struct InkOp {
         QVector<Canvas::InkStroke> before;
         QVector<Canvas::InkStroke> after;
