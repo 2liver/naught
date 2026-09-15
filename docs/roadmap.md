@@ -1,78 +1,124 @@
 # 路线图（roadmap）
 
-> 状态：2026-09 定稿讨论版。本文件与 `crt-filter.md`（显模式设计笔记）互为表里：
-> 前者回答"画面怎么拟真"，本文件回答"接下来做什么、按什么顺序"。
-> 已合并用户提出的全部推进方案；每项附权衡，供拍板后执行。
+> 状态：2026-09 已拍板版。本文件是**执行规格 + 继任者交接文档**：任何模型/人接手，
+> 读完本文件即可知道"做到哪了、下一步做什么、怎么做、怎么验证、怎么部署"。
+> 画面设计细节见 `docs/crt-filter.md`（互为表里）。
 
-## 现状（已落地）
+## 用户拍板记录（不可漂移）
 
-- **显**：一期 + 二期配方全部接回 QRhi·Metal 管线（字体/辉光/扫描线/余晖/
-  衍射/噪声/玻璃/暖机/刷新带），另有光栅物理批次（栅网锚定屏幕、束斑物理、
-  分通道余晖、栅条软调制+摩尔纹、束斑不对称核）。
-- **块状反相光标**、滚动条镜像修复、DPR 物理像素管线。
-- 本地 git 已存档（`main` 分支，自检/基准护航）。
+- 快捷键：M1 视角锁定/解锁 = **Cmd/Ctrl+Shift+T**；M2 换机器 = **Cmd/Ctrl+Shift+M**；
+  M6 重开 = **Cmd+Ctrl+Shift+N**。
+- M1 语义：**进「显」即锁定**（即使上次解锁过）；解锁只在本次显会话内有效；
+  退出再进 → 再次锁定。
+- M6 自杀键 = **Ctrl+Cmd+N**（macOS 上与系统 Cmd+Q 并存；Windows/Linux 无系统级
+  "退出即无"概念 → 在「项」菜单放一个 Ctrl+Cmd+N 条目）。
+- 上述快捷键**只进「项」菜单，不进右键菜单**；「项」内分区归类由实现者安排。
 
-## 执行顺序（建议，按里程碑）
+## 里程碑（M0 已办）
 
-| 里程碑 | 内容 | 理由（权衡） |
+| # | 内容 | 状态 |
 |---|---|---|
-| **M0**（已办） | 「显」+「编」光标落点偏移 bug | 已修：`cursorRect` 是视口坐标，编模式行号槽右移后块光标/激发光晕未加 `viewport()->pos()` 偏移 |
-| **M1** | 「显」视角锁定 | 小而高频的可用性补全：默认锁定居中视角（正是用户把鼠标挪到窗口边缘得到的那个"呈现全部内容"的视角），手动解锁才跟随鼠标。状态进入「项」菜单，默认锁定 |
-| **M2** | 切换计算机：IBM 5100 绿磷模式 | 旗舰功能。需要把琥珀色硬编码（`crt.h` 常量 + shader 里的扫描线染色/反光色/灰尘色）抽成**调色板结构**（amber/green 两套预设），为未来更多机型铺路。快捷键 + 「项」菜单双入口 |
-| **M3** | 图片 → ASCII 字符画（拖入即显） | 符合"無"理念的隐藏功能：拖图片进窗口 → 亮度/边缘密度梯度字符渲染（复用 AsciiTools 的 charset 思路：` .:*#@` 或 ` .,-~:;=!*#$@`），窗口拉伸 = 外部缩放（免费），现有字号缩放 = 内部缩放（免费）。无 UI、快捷键入「项」、README 不写 |
-| **M4** | GitHub 里程碑：更名/概念/打包/推送 | "naught(無)" 定位与概念文案（单音节古英语，come to naught = 化为乌有）；项目/文件/文件夹名统一 naught；README 英文版+概念述说（此时 M1-M3 已是真实功能，文档写实不写虚）；打包分发核对（本机 install 已含 macdeployqt+KF6 捆绑，CI 三平台已有）；经 Clash 7897 推送 |
-| **M5** | 自杀与重生：`Ctrl+Cmd+N` 程序自杀 + OS 级快捷键重开 | 需要**安装程序**（macOS：登录项/launchd 代理持有全局快捷键，应用死亡后由代理拉起）——依赖 M4 建立的打包基建，故排其后。设计哲学：伊卡洛斯与死亡驱力 |
-| **M6** | 高尔夫化/压行/逻辑简化/深模块化/性能优化 | 功能全部稳定后最后做：crt 相关逻辑从 `editor.h` 抽出成真模块（`crt.h` 目前是内联函数头）；以 bench 为驱动的性能剖面优化（当前 crt-scroll ≈ 3-7ms/步，预算 5ms） |
+| M0 | 「显」+「编」光标落点偏移 bug（cursorRect 视口坐标缺行号槽偏移） | ✅ 已修已部署（cdb2497） |
+| M1 | 「显」视角锁定（默认锁定居中视角，Cmd+Shift+T 解锁/锁定） | ✅ 已上线（bc3ad89） |
+| M2 | 切换计算机：IBM 5100 绿磷模式（调色板重构 + Cmd+Shift+M） | **下一步开工** |
+| M3 | 图片 → ASCII 字符画（拖入即显，隐藏功能，零 UI） | 待办 |
+| M4 | CRT 微增量包：磷粉余晖快慢双指数、聚焦漂移（四角微散焦）、极弱桶形 | 待办 |
+| M5 | GitHub 里程碑：naught(無) 更名/概念/README EN/打包分发/推送（7897） | 待办 |
+| M6 | 自杀与重生：Ctrl+Cmd+N 自杀 + Cmd+Ctrl+Shift+N OS 级重开（安装程序） | 待办 |
+| M7 | 高尔夫化/压行/逻辑简化/深模块化/性能优化 | 待办 |
 
-**随时可插入的 CRT 微增量**（不等里程碑）：磷粉余晖快慢双指数曲线、聚焦漂移
-（四角轻微散焦）、极弱桶形畸变（文档铁律：不毁打字）。
-
-## 待办细节（按里程碑）
+## 里程碑细节
 
 ### M1 视角锁定
-- Editor 持 `m_viewLock`，进「显」默认 true；解锁后 `lastMouseViewport()` 才驱动 shader 的 view uniform。
-- 锁定视角 = (0,0)（真居中，shader 曲线恒等）。
-- 快捷键提案：**`Cmd/Ctrl+Shift+T`**（T 家族：显 = T，锁定 = Shift 变体；与 空/消 的 N / Shift+N 同构）。
-- 「项」菜单加入「视角锁定」（显示快捷键与勾选态）。
+- `Editor` 持 `m_viewLock`（默认 true）；`toggleCrt()` 进入显时**重置为 true**。
+- 锁定 = view uniform 恒 (0,0)（真居中、shader 曲线对称）；解锁 = 鼠标驱动
+  （现状 lastMouseViewport 路径）。
+- 「项」菜单加「视角锁定」（Cmd/Ctrl+Shift+T，可勾选，仅显模式有意义）；
+  Windows/Linux 键处理（keyPressEvent）同步支持。
+- 验收：进显居中、动鼠标不动；Cmd+Shift+T 后跟随鼠标；退出重进 → 重新锁定。
 
 ### M2 绿磷模式
-- `Crt::Palette { ink, inkDim, cursorBlock, bg, scanTint, refl, dust }` + `Palette::Amber` / `Palette::Green`。
-- 绿磷参考：IBM 5100 5 英寸单色 CRT、16×64 文本；经典终端绿 `#33FF33` 系，
-  待取 dk54wpr7 对话末尾 HTML 实例的默认参数做最终校准（页面经 API 加载，
-  目前抓不到正文；必要时用户贴关键参数）。
-- shader 染色项（扫描线色调、反光色、灰尘色）经 ubuf 传调色板（ubuf 扩到 64B）。
-- 快捷键提案：**`Cmd/Ctrl+Shift+M`**（M = Machine；显内循环切换 amber/green）。
-- 与「编」「阴/阳」正交；行号/笔迹/块光标随调色板换色。
+- `Crt::Palette { ink, inkDim, cursorBlock, bg, scanTint, refl, dust }` +
+  `Amber` / `Green` 预设；shader 染色项经 ubuf 传调色板（ubuf 扩至 64B）。
+- 绿磷起始值：经典终端绿 #33FF33 系（P1 磷光），参照 IBM 5100（5" 单色 CRT、
+  16×64 文本、绿磷）。
+- **深链待办**：dk54wpr7 对话末尾 HTML 实例的默认参数（页面正文经 JS 内部 API
+  加载，curl/og 摘要只能取到首条消息，已试 8 次失败）——开工 M2 时再攻一次，
+  或由用户贴出关键参数做最终校准。
+- 与编/阴/阳正交；行号、笔迹、块光标随调色板换色。
 
 ### M3 图片 → ASCII
-- 拖放事件接 `QImage` → 灰度 → 按目标字符网格降采样（每格取亮度/边缘密度）
-  → 字符梯度映射（复用 AsciiTools 的 charset 与"边缘密度决定梯度"逻辑）。
-- 内容即普通文本（可编辑/可复制，天然零 UI）；`NoWrap` 防重排；行数/列数由
-  字号与窗口宽度自适应。
-- 快捷键入「项」；README 不提及（隐藏功能，拖进来自然发现）。
-- 退出「显」时字符画保留（它就是文字）。
+- 拖放 QImage → 灰度/边缘密度 → 字符梯度（复用 AsciiTools 的 charset：
+  ` .:*#@` 或 ` .,-~:;=!*#$@`，边缘密度决定梯度选择）。
+- 内容即普通文本（可编辑/复制）；NoWrap 防重排；行列数随字号/窗口自适应。
+- 快捷键入「项」；README 不提及（隐藏功能）。
+- 参考实现：`~/Projects/AsciiTools/src/symbolrender.js`（img() 函数）。
 
-### M4 GitHub
-- 概念文案：naught /nɔːt/ —— 单音节古英语，无/零（come to naught = 化为乌有）。
-- 品牌："naught(無)"；图标头像仍用「無」。
-- 仓库：github.com/2liver/naught（现仓库名已符合）；本地工作目录 wu → naught。
-- 推送经 Clash 7897。
-- 发布卫生：CHANGELOG 归并、CI 三平台打包复核、README EN。
+### M4 CRT 微增量包
+- 余晖快慢双指数：快分量 ~1-2 帧、慢分量 ~15-30 帧，替代单指数。
+- 聚焦漂移：画面四角轻微散焦（shader 里按 |v_uv-0.5| 混入小核模糊）。
+- 极弱桶形：曲率 0.05 → 0.02 级别的可选微调（铁律：不毁打字）。
 
-### M5 自杀与重生
-- `Ctrl+Cmd+N`（macOS）自杀：立即退出，不做任何保存提示（"关闭即无"的极致）。
-- 重开：安装程序布署一个极小的登录项代理（持全局快捷键，例如 `Ctrl+Cmd+Shift+N`），
-  应用死亡时代理 `open naught.app`。
-- Windows/Linux 等价物另议（本阶段先 macOS）。
+### M5 GitHub
+- 概念：naught /nɔːt/ 单音节古英语"无/零"（come to naught = 化为乌有）；
+  品牌 "naught(無)"；图标/头像仍用「無」。
+- 更名：项目/文件/文件夹统一 naught（本地工作目录 wu → naught）。
+- README 英文版 + 概念述说；CHANGELOG 归并；CI 三平台打包复核。
+- 推送走 Clash 代理 7897（`export https_proxy=http://127.0.0.1:7897`）。
 
-### M6 重构与性能
-- 模块化：crt 管线（快照合成/辉光/余晖/调色板）出 `editor.h` → `crt.{h,cpp}`；
-  CrtView 与 Editor 解耦为接口。
-- 性能：bench 剖面 → 目标 crt-scroll ≤ 5ms/步、打字 ≤ 0.5ms/键、缩放可接受。
-- 高尔夫化与语义统合最后做（在模块边界清晰之后）。
+### M6 自杀与重生
+- 自杀：Ctrl+Cmd+N 立即退出（无保存提示，"关闭即无"的极致）；macOS 与 Cmd+Q 并存。
+- 重开：安装程序布署极小登录项代理（持 Cmd+Ctrl+Shift+N 全局快捷键），
+  应用死亡时代理 `open naught.app`。Windows/Linux 等价物另议（先 macOS）。
+- 安装程序替代"zip 解压安装"。
 
-## 讨论中待拍板
+### M7 重构与性能
+- crt 管线出 `editor.h` → `crt.{h,cpp}`；CrtView 与 Editor 解耦为接口。
+- bench 驱动优化：crt-scroll ≤ 5ms/步、打字 ≤ 0.5ms/键。
+- 高尔夫化/语义统合最后做（模块边界清晰之后）。
 
-1. 快捷键提案是否采用（M1 `Cmd+Shift+T`、M2 `Cmd+Shift+M`、M5 重开键）；
-2. M2 绿磷参数（待 dk54wpr7 实例参数，或用户贴出）；
-3. M4 推送时机（建议 M3 完成后推送首个正式 README）。
+## 开工流程（每步必做，写入提交信息）
+
+1. **实现**（遵循 `docs/crt-filter.md` 铁律：零 UI、单一模式、纯画面、不毁打字）。
+2. **构建**：cmake 不在 PATH！用
+   `/Users/2liver/Library/Python/3.9/lib/python/site-packages/cmake/data/bin/cmake --build build`
+3. **验证**：`build/naught.app/Contents/MacOS/naught --selftest`（连续 3 次全绿）；
+   性能敏感改动跑 `--bench`（约 8 分钟，预算：滚动 ≤5ms/步、打字 ≤0.5ms/键）。
+4. **提交**：本地 git（仓库 /Users/2liver/Documents/Dev/wu，分支 main）。
+5. **部署**（顺序不可省，缺 macdeployqt 会 dyld 崩溃）：
+   ```sh
+   PREFIX="$HOME/Applications"
+   cmake --install build --prefix "$PREFIX"
+   /Users/2liver/Qt/6.9.3/macos/bin/macdeployqt "$PREFIX/naught.app"
+   cp /Users/2liver/kf6/lib/libKF6SyntaxHighlighting.6.31.0.dylib \
+      "$PREFIX/naught.app/Contents/Frameworks/"
+   LOAD=$(otool -L "$PREFIX/naught.app/Contents/MacOS/naught" | grep KF6Syntax | awk '{print $1}')
+   install_name_tool -change "$LOAD" \
+     "@executable_path/../Frameworks/libKF6SyntaxHighlighting.6.31.0.dylib" \
+     "$PREFIX/naught.app/Contents/MacOS/naught"
+   install_name_tool -id "@executable_path/../Frameworks/libKF6SyntaxHighlighting.6.31.0.dylib" \
+     "$PREFIX/naught.app/Contents/Frameworks/libKF6SyntaxHighlighting.6.31.0.dylib"
+   LSREG="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+   "$LSREG" -f "$PREFIX/naught.app"
+   env -i HOME="$HOME" "$PREFIX/naught.app/Contents/MacOS/naught" --selftest   # 必须 exit 0
+   osascript -e 'tell application id "com.2liver.naught" to quit'  # 无实例可忽略报错
+   open "$PREFIX/naught.app"
+   ```
+6. **取证工具**（像素级验证，位于 /tmp/sbprobe/，环境变量 DYLD_FRAMEWORK_PATH 需指向 Qt）：
+   ascii（亮度字符画）、probe/row/px/px2（采样）、find/hot/halo（颜色统计）、
+   diff（逐像素差异）、cols/edge（列剖面）、cur（块光标验证）。
+
+## 继任者交接（若会话中断）
+
+- 仓库：`/Users/2liver/Documents/Dev/wu`（分支 main，最近提交依次：
+  7f16a78 路线图 → cdb2497 光标偏移修复 → 23eb0f5 光栅调制批次 → 2c8ac03 物理拟真批次）。
+- 已部署到 `~/Applications/naught.app`（启动台「無」，自包含 Qt+KF6）。
+- **下一步 = M1 视角锁定**（细节见上文）。
+- 已知环境坑（别再踩）：
+  - Qt 6.8+ QImage 画笔引擎层自动乘图像 DPR——快照里**禁止**手动 `p.scale(dpr)`；
+  - Qt 6.9 滚动条住在私有容器 QWidget（`pos()` 恒 (0,0)）——快照用 `mapTo`；
+  - `cursorRect()` 是视口坐标——编辑器坐标需加 `viewport()->pos()`；
+  - `boxBlurH/V` 边缘钳制初始化必须计 (r+1) 次 0 号像素，否则 uchar 回绕 253；
+  - 暖机等逐像素 CPU 循环曾冻结帧循环——时间类效果一律放 shader（timeInfo uniform）；
+  - 自检对亮度敏感：束斑/辉光用加法（不压暗核心），否则 amber 检查不过。
+- 设计文档：`docs/crt-filter.md`（配方与物理模型）；本文件（执行与部署）。
