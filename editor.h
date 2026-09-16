@@ -105,6 +105,9 @@ public:
             const QString famG = st.value(QStringLiteral("fontGreen")).toString();
             if (!famG.isEmpty() && m_userFonts.contains(famG))
                 m_greenUser = famG;
+            const QString famA2 = st.value(QStringLiteral("fontApple")).toString();
+            if (!famA2.isEmpty() && m_userFonts.contains(famA2))
+                m_appleUser = famA2;
         }
         // 抗锯齿打开：磷粉像素块边缘自然软化（锐利硬边不像玻璃后的光）
 
@@ -624,11 +627,15 @@ public:
 
     // 切换计算机（M2）：琥珀（Osborne Executive）↔ 绿磷（IBM 5100），
     // 同时切换两台的出厂默认字体（Fusion Pixel ↔ VT323）
-    const Crt::Palette &crtPalette() const { return m_machineGreen ? Crt::kGreen : Crt::kAmber; }
-    bool machineGreen() const { return m_machineGreen; }
+    const Crt::Palette &crtPalette() const
+    {
+        return m_machine == 1 ? Crt::kGreen : m_machine == 2 ? Crt::kApple : Crt::kAmber;
+    }
+    int machine() const { return m_machine; }
+    bool machineGreen() const { return m_machine == 1; }
     void toggleMachine()
     {
-        m_machineGreen = !m_machineGreen;
+        m_machine = (m_machine + 1) % 3; // 琥珀 → 绿磷 → 苹果 II → 琥珀
         applyScheme();
         applyZoom(); // 字体随机器切换（Fusion Pixel ↔ VT323）
         viewport()->update();
@@ -713,7 +720,7 @@ public:
         refreshFonts(); // 每次重扫：刚拖入的字体即时可用
         if (m_userFonts.isEmpty())
             return;
-        const QString factory = m_machineGreen ? s_greenFamily : s_crtFamily;
+        const QString factory = (m_machine == 0) ? s_crtFamily : s_greenFamily;
         const QStringList all = QStringList() << factory << m_userFonts;
         int idx = all.indexOf(crtFontFamily());
         if (idx < 0)
@@ -722,7 +729,7 @@ public:
         if (idx < 0)
             idx += all.size();
         idx %= all.size();
-        QString &u = m_machineGreen ? m_greenUser : m_amberUser;
+        QString &u = m_machine == 1 ? m_greenUser : m_machine == 2 ? m_appleUser : m_amberUser;
         u = (idx == 0) ? QString() : all.at(idx); // 空 = 出厂
         saveFontChoice(); // 暂时默认：跨启动记忆
         applyZoom();
@@ -735,7 +742,7 @@ public:
     // 「恢复默认」：当前机器回到出厂默认字体（清掉暂时默认）
     void restoreDefaultFont()
     {
-        QString &u = m_machineGreen ? m_greenUser : m_amberUser;
+        QString &u = m_machine == 1 ? m_greenUser : m_machine == 2 ? m_appleUser : m_amberUser;
         u.clear();
         saveFontChoice();
         applyZoom();
@@ -748,9 +755,10 @@ public:
     void saveFontChoice()
     {
         QSettings st;
-        const QString key = m_machineGreen ? QStringLiteral("fontGreen")
-                                           : QStringLiteral("fontAmber");
-        const QString &u = m_machineGreen ? m_greenUser : m_amberUser;
+        const QString key = m_machine == 1 ? QStringLiteral("fontGreen")
+                             : m_machine == 2 ? QStringLiteral("fontApple")
+                                              : QStringLiteral("fontAmber");
+        const QString &u = m_machine == 1 ? m_greenUser : m_machine == 2 ? m_appleUser : m_amberUser;
         if (u.isEmpty())
             st.remove(key);
         else
@@ -758,10 +766,10 @@ public:
     }
     QString crtFontFamily() const
     {
-        const QString &u = m_machineGreen ? m_greenUser : m_amberUser;
+        const QString &u = m_machine == 1 ? m_greenUser : m_machine == 2 ? m_appleUser : m_amberUser;
         if (!u.isEmpty() && m_userFonts.contains(u))
             return u;
-        return m_machineGreen ? s_greenFamily : s_crtFamily; // 出厂回退
+        return (m_machine == 0) ? s_crtFamily : s_greenFamily; // 出厂回退（绿磷/苹果共用 VT323）
     }
 
     // ---- M3：拖图片 → 字符画（隐藏功能，README 不提及）----
@@ -987,9 +995,9 @@ public:
         if (m_crt) {
             // 显·Cmd+0 = 机器原生网格（原实验·字符网格并入）：琥珀 80 列 /
             // 绿磷 64 列——真机的"原生分辨率"
-            const int cols = m_machineGreen ? 64 : 80;
+            const int cols = m_machine == 1 ? 64 : m_machine == 2 ? 40 : 80;
             m_size = qMax(6.0, qreal(viewport()->width()) / cols
-                                   / (m_machineGreen ? 1.25 : 1.0));
+                                   / (m_machine == 0 ? 1.0 : 1.25));
             applyAnchoredZoom(m_size);
             return;
         }
@@ -1728,6 +1736,14 @@ public:
                 || e.palette().color(QPalette::Base) != Crt::kGreen.bg
                 || e.document()->defaultFont().family() == famAmber) {
                 qWarning("selftest FAIL: green machine palette/font not applied");
+                return false;
+            }
+            e.toggleMachine(); // 苹果 II（白磷 + 橙/蓝伪影）
+            if (e.crtPalette().ink != Crt::kApple.ink
+                || e.palette().color(QPalette::Text) != Crt::kApple.ink
+                || e.palette().color(QPalette::Base) != Crt::kApple.bg
+                || e.machine() != 2) {
+                qWarning("selftest FAIL: apple machine palette not applied");
                 return false;
             }
             e.toggleMachine();
@@ -2620,7 +2636,7 @@ private:
             // 机器字符 ROM：出厂/手选字体；整数像素号（12px 为设计原大），
             // 绿磷 VT323 设计号偏大，放大 1.25×；无抗锯齿
             QFont f = QFont(crtFontFamily());
-            f.setPixelSize(qMax(6, qRound(m_size * (m_machineGreen ? 1.25 : 1.0))));
+            f.setPixelSize(qMax(6, qRound(m_size * (m_machine == 0 ? 1.0 : 1.25))));
             return f;
         }
         QFont f = m_codeMode ? m_codeFont : m_baseFont;
@@ -2982,10 +2998,11 @@ private:
     qreal m_brushSize = 20.0;
     QPointF m_lastMouse = QPointF(-1, -1);
     bool m_viewLock = true; // 显·追随视角锁定（M1）：进显重置，Cmd+Shift+T 切换
-    bool m_machineGreen = false; // 显·切换计算机（M2）：绿磷（IBM 5100）
+    int m_machine = 0;        // 显·切换计算机（M2/M5.5）：0 琥珀 / 1 绿磷 / 2 苹果 II
     QStringList m_userFonts;  // 字体文件夹族名（文件顺序）
     QString m_amberUser;      // 琥珀机器的手选字体（会话内，空 = 出厂）
     QString m_greenUser;      // 绿磷机器的手选字体（会话内，空 = 出厂）
+    QString m_appleUser;      // 苹果 II 的手选字体（会话内，空 = 出厂）
     QImage m_asciiImage;         // M3：字符画源图
     bool m_asciiActive = false;  // 字符画在场且未被手动编辑
     bool m_settingAscii = false; // 程序替换期间置位（抑制反激活）

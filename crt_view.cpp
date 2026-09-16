@@ -271,7 +271,8 @@ void CrtView::renderFrame()
                            float(m_texSize.width()), float(m_texSize.height()),
                            float(m_clock.elapsed() / 1000.0),
                            m_warmClock.isValid() ? float(m_warmClock.elapsed()) : -1.0f,
-                           m_editor->screenEntityOn() ? 1.0f : 0.0f, 0.0f, // flags
+                           m_editor->screenEntityOn() ? 1.0f : 0.0f,
+                           float(m_editor->machine()), // flags: x=屏幕实体, y=机型
                            pal.scanTint.redF(), pal.scanTint.greenF(), pal.scanTint.blueF(), 1.0f,
                            pal.refl.redF(), pal.refl.greenF(), pal.refl.blueF(), 1.0f,
                            pal.dust.redF(), pal.dust.greenF(), pal.dust.blueF(), 1.0f };

@@ -53,6 +53,19 @@ inline const Palette kGreen{
     0.35,                     // glowAlpha（实例同款）
 };
 
+// 苹果 II（1977）：白磷光 + NTSC 复合信号的橙/蓝色差伪影（子代理调研，
+// 占位值待最终校准）。文本模式本身单色白，"彩色"是色差边缘伪影。
+inline const Palette kApple{
+    QColor(0xF2, 0xF2, 0xE6), // ink（暖白磷光）
+    QColor(0x8A, 0x8A, 0x80), // inkDim
+    QColor(0xFF, 0xFF, 0xFF), // cursorBlock（纯白满束流）
+    QColor(0x05, 0x05, 0x08), // bg（微蓝黑，NTSC 黑电平）
+    QColor(0x59, 0x59, 0x66), // scanTint
+    QColor(0xE6, 0xE6, 0xE0), // refl
+    QColor(0xC8, 0xC8, 0xC0), // dust
+    0.38,                     // glowAlpha
+};
+
 // 兼容别名（出厂琥珀；自检黄金参考沿用）
 inline const QColor kInk = kAmber.ink;
 inline const QColor kInkDim = kAmber.inkDim;

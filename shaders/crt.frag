@@ -52,7 +52,9 @@ void main()
     vec3 col = sampleAt(cuv);
 
     // 真衍射：内容空间亮边 ±1px R/B 彩边（bright(x)−bright(x±1) 差分，
-    // 与 Crt::edgeDiff 同模型，强度 kDiffAlpha=0.30）
+    // 与 Crt::edgeDiff 同模型，强度 kDiffAlpha=0.30）。
+    // 苹果 II（flags.y=2）：NTSC 复合信号的橙/蓝色差伪影——同机制、
+    // 更宽更强、色相改橙/蓝
     {
         const float px = 1.0 / ubuf.texSize.x;
         vec3 lm = sampleAt(clamp(cuv - vec2(px, 0.0), 0.0, 1.0));
@@ -60,8 +62,12 @@ void main()
         const vec3 w = vec3(0.333);
         float eR = max(0.0, dot(col, w) - dot(rp, w));
         float eB = max(0.0, dot(col, w) - dot(lm, w));
-        col += vec3(1.0, 0.15, 0.02) * eR * 0.30;
-        col += vec3(0.02, 0.15, 1.0) * eB * 0.30;
+        float apple = step(1.5, ubuf.flags.y);
+        float frg = mix(0.30, 0.55, apple);
+        vec3 tR = mix(vec3(1.0, 0.15, 0.02), vec3(1.0, 0.45, 0.05), apple);
+        vec3 tB = mix(vec3(0.02, 0.15, 1.0), vec3(0.10, 0.20, 1.0), apple);
+        col += tR * eR * frg;
+        col += tB * eB * frg;
     }
 
     // 亮度（束斑宽度与栅条调制的共同输入）

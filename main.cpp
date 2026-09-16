@@ -223,9 +223,8 @@ int main(int argc, char **argv)
         bLock->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+T")));
         bLock->setCheckable(true);
         bLock->setChecked(true);
-        QAction *bGreen = fa->addAction(QStringLiteral("绿磷"));
+        QAction *bGreen = fa->addAction(QStringLiteral("换机"));
         bGreen->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+M")));
-        bGreen->setCheckable(true);
         QAction *bAscii = fa->addAction(QStringLiteral("拖入图片 → 字符画"));
         bAscii->setEnabled(false); // 自释性提示：隐藏功能，README 不写
         QAction *bDeclare = fa->addAction(QStringLiteral("立为图"));
@@ -294,7 +293,6 @@ int main(int argc, char **argv)
             bXian->setChecked(editor.crtOn());
             bLock->setChecked(editor.crtViewLocked());
             bLock->setEnabled(editor.crtOn()); // 锁定只在显会话内有意义
-            bGreen->setChecked(editor.machineGreen());
             bGreen->setEnabled(editor.crtOn());
             bDeclare->setChecked(editor.asciiArtActive()); // 画布编辑态可见
         });
