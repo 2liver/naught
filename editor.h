@@ -17,6 +17,7 @@
 #include <QEvent>
 #include <QEventLoop>
 #include <QFile>
+#include <QFileInfo>
 #include <QFocusEvent>
 #include <QFont>
 #include <QFontDatabase>
@@ -35,6 +36,7 @@
 #include <QPointF>
 #include <QResizeEvent>
 #include <QScrollBar>
+#include <QSettings>
 #include <QStandardPaths>
 #include <QStyleHints>
 #include <QTextBlock>
@@ -92,7 +94,18 @@ public:
             if (id >= 0 && !QFontDatabase::applicationFontFamilies(id).isEmpty())
                 s_greenFamily = QFontDatabase::applicationFontFamilies(id).first();
         }
+        seedClassicFonts(); // 出厂经典库存（首次启动播种，可删可改名）
         refreshFonts(); // 用户字体文件夹（可含嵌套子文件夹）
+        // 暂时默认：跨启动记忆上次选用的字体（按机器；字体被删则回出厂）
+        {
+            QSettings st;
+            const QString famA = st.value(QStringLiteral("fontAmber")).toString();
+            if (!famA.isEmpty() && m_userFonts.contains(famA))
+                m_amberUser = famA;
+            const QString famG = st.value(QStringLiteral("fontGreen")).toString();
+            if (!famG.isEmpty() && m_userFonts.contains(famG))
+                m_greenUser = famG;
+        }
         // 抗锯齿打开：磷粉像素块边缘自然软化（锐利硬边不像玻璃后的光）
 
 #if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
@@ -115,6 +128,13 @@ public:
         connect(&m_crtSettleTimer, &QTimer::timeout, this, [this] {
             if (m_crt && m_crtView)
                 m_crtView->markDirty();
+        });
+
+        // M3：画布缩放尾拍兜底（捏合事件高频，停止后补渲染最后一拍）
+        m_asciiSettleTimer.setSingleShot(true);
+        connect(&m_asciiSettleTimer, &QTimer::timeout, this, [this] {
+            if (m_asciiActive)
+                replaceAsciiArt();
         });
 
         // 换成自绘滚动条：命中区恒 18px，把手闲置 10px / 悬停 18px
@@ -144,6 +164,11 @@ public:
         connect(document(), &QTextDocument::contentsChanged, this, [this] {
             wakeCaret();
             m_lastWasInk = false;
+            // M3：手动编辑 = 字符画回归普通文本（程序替换不受影响）
+            if (!m_settingAscii && m_asciiActive) {
+                m_asciiActive = false;
+                setLineWrapMode(QPlainTextEdit::WidgetWidth);
+            }
             // 磷粉激发（二期三件套·回接）：插入的新字符记下位置与时刻，
             // 快照在 ~900ms 内给它画三圈软边增亮（指数回落）
             const int cc = document()->characterCount();
@@ -489,10 +514,12 @@ public:
         const int inkSum = pp.ink.red() + pp.ink.green() + pp.ink.blue();
         const int span = inkSum - bgSum;
         const int w = img.width(), h = img.height();
-        // 注意：ARGB32 内存布局为 BGRA，字节直接寻址（见 edgeDiff 同款注释）
-        for (int y = y0; y < y1 && y < h; ++y) {
+        // 注意：ARGB32 内存布局为 BGRA，字节直接寻址（见 edgeDiff 同款注释）。
+        // 光标可能滚出视口（cursorRect 变负）——循环必须裁剪到图像内，
+        // 否则 scanLine(负y) 段错误（用户"插入图片后缩放闪退"的真凶）
+        for (int y = qMax(0, y0); y < y1 && y < h; ++y) {
             uchar *line = img.scanLine(y);
-            for (int x = x0; x < x1 && x < w; ++x) {
+            for (int x = qMax(0, x0); x < x1 && x < w; ++x) {
                 const int i = x * 4;
                 const int sum = line[i] + line[i + 1] + line[i + 2];
                 const qreal t = qBound(0.0, qreal(sum - bgSum) / qreal(span), 1.0);
@@ -594,6 +621,27 @@ public:
         return QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)
                + QStringLiteral("/naught/fonts");
     }
+    // 出厂经典库存：字体文件夹不存在时（首次启动/整个文件夹被删）播种。
+    // 经典字体可改名（改循环顺序）、可删；整个文件夹删除后下次启动重播。
+    // 出厂默认（Fusion Pixel / VT323）在 qrc 里，删不掉。
+    static void seedClassicFonts()
+    {
+        const QString dir = fontDir();
+        if (QDir(dir).exists())
+            return;
+        QDir().mkpath(dir);
+        const QStringList classics = {
+            QStringLiteral(":/fonts/classic/PressStart2P-Regular.ttf"),
+        };
+        for (const QString &res : classics) {
+            QFile f(res);
+            if (!f.open(QIODevice::ReadOnly))
+                continue;
+            QFile out(dir + QLatin1Char('/') + QFileInfo(res).fileName());
+            if (out.open(QIODevice::WriteOnly))
+                out.write(f.readAll());
+        }
+    }
     // 递归扫描字体文件夹（含嵌套子文件夹），按文件顺序加载并返回可用族名；
     // 损坏/被删的文件自动跳过——出厂字体始终在包里，机器永不断字。
     static QStringList scanFontFamilies(const QString &dir)
@@ -639,12 +687,37 @@ public:
         idx %= all.size();
         QString &u = m_machineGreen ? m_greenUser : m_amberUser;
         u = (idx == 0) ? QString() : all.at(idx); // 空 = 出厂
+        saveFontChoice(); // 暂时默认：跨启动记忆
         applyZoom();
         viewport()->update();
         if (m_lineNumberArea)
             m_lineNumberArea->update();
         if (m_crtView)
             m_crtView->markDirty(true);
+    }
+    // 「恢复默认」：当前机器回到出厂默认字体（清掉暂时默认）
+    void restoreDefaultFont()
+    {
+        QString &u = m_machineGreen ? m_greenUser : m_amberUser;
+        u.clear();
+        saveFontChoice();
+        applyZoom();
+        viewport()->update();
+        if (m_lineNumberArea)
+            m_lineNumberArea->update();
+        if (m_crtView)
+            m_crtView->markDirty(true);
+    }
+    void saveFontChoice()
+    {
+        QSettings st;
+        const QString key = m_machineGreen ? QStringLiteral("fontGreen")
+                                           : QStringLiteral("fontAmber");
+        const QString &u = m_machineGreen ? m_greenUser : m_amberUser;
+        if (u.isEmpty())
+            st.remove(key);
+        else
+            st.setValue(key, u);
     }
     QString crtFontFamily() const
     {
@@ -655,24 +728,65 @@ public:
     }
 
     // ---- M3：拖图片 → 字符画（隐藏功能，README 不提及）----
-    // 在打字光标处插入（不覆盖现有文字）。网格在插入时刻由视口宽与
-    // 字号决定（外部缩放 = 先调窗口，内部缩放 = 先调字号）；插入后即
-    // 普通文本，可编辑可复制。
+    // 在打字光标处插入（不覆盖现有文字）。字符画 = 画布（网格）+ 内容：
+    // 普通缩放/捏合 = 画布缩放（网格重渲染，画布越大越细腻）；
+    // Shift+捏合 = 内容缩放（画布不变、字号变化）。一旦手动编辑即回归
+    // 普通文本（不再联动）。
     void loadAsciiImage(const QImage &img)
     {
         if (img.isNull())
             return;
+        m_asciiImage = img;
+        m_asciiScale = 1.0;
+        const QFontMetricsF fm(activeFont());
+        const qreal cw = qMax(1.0, fm.horizontalAdvance(QLatin1Char('M')));
+        m_asciiBaseCols = qMax(2, int(viewport()->width() / cw));
+        if (document()->isEmpty())
+            setLineWrapMode(QPlainTextEdit::NoWrap); // 纯画布：不重排
+        QTextCursor c = textCursor();
+        m_asciiStart = c.position();
+        c.insertText(artText());
+        m_asciiEnd = c.position();
+        m_asciiActive = true;
+        if (m_crtView)
+            m_crtView->markDirty();
+    }
+    QString artText() const
+    {
         const QFontMetricsF fm(activeFont());
         const qreal cw = qMax(1.0, fm.horizontalAdvance(QLatin1Char('M')));
         const qreal ch = qMax(1.0, fm.height());
-        const int cols = qMax(2, int(viewport()->width() / cw));
-        const int rows = qMax(2, int(cols * (qreal(img.height()) / img.width()) * (cw / ch)));
-        const QString art = Ascii::imageToText(img, cols, rows);
-        if (document()->isEmpty())
-            setLineWrapMode(QPlainTextEdit::NoWrap); // 纯画布：不重排
-        textCursor().insertText(art);
+        const int cols = qMax(2, int(m_asciiBaseCols * m_asciiScale));
+        const int rows = qMax(2, int(cols * (qreal(m_asciiImage.height()) / m_asciiImage.width())
+                                     * (cw / ch)));
+        return Ascii::imageToText(m_asciiImage, cols, rows);
+    }
+    // 用新画布尺寸原位替换已插入的字符画（不产生重复）
+    void replaceAsciiArt()
+    {
+        if (!m_asciiActive || m_asciiImage.isNull())
+            return;
+        QTextCursor c = textCursor();
+        c.setPosition(m_asciiStart);
+        c.setPosition(m_asciiEnd, QTextCursor::KeepAnchor);
+        m_settingAscii = true;
+        c.insertText(artText());
+        m_settingAscii = false;
+        m_asciiEnd = c.position();
         if (m_crtView)
-            m_crtView->markDirty();
+            m_crtView->markDirty(true);
+    }
+    // 画布缩放：网格随倍率重渲染；80ms 节流 + 尾拍兜底（捏合事件高频）
+    void zoomAsciiCanvas(qreal factor)
+    {
+        if (!m_asciiActive)
+            return;
+        m_asciiScale = qBound(0.2, m_asciiScale * factor, 8.0);
+        if (!m_asciiRenderClock.isValid() || m_asciiRenderClock.elapsed() > 80) {
+            replaceAsciiArt();
+            m_asciiRenderClock.restart();
+        }
+        m_asciiSettleTimer.start(120); // 手势停止后补渲染最后一拍
     }
 
 
@@ -741,6 +855,18 @@ public:
 
     void zoom(int delta)
     {
+        // M3：字符画在场时，普通缩放 = 画布缩放（网格重渲染）；
+        // 内容缩放（画布不变）走 zoomContent（Shift+捏合 / Shift+滚轮）
+        if (m_asciiActive) {
+            zoomAsciiCanvas(delta > 0 ? 1.1 : 1.0 / 1.1);
+            return;
+        }
+        applyAnchoredZoom(m_size + delta);
+    }
+
+    // 内容缩放：画布（字符网格）不变，只改字号
+    void zoomContent(int delta)
+    {
         applyAnchoredZoom(m_size + delta);
     }
 
@@ -751,6 +877,11 @@ public:
 
     void zoomReset()
     {
+        if (m_asciiActive) {
+            m_asciiScale = 1.0;
+            replaceAsciiArt();
+            return;
+        }
         applyAnchoredZoom(m_baseSize);
     }
 
@@ -1644,6 +1775,19 @@ public:
                     qWarning("selftest FAIL: ascii art insert overwrote existing text");
                     return false;
                 }
+                // 插入后缩放压力段（回归：插入图片后 Cmd+=/- / 捏合闪退）
+                for (int z = 0; z < 4; ++z) {
+                    e.zoom(1);
+                    QApplication::processEvents();
+                }
+                for (int z = 0; z < 4; ++z) {
+                    e.zoom(-1);
+                    QApplication::processEvents();
+                }
+                if (e.toPlainText().size() < 10) {
+                    qWarning("selftest FAIL: ascii art lost after zoom");
+                    return false;
+                }
                 e.setPlainText(QStringLiteral("無\n")); // 还原，防污染后续
             }
         }
@@ -1955,15 +2099,23 @@ protected:
 
     void wheelEvent(QWheelEvent *event) override
     {
-        // Ctrl/Cmd + 滚轮：缩放（像素增量累积，触控板也顺滑）
+        // Ctrl/Cmd + 滚轮：缩放（像素增量累积，触控板也顺滑）；
+        // 字符画在场：普通 = 画布缩放，Shift = 内容缩放
         if (event->modifiers() & (Qt::ControlModifier | Qt::MetaModifier)) {
             m_wheelAccum += event->angleDelta().y();
+            const bool content = event->modifiers() & Qt::ShiftModifier;
             while (m_wheelAccum >= 120) {
-                zoom(+1);
+                if (content)
+                    zoomContent(+1);
+                else
+                    zoom(+1);
                 m_wheelAccum -= 120;
             }
             while (m_wheelAccum <= -120) {
-                zoom(-1);
+                if (content)
+                    zoomContent(-1);
+                else
+                    zoom(-1);
                 m_wheelAccum += 120;
             }
             m_wheelAccum = std::clamp(m_wheelAccum, -119, 119);
@@ -2014,9 +2166,14 @@ protected:
                 if (qAbs(v) >= 0.002) {
                     m_pinchSmooth = PINCH_SMOOTH_A * v + (1.0 - PINCH_SMOOTH_A) * m_pinchSmooth;
                     const qreal factor = std::clamp<qreal>(1.0 + m_pinchSmooth * PINCH_GAIN, 0.75, 1.35);
-                    // 换模式即换缩放项目：涂/擦模式捏合控制笔刷，其余控制字号
+                    // 换模式即换缩放项目：涂/擦模式捏合控制笔刷，其余控制字号；
+                    // 字符画在场时：普通捏合 = 画布缩放（网格重渲染），
+                    // Shift+捏合 = 内容缩放（画布不变）
                     if (m_mode == Mode::Draw || m_mode == Mode::Erase)
                         brushScale(factor);
+                    else if (m_asciiActive
+                             && !(QGuiApplication::keyboardModifiers() & Qt::ShiftModifier))
+                        zoomAsciiCanvas(factor);
                     else
                         zoomTo(m_size * factor);
                 }
@@ -2649,6 +2806,15 @@ private:
     QStringList m_userFonts;  // 字体文件夹族名（文件顺序）
     QString m_amberUser;      // 琥珀机器的手选字体（会话内，空 = 出厂）
     QString m_greenUser;      // 绿磷机器的手选字体（会话内，空 = 出厂）
+    QImage m_asciiImage;         // M3：字符画源图
+    bool m_asciiActive = false;  // 字符画在场且未被手动编辑
+    bool m_settingAscii = false; // 程序替换期间置位（抑制反激活）
+    qreal m_asciiScale = 1.0;    // 画布倍率（网格行列随倍率）
+    int m_asciiBaseCols = 0;     // 插入时刻的基准列数（视口宽/字宽）
+    int m_asciiStart = 0;        // 字符画在文档中的起止位置（原位替换用）
+    int m_asciiEnd = 0;
+    QTimer m_asciiSettleTimer;   // 画布缩放尾拍兜底
+    QElapsedTimer m_asciiRenderClock; // 画布缩放 80ms 节流
     struct InkOp {
         QVector<Canvas::InkStroke> before;
         QVector<Canvas::InkStroke> after;

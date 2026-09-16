@@ -234,6 +234,7 @@ int main(int argc, char **argv)
         bFontPrev->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+,")));
         QAction *bFontNext = fa->addAction(QStringLiteral("下一字体"));
         bFontNext->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+.")));
+        QAction *bFontReset = fa->addAction(QStringLiteral("恢复默认字体"));
         fa->addSeparator(); // 视图轴（编·显）与格式化（言·隔）分区
         QAction *bYan = fa->addAction(QStringLiteral("言"));
         bYan->setShortcut(QKeySequence(QStringLiteral("Ctrl+L")));
@@ -266,6 +267,7 @@ int main(int argc, char **argv)
         QObject::connect(bFontDir, &QAction::triggered, &editor, [&editor] { editor.openFontFolder(); });
         QObject::connect(bFontPrev, &QAction::triggered, &editor, [&editor] { editor.cycleCrtFont(-1); });
         QObject::connect(bFontNext, &QAction::triggered, &editor, [&editor] { editor.cycleCrtFont(+1); });
+        QObject::connect(bFontReset, &QAction::triggered, &editor, [&editor] { editor.restoreDefaultFont(); });
         QObject::connect(bYan, &QAction::triggered, &editor, [&editor] { editor.yan(); });
         QObject::connect(bGe, &QAction::triggered, &editor, [&editor] { editor.ge(); });
         QObject::connect(bZoomIn, &QAction::triggered, &editor, [&editor] { editor.zoom(1); });
