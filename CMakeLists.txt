@@ -38,6 +38,31 @@ if(APPLE)
     target_link_libraries(naught PRIVATE "-framework Carbon" "-framework CoreServices")
 endif()
 
+# M6 重生代理：纯 Cocoa 登录项应用（无 Qt 依赖）——launchd 裸进程
+# 收不到系统热键投递，必须作为真正的登录项应用运行
+add_executable(naught-agent naught_agent.mm)
+target_link_libraries(naught-agent PRIVATE
+    "-framework Cocoa" "-framework Carbon" "-framework CoreServices")
+add_custom_command(TARGET naught-agent POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+            ${CMAKE_BINARY_DIR}/naught-agent.app/Contents/MacOS
+    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:naught-agent>
+            ${CMAKE_BINARY_DIR}/naught-agent.app/Contents/MacOS/naught-agent
+    COMMAND ${CMAKE_COMMAND} -E copy
+            ${CMAKE_SOURCE_DIR}/packaging/naught-agent-Info.plist
+            ${CMAKE_BINARY_DIR}/naught-agent.app/Contents/Info.plist
+    COMMAND codesign --force --sign -
+            ${CMAKE_BINARY_DIR}/naught-agent.app)
+
+# 主应用打包时把代理应用嵌进 Resources（安装程序从主包里拷贝布署）
+add_dependencies(naught naught-agent)
+add_custom_command(TARGET naught POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+            $<TARGET_BUNDLE_CONTENT_DIR:naught>/Resources
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_BINARY_DIR}/naught-agent.app
+            $<TARGET_BUNDLE_CONTENT_DIR:naught>/Resources/naught-agent.app)
+
 # 语法高亮（可选）：未找到时 编 模式退化为 等宽字体 + 行号
 find_package(KF6SyntaxHighlighting QUIET)
 if(KF6SyntaxHighlighting_FOUND)

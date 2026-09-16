@@ -36,163 +36,78 @@
 #include "editor.h"
 
 // ============ M6 自杀与重生 ============
-// 自杀：Ctrl+Cmd+N 立即退出（无保存提示，"关闭即无"的极致）。
-// 重生：安装程序布署极小登录项代理（LaunchAgent，持 Cmd+Ctrl+Shift+N
-// 全局快捷键）——应用死亡时代理 open naught.app（无中生有）。
-
-static QString naughtAgentLabel()
-{
-    return QStringLiteral("com.2liver.naught.agent");
-}
-
-QString naughtAgentPlistXml(const QString &binPath)
-{
-    const QString b = binPath.toHtmlEscaped();
-    return QStringLiteral(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-        "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
-        "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
-        "<plist version=\"1.0\">\n<dict>\n"
-        "  <key>Label</key><string>%1</string>\n"
-        "  <key>ProgramArguments</key>\n"
-        "  <array>\n    <string>%2</string>\n    <string>--agent</string>\n  </array>\n"
-        "  <key>RunAtLoad</key><true/>\n"
-        "  <key>KeepAlive</key><true/>\n"
-        "  <key>ProcessType</key><string>Interactive</string>\n"
-        "</dict>\n</plist>\n")
-        .arg(naughtAgentLabel(), b);
-}
+// 自杀：⌃⌘N 立即退出（无保存提示，"关闭即无"的极致）。
+// 重生：独立的纯 Cocoa 登录项应用 naught-agent.app（LSUIElement，
+// 系统登录项列表注册）持 ⌃⇧⌘N 全局热键——应用死亡时代理
+// LSOpen naught.app（无中生有）。
+// 注：launchd 裸进程收不到系统级热键投递（此前两轮失败的根因），
+// 必须作为真正的登录项应用运行。
 
 #ifdef Q_OS_MACOS
-// 热键回调（Carbon 需 C 函数指针）：打开/激活主应用 = 重生
-static void naughtAgentLog(const QString &msg)
-{
-    QFile logf(QDir::homePath()
-               + QStringLiteral("/Library/Application Support/naught/agent.log"));
-    if (logf.open(QIODevice::WriteOnly | QIODevice::Append)) {
-        logf.write((msg + QLatin1Char('\n')).toUtf8());
-        logf.close();
-    }
-}
-
-static OSStatus naughtHotKeyHandler(EventHandlerCallRef, EventRef, void *user)
-{
-    const QString *path = static_cast<const QString *>(user);
-    naughtAgentLog(QStringLiteral("hotkey fired: opening %1").arg(*path));
-    CFURLRef url = CFURLCreateWithFileSystemPath(
-        nullptr, path->toCFString(), kCFURLPOSIXPathStyle, true);
-    if (url) {
-        const OSStatus rc = LSOpenCFURLRef(url, nullptr);
-        naughtAgentLog(QStringLiteral("LSOpen result: %1").arg(int(rc)));
-        CFRelease(url);
-    } else {
-        naughtAgentLog(QStringLiteral("LSOpen failed: null URL"));
-    }
-    return noErr;
-}
-
-// 登录项代理：注册 Cmd+Ctrl+Shift+N 全局热键，触发时用 LaunchServices
-// 打开主应用（应用死亡 = 重生；应用在跑 = 激活）。无窗口、无 Dock。
-static int runNaughtAgent(int argc, char **argv)
-{
-    // QGuiApplication：代理必须是真正的会话 GUI 进程——launchd 起的
-    // 裸进程收不到系统级热键投递（重生的致命一环）。Accessory 策略 =
-    // 无 Dock 图标、无菜单栏，但完整接入窗口服务器事件通道。
-    QGuiApplication app(argc, argv);
-    app.setApplicationName(QStringLiteral("無"));
-    [[NSApplication sharedApplication]
-        setActivationPolicy:NSApplicationActivationPolicyAccessory];
-    const QString supportDir = QDir::homePath()
-        + QStringLiteral("/Library/Application Support/naught");
-    QDir().mkpath(supportDir);
-    QLockFile lock(supportDir + QStringLiteral("/agent.lock"));
-    lock.setStaleLockTime(0); // 常驻进程：锁陈旧即失效（崩溃后重启可抢）
-    if (!lock.tryLock(200)) {
-        qInfo("naught agent: another agent is alive, exiting");
-        return 0;
-    }
-    // 规范化：LSOpen/CFURL 不解析 ".." 段，未规范化的路径打不开主应用
-    const QString bundle = QFileInfo(QDir(QCoreApplication::applicationDirPath())
-                                         .absoluteFilePath(QStringLiteral("../..")))
-                               .canonicalFilePath();
-    QString *bundlePath = new QString(bundle); // 回调数据（进程存续期泄漏一次，无妨）
-
-    EventHotKeyRef hotKey = nullptr;
-    const EventHotKeyID hotKeyId = { 'nagt', 1 };
-    const OSStatus st = RegisterEventHotKey(kVK_ANSI_N, cmdKey | controlKey | shiftKey,
-                                            hotKeyId, GetApplicationEventTarget(),
-                                            0, &hotKey);
-    if (st != noErr) {
-        qWarning("naught agent: hotkey registration failed (%d)", int(st));
-        return 1;
-    }
-    EventHandlerUPP handler = NewEventHandlerUPP(naughtHotKeyHandler);
-    const EventTypeSpec spec = { kEventClassKeyboard, kEventHotKeyPressed };
-    InstallEventHandler(GetApplicationEventTarget(), handler, 1, &spec,
-                        bundlePath, nullptr);
-    qInfo("naught agent: holding Cmd+Ctrl+Shift+N for %s",
-          qPrintable(bundle));
-    const bool selfTest = argc > 1
-        && QString::fromLocal8Bit(argv[1]) == QLatin1String("--agent-selftest");
-    if (selfTest) {
-        // 合成热键事件直投自身事件目标：验证 CFRunLoop 泵 + handler + LSOpen
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, int64_t(NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            EventRef ev = nullptr;
-            CreateEvent(nullptr, kEventClassKeyboard, kEventHotKeyPressed,
-                        GetCurrentEventTime(), kEventAttributeNone, &ev);
-            if (ev) {
-                SendEventToEventTarget(ev, GetApplicationEventTarget());
-                ReleaseEvent(ev);
-            }
-            naughtAgentLog(QStringLiteral("agent-selftest: synthetic hotkey posted"));
-        });
-    }
-    {
-        // 日志落盘：launchd 丢弃 stderr，出问题时看这里
-        QFile logf(supportDir + QStringLiteral("/agent.log"));
-        if (logf.open(QIODevice::WriteOnly | QIODevice::Append)) {
-            logf.write((QStringLiteral("agent up: %1\n").arg(bundle)).toUtf8());
-            logf.close();
-        }
-    }
-    // 关键：Carbon 热键事件由 CFRunLoop 派发——QCoreApplication 的
-    // UNIX 派发器不泵 Carbon 队列（此前 app.exec() 下按键永远无反应）
-    CFRunLoopRun();
-    return 0;
-}
-
-// 安装程序（替代 zip 解压安装）：写 LaunchAgent plist + 引导登录项 +
-// LaunchServices 注册主应用。幂等：重跑 = 重装。
+// 安装程序（替代 zip 解压安装）：布署 naught-agent.app 登录项 +
+// LaunchServices 注册主应用 + 清理旧 launchd 代理。幂等：重跑 = 重装。
 static int installNaught()
 {
     const QString bundle = QFileInfo(QDir(QCoreApplication::applicationDirPath())
                                          .absoluteFilePath(QStringLiteral("../..")))
                                .canonicalFilePath();
-    const QString agentsDir = QDir::homePath() + QStringLiteral("/Library/LaunchAgents");
-    QDir().mkpath(agentsDir);
-    const QString plistPath = agentsDir + QLatin1Char('/') + naughtAgentLabel()
-                            + QStringLiteral(".plist");
-    QFile f(plistPath);
-    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        qWarning("naught install: cannot write %s", qPrintable(plistPath));
-        return 1;
-    }
-    f.write(naughtAgentPlistXml(QCoreApplication::applicationFilePath()).toUtf8());
-    f.close();
-    const QString gui = QStringLiteral("gui/%1").arg(getuid());
+    // 1) 清理旧版 launchd 代理（迁移）
     QProcess::execute(QStringLiteral("launchctl"),
-                      { QStringLiteral("bootout"), gui + QLatin1Char('/') + naughtAgentLabel() });
-    const int rc = QProcess::execute(QStringLiteral("launchctl"),
-                                     { QStringLiteral("bootstrap"), gui, plistPath });
-    if (rc != 0) {
-        qWarning("naught install: launchctl bootstrap failed (%d)", rc);
+                      { QStringLiteral("bootout"),
+                        QStringLiteral("gui/%1/com.2liver.naught.agent").arg(getuid()) });
+    QFile::remove(QDir::homePath()
+                  + QStringLiteral("/Library/LaunchAgents/com.2liver.naught.agent.plist"));
+    // 2) 布署代理应用（与主应用并排）
+    const QString agentSrc = bundle + QStringLiteral("/Contents/Resources/naught-agent.app");
+    const QString agentDst = QFileInfo(bundle).dir().filePath(QStringLiteral("naught-agent.app"));
+    QDir(agentDst).removeRecursively();
+    if (!QDir().mkpath(agentDst + QStringLiteral("/Contents/MacOS"))) {
+        qWarning("naught install: cannot create %s", qPrintable(agentDst));
         return 1;
     }
+    const QStringList parts = {
+        QStringLiteral("/Contents/Info.plist"),
+        QStringLiteral("/Contents/MacOS/naught-agent"),
+    };
+    bool copied = true;
+    for (const QString &p : parts)
+        copied = copied && QFile::copy(agentSrc + p, agentDst + p);
+    if (!copied) {
+        qWarning("naught install: agent bundle copy failed (src %s)", qPrintable(agentSrc));
+        return 1;
+    }
+    QProcess::execute(QStringLiteral("codesign"),
+                      { QStringLiteral("--force"), QStringLiteral("--sign"),
+                        QStringLiteral("-"), agentDst });
+    // 3) 注册登录项（系统登录项列表；LSUIElement = 无 Dock 图标）
+    CFURLRef agentUrl = CFURLCreateWithFileSystemPath(
+        nullptr, agentDst.toCFString(), kCFURLPOSIXPathStyle, true);
+    bool loginItemOk = false;
+    if (agentUrl) {
+        LSSharedFileListRef list = LSSharedFileListCreate(
+            nullptr, kLSSharedFileListSessionLoginItems, nullptr);
+        if (list) {
+            LSSharedFileListItemRef item = LSSharedFileListInsertItemURL(
+                list, kLSSharedFileListItemLast, nullptr, nullptr, agentUrl,
+                nullptr, nullptr);
+            loginItemOk = (item != nullptr);
+            if (item)
+                CFRelease(item);
+            CFRelease(list);
+        }
+        CFRelease(agentUrl);
+    }
+    if (!loginItemOk) {
+        qWarning("naught install: login item registration failed");
+        return 1;
+    }
+    // 4) 注册主应用 + 立刻启动代理（LSOpen = 完整登录项应用启动路径）
     QProcess::execute(QStringLiteral("/System/Library/Frameworks/CoreServices.framework/"
                                      "Frameworks/LaunchServices.framework/Support/lsregister"),
                       { QStringLiteral("-f"), bundle });
-    qInfo("naught install: agent installed + app registered (%s)", qPrintable(bundle));
+    LSOpenCFURLRef(CFURLCreateWithFileSystemPath(
+        nullptr, agentDst.toCFString(), kCFURLPOSIXPathStyle, true), nullptr);
+    qInfo("naught install: login-item agent installed + app registered");
     return 0;
 }
 #endif // Q_OS_MACOS
@@ -346,10 +261,6 @@ static bool benchmark()
 
 int main(int argc, char **argv)
 {
-#ifdef Q_OS_MACOS
-    if (argc > 1 && QString::fromLocal8Bit(argv[1]) == QLatin1String("--agent"))
-        return runNaughtAgent(argc, argv); // 登录项代理：持全局重生热键
-#endif
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("無"));
     app.setApplicationDisplayName(QStringLiteral("無"));

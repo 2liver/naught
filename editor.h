@@ -63,8 +63,6 @@
 #include "line_number_area.h"
 #include "zen_scroll_bar.h"
 
-QString naughtAgentPlistXml(const QString &binPath); // main.cpp：M6 代理 plist（自测核对）
-
 class Editor : public QPlainTextEdit {
 public:
     Editor()
@@ -2598,18 +2596,6 @@ public:
                 return false;
             }
             e.setPlainText(QStringLiteral("無\n"));
-        }
-        // M6 自杀与重生：代理 plist 内容（安装程序的纯函数部分）
-        {
-            const QString xml = naughtAgentPlistXml(QStringLiteral("/tmp/naught.app/Contents/MacOS/naught"));
-            if (!xml.contains(QStringLiteral("com.2liver.naught.agent"))
-                || !xml.contains(QStringLiteral("--agent"))
-                || !xml.contains(QStringLiteral("RunAtLoad"))
-                || !xml.contains(QStringLiteral("KeepAlive"))
-                || !xml.contains(QStringLiteral("/tmp/naught.app/Contents/MacOS/naught"))) {
-                qWarning("selftest FAIL: agent plist content wrong");
-                return false;
-            }
         }
         // CRT 管线冒烟（C64 三色栅 + 行扫描激励）：渲两机各一帧落盘，
         // 供人工/取证核对（shader 编译失败 = 黑帧 + 空图）
