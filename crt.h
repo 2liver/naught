@@ -153,23 +153,34 @@ inline QImage gaussianBlur(const QImage &src, int radius, int iterations)
     return a;
 }
 
-// 磷粉余晖（一期·回接）：上一帧内容以加法混入新帧——光是叠加的，
-// 滚动/打字留下原位渐暗的残影，静态画面微微增亮（磷粉永不完全
-// 熄灭），随每帧重建指数衰减。分通道权重：红磷拖尾最长、绿次之、
-// 蓝最快（琥珀磷粉的真实余热色调），残影因此偏暖。
-inline void phosphorPersistence(QImage &img, const QImage &prev)
+// 磷粉余晖（一期·回接，M4 双指数）：上一帧与上上帧以快慢两个分量
+// 加法混入新帧——快分量 = 1 帧内的亮回响，慢分量 = 长尾余热（真磷粉
+// 的双指数衰减近似）。分通道权重：红磷拖尾最长、绿次之、蓝最快，
+// 残影因此偏暖。静态画面微微增亮（磷粉永不完全熄灭）。
+inline void phosphorPersistence(QImage &img, const QImage &prev1, const QImage &prev2)
 {
-    if (prev.isNull() || prev.size() != img.size())
+    if (prev1.isNull() || prev1.size() != img.size())
         return;
+    const bool have2 = !prev2.isNull() && prev2.size() == img.size();
     const int w = img.width(), h = img.height();
+    // BGRA 权重：快（R,G,B）= (0.08,0.05,0.02)；慢 = (0.12,0.08,0.03)
     for (int y = 0; y < h; ++y) {
         uchar *dst = img.scanLine(y);
-        const uchar *src = prev.constScanLine(y);
+        const uchar *s1 = prev1.constScanLine(y);
+        const uchar *s2 = have2 ? prev2.constScanLine(y) : nullptr;
         for (int x = 0; x < w; ++x) {
-            const int i = x * 4; // BGRA
-            dst[i] = qMin(255, dst[i] + int(src[i] * 0.05));
-            dst[i + 1] = qMin(255, dst[i + 1] + int(src[i + 1] * 0.12));
-            dst[i + 2] = qMin(255, dst[i + 2] + int(src[i + 2] * 0.18));
+            const int i = x * 4;
+            int b = dst[i] + int(s1[i] * 0.02);
+            int g = dst[i + 1] + int(s1[i + 1] * 0.05);
+            int r = dst[i + 2] + int(s1[i + 2] * 0.08);
+            if (s2) {
+                b += int(s2[i] * 0.03);
+                g += int(s2[i + 1] * 0.08);
+                r += int(s2[i + 2] * 0.12);
+            }
+            dst[i] = qMin(255, b);
+            dst[i + 1] = qMin(255, g);
+            dst[i + 2] = qMin(255, r);
         }
     }
 }

@@ -77,6 +77,18 @@ void main()
         col = clamp(col + blur * smoothstep(0.12, 0.85, lum) * 0.40, 0.0, 1.0);
     }
 
+    // 聚焦漂移（M4）：四角轻微散焦——真机边缘聚焦变差，角落内容
+    // 微微发糊（屏幕空间锚定，随玻璃固定）
+    {
+        const vec2 off = 1.0 / ubuf.texSize;
+        vec3 blur4 = (sampleAt(clamp(cuv + vec2( off.x, 0.0), 0.0, 1.0))
+                    + sampleAt(clamp(cuv - vec2( off.x, 0.0), 0.0, 1.0))
+                    + sampleAt(clamp(cuv + vec2(0.0,  off.y), 0.0, 1.0))
+                    + sampleAt(clamp(cuv + vec2(0.0, -off.y), 0.0, 1.0))) * 0.25;
+        float corner = smoothstep(0.55, 0.85, length(v_uv - 0.5));
+        col = mix(col, blur4, corner * 0.35);
+    }
+
     // ---- 屏幕空间：固定不动的磷粉栅、扫描线（真玻璃结构）----
     vec2 sp = v_uv * ubuf.texSize; // 屏幕物理像素
     // 磷粉栅：束斑扫过栅条的软调制——束斑越宽（亮处）暗带越宽；
