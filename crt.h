@@ -66,13 +66,17 @@ inline const Palette kGreen{
 // （chrome 调色板按子代理调研：默认浅蓝字 #6F7FDC 于蓝屏 #2A1C6E）。
 // 字符画的颜色来自 kC64Colors 的 16 色量化。
 inline const Palette kC64{
-    QColor(0xA2, 0xB2, 0xF8), // ink（浅蓝字——蓝磷本质暗于琥珀，提亮补偿）
-    QColor(0x74, 0x82, 0xB8), // inkDim
-    QColor(0xAE, 0xBE, 0xFF), // cursorBlock
-    QColor(0x3C, 0x2A, 0x8E), // bg（蓝屏，提亮）
-    QColor(0x1B, 0x14, 0x50), // scanTint
-    QColor(0x40, 0x40, 0xE0), // refl
-    QColor(0x5A, 0x5A, 0x6E), // dust
+    // 亮度校准（lemon64 社区 + 1702 实测讨论）：真机"浅蓝字"是电子束
+    // 饱和后的近白亮蓝（名义 #6C6CEB 只是色度），亮度级接近琥珀/绿磷
+    // 的激发水平；底是深蓝（#2114B9 系），对比强烈——旧版墨不够亮、
+    // 底太浅，观感发闷
+    QColor(0xC8, 0xD6, 0xFF), // ink（饱和亮蓝，≈白蓝的激发亮度）
+    QColor(0x96, 0xA4, 0xD4), // inkDim
+    QColor(0xE4, 0xEA, 0xFF), // cursorBlock（近白）
+    QColor(0x2A, 0x1A, 0x80), // bg（深蓝 #2114B9 系，对比强烈）
+    QColor(0x18, 0x10, 0x4A), // scanTint
+    QColor(0x60, 0x68, 0xE8), // refl
+    QColor(0x6E, 0x78, 0x9E), // dust
     0.50,                     // glowAlpha（蓝磷提亮：辉光也是亮度的一部分）
     { 0.08f, 0.08f, 0.07f },  // P22 彩管余晖：快分量 µs 级（帧级几乎不可见），慢分量短
     { 0.16f, 0.16f, 0.12f },  // 慢分量：P22 实有可见慢余晖（整体亮度的一部分）
