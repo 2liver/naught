@@ -117,7 +117,10 @@
      "$PREFIX/naught.app/Contents/MacOS/naught"
    install_name_tool -id "@executable_path/../Frameworks/libKF6SyntaxHighlighting.6.31.0.dylib" \
      "$PREFIX/naught.app/Contents/Frameworks/libKF6SyntaxHighlighting.6.31.0.dylib"
+   codesign --force --deep --sign - "$PREFIX/naught.app"   # install_name_tool 改动后签名失效——必须重签（LS 拒开未签名包）
    "$PREFIX/naught.app/Contents/MacOS/naught" --install   # M6：布署登录项代理（重生热键）+ 注册应用（替代手工 lsregister）
+   # Launchpad「已不能再打开」/open -600 = LS 陈旧注册 + 部署包累积脏状态：
+   # 病方 = rm -rf 部署包 → 全新 install → macdeployqt → KF6 → codesign → --install → open
    env -i HOME="$HOME" "$PREFIX/naught.app/Contents/MacOS/naught" --selftest   # 必须 exit 0
    osascript -e 'tell application id "com.2liver.naught" to quit'  # 无实例可忽略报错
    open "$PREFIX/naught.app"
