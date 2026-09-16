@@ -280,7 +280,10 @@ public:
             // 磷粉激发（二期三件套·回接）：插入的新字符记下位置与时刻，
             // 快照在 ~900ms 内给它画三圈软边增亮（指数回落）
             const int cc = document()->characterCount();
-            if (cc > m_lastCharCount && textCursor().position() > 0) {
+            // 只有真实打字激发辉光；程序性重印（换机/缩放/Cmd+0）批量
+            // 插入不激发——否则整屏字符画逐拍叠加 = 过曝闪光（用户：
+            // "拍立得闪光灯怼脸"）
+            if (!m_settingAscii && cc > m_lastCharCount && textCursor().position() > 0) {
                 m_excitePos = textCursor().position() - 1;
                 m_exciteClock.start();
             }
@@ -1723,7 +1726,7 @@ public:
     {
         if (!m_asciiActive)
             return;
-        m_asciiScale = qBound(0.2, m_asciiScale * factor, 8.0);
+        m_asciiScale = qBound(0.05, m_asciiScale * factor, 8.0); // 下限 5%：dpi 拉满后可整体缩得更小
         if (!m_asciiRenderClock.isValid() || m_asciiRenderClock.elapsed() > 80) {
             replaceAsciiArt();
             m_asciiRenderClock.restart();
@@ -1812,7 +1815,7 @@ public:
             qreal sz = qreal(viewport()->width()) / cols
                        / (m_machine == 0 ? 1.0 : 1.25);
             if (m_machine == 2)
-                sz = qMin(sz, 20.0); // C64：真机字符 ≈ 物理 4mm——大窗口不无限放大
+                sz = qMin(sz, 16.0); // C64：真机字符 ≈ 物理 4mm——大窗口不无限放大
             m_size = qMax(6.0, sz);
             applyAnchoredZoom(m_size);
             return;
@@ -4156,7 +4159,7 @@ private:
     {
         const QPointF anchor = zoomAnchor();
         const int pos = positionAtViewport(anchor);
-        m_size = std::clamp<qreal>(newSize, 6, 1024);
+        m_size = std::clamp<qreal>(newSize, 3, 1024); // 下限 3pt：C64 等粗体可进一步缩小
         applyZoom();
         QTimer::singleShot(0, this, [this, pos, y = anchor.y()] {
             QAbstractTextDocumentLayout *layout = document()->documentLayout();
