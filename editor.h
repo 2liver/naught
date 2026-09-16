@@ -154,9 +154,12 @@ public:
             QTextCursor c = textCursor();
             c.setPosition(m_asciiPrintPos);
             m_settingAscii = true;
-            c.insertText(m_asciiPrintLines.at(m_asciiPrintIdx)
-                         + ((m_asciiPrintIdx + 1 < m_asciiPrintLines.size())
-                                ? QStringLiteral("\n") : QString()));
+            if (m_asciiColors.isEmpty())
+                c.insertText(m_asciiPrintLines.at(m_asciiPrintIdx));
+            else
+                insertColoredLine(c, m_asciiPrintIdx); // C64 真彩：逐字符前景色
+            if (m_asciiPrintIdx + 1 < m_asciiPrintLines.size())
+                c.insertText(QStringLiteral("\n"));
             m_settingAscii = false;
             m_asciiPrintPos = c.position();
             m_asciiEnd = m_asciiPrintPos;
@@ -629,13 +632,16 @@ public:
     // 同时切换两台的出厂默认字体（Fusion Pixel ↔ VT323）
     const Crt::Palette &crtPalette() const
     {
-        return m_machine == 1 ? Crt::kGreen : m_machine == 2 ? Crt::kApple : Crt::kAmber;
+        return m_machine == 1 ? Crt::kGreen
+             : m_machine == 2 ? Crt::kC64
+             : m_machine == 3 ? Crt::kApple
+             : Crt::kAmber;
     }
     int machine() const { return m_machine; }
     bool machineGreen() const { return m_machine == 1; }
     void toggleMachine()
     {
-        m_machine = (m_machine + 1) % 3; // 琥珀 → 绿磷 → 苹果 II → 琥珀
+        m_machine = (m_machine + 1) % 4; // 琥珀 → 绿磷 → C64 → 苹果 II → 琥珀
         applyScheme();
         applyZoom(); // 字体随机器切换（Fusion Pixel ↔ VT323）
         viewport()->update();
@@ -651,6 +657,7 @@ public:
     // ——锁定时是干净"完美视角"，解锁后是沉浸的弯曲玻璃屏（不裁字）
     bool screenEntityOn() const { return m_crt && !m_viewLock; }
     bool asciiArtActive() const { return m_asciiActive; } // 画布编辑态（立为图勾选）
+    bool colorMachine() const { return m_machine == 2; }   // C64：字符画逐字符真彩
     bool asciiPrintingDbg() const { return m_asciiPrinting; }
 
     // ---- 字体管理（「项」·字体区）：用户字体文件夹 + 上/下一个 ----
@@ -798,7 +805,7 @@ public:
         if (m_crtView)
             m_crtView->markDirty();
     }
-    QString artText() const
+    QString artText()
     {
         const QFontMetricsF fm(activeFont());
         const qreal cw = qMax(1.0, fm.horizontalAdvance(QLatin1Char('M')));
@@ -808,7 +815,32 @@ public:
         const int cols = qBound(2, int(m_asciiBaseCols * m_asciiScale), maxCols);
         const int rows = qMax(2, int(cols * (qreal(m_asciiImage.height()) / m_asciiImage.width())
                                      * (cw / ch)));
+        if (colorMachine()) {
+            // C64 真彩：每字符前景色 = 源图像素 16 色量化（chafa 式）
+            return Ascii::imageToTextColors(m_asciiImage, cols, rows, m_asciiColors,
+                                            Crt::kC64Colors);
+        }
+        m_asciiColors.clear();
         return Ascii::imageToText(m_asciiImage, cols, rows);
+    }
+    // 彩色行插入：同色连续段合并为单次 insertText（带前景色格式）
+    void insertColoredLine(QTextCursor &c, int lineIdx)
+    {
+        int offset = 0;
+        for (int l = 0; l < lineIdx; ++l)
+            offset += m_asciiPrintLines.at(l).size();
+        const QString line = m_asciiPrintLines.at(lineIdx);
+        int i = 0;
+        while (i < line.size()) {
+            const QRgb col = m_asciiColors.at(offset + i);
+            int j = i + 1;
+            while (j < line.size() && m_asciiColors.at(offset + j) == col)
+                ++j;
+            QTextCharFormat fmt;
+            fmt.setForeground(QColor(col));
+            c.insertText(line.mid(i, j - i), fmt);
+            i = j;
+        }
     }
     // 逐行打印：m_asciiPrintTimer 每拍插入一行（光标跟进，行行激发）
     void printAscii(const QString &art, int pos)
@@ -998,7 +1030,7 @@ public:
         if (m_crt) {
             // 显·Cmd+0 = 机器原生网格（原实验·字符网格并入）：琥珀 80 列 /
             // 绿磷 64 列——真机的"原生分辨率"
-            const int cols = m_machine == 1 ? 64 : m_machine == 2 ? 40 : 80;
+            const int cols = (m_machine == 0) ? 80 : (m_machine == 1) ? 64 : 40;
             m_size = qMax(6.0, qreal(viewport()->width()) / cols
                                    / (m_machine == 0 ? 1.0 : 1.25));
             applyAnchoredZoom(m_size);
@@ -1746,11 +1778,19 @@ public:
                 qWarning("selftest FAIL: green machine palette/font not applied");
                 return false;
             }
+            e.toggleMachine(); // C64 真彩（蓝屏 + 16 色逐字符前景色）
+            if (e.crtPalette().ink != Crt::kC64.ink
+                || e.palette().color(QPalette::Text) != Crt::kC64.ink
+                || e.palette().color(QPalette::Base) != Crt::kC64.bg
+                || e.machine() != 2 || !e.colorMachine()) {
+                qWarning("selftest FAIL: C64 machine palette not applied");
+                return false;
+            }
             e.toggleMachine(); // 苹果 II（白磷 + 橙/蓝伪影）
             if (e.crtPalette().ink != Crt::kApple.ink
                 || e.palette().color(QPalette::Text) != Crt::kApple.ink
                 || e.palette().color(QPalette::Base) != Crt::kApple.bg
-                || e.machine() != 2) {
+                || e.machine() != 3) {
                 qWarning("selftest FAIL: apple machine palette not applied");
                 return false;
             }
@@ -1885,7 +1925,7 @@ public:
             }
             const QString art = Ascii::imageToText(simg, 8, 4);
             const QStringList lines = art.split(QLatin1Char('\n'));
-            if (lines.size() != 5 || lines[0].size() != 8 || lines[3].size() != 8) {
+            if (lines.size() != 4 || lines[0].size() != 8 || lines[3].size() != 8) {
                 qWarning("selftest FAIL: ascii art grid wrong (%d lines, sizes %d/%d)",
                          int(lines.size()), lines.isEmpty() ? -1 : lines[0].size(),
                          lines.size() < 4 ? -1 : lines[3].size());
@@ -1952,6 +1992,29 @@ public:
                     return false;
                 }
                 e.setPlainText(QStringLiteral("無\n")); // 还原，防污染后续
+            }
+            // C64 真彩路径：颜色与字符一一对应、含黑白两端色
+            {
+                QVector<QRgb> cols;
+                const QString cart = Ascii::imageToTextColors(simg, 8, 4, cols,
+                                                              Crt::kC64Colors);
+                const int chars = cart.count(QStringLiteral("\n")) * -1 + cart.size();
+                if (cols.size() != chars || cols.size() < 20) {
+                    qWarning("selftest FAIL: color art size mismatch (%d vs %d)",
+                             int(cols.size()), chars);
+                    return false;
+                }
+                bool hasWhite = false, hasBlack = false;
+                for (QRgb c : cols) {
+                    if (qRed(c) > 200 && qGreen(c) > 200 && qBlue(c) > 200)
+                        hasWhite = true;
+                    if (qRed(c) < 30 && qGreen(c) < 30 && qBlue(c) < 30)
+                        hasBlack = true;
+                }
+                if (!hasWhite || !hasBlack) {
+                    qWarning("selftest FAIL: color quantization lost black/white");
+                    return false;
+                }
             }
             // 「立为图」：任意选区 → 立为图 → 画布缩放（再打印）可用；
             // 无选区时复选上次范围
@@ -3018,7 +3081,7 @@ private:
     qreal m_brushSize = 20.0;
     QPointF m_lastMouse = QPointF(-1, -1);
     bool m_viewLock = true; // 显·追随视角锁定（M1）：进显重置，Cmd+Shift+T 切换
-    int m_machine = 0;        // 显·切换计算机（M2/M5.5）：0 琥珀 / 1 绿磷 / 2 苹果 II
+    int m_machine = 0;        // 显·切换计算机：0 琥珀 / 1 绿磷 / 2 C64 真彩 / 3 苹果 II
     QStringList m_userFonts;  // 字体文件夹族名（文件顺序）
     QString m_amberUser;      // 琥珀机器的手选字体（会话内，空 = 出厂）
     QString m_greenUser;      // 绿磷机器的手选字体（会话内，空 = 出厂）
@@ -3034,6 +3097,7 @@ private:
     QElapsedTimer m_asciiRenderClock; // 画布缩放 80ms 节流
     QTimer m_asciiPrintTimer;    // 字符画逐行打印
     QStringList m_asciiPrintLines;
+    QVector<QRgb> m_asciiColors; // C64 真彩：与字符一一对应的前景色
     int m_asciiPrintIdx = 0;
     int m_asciiPrintPos = 0;
     bool m_asciiPrinting = false;
