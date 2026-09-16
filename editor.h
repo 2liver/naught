@@ -243,6 +243,7 @@ public:
             }
             wakeCaret();
             m_lastWasInk = false;
+            m_undoWasInk = false; // 双栈撤销：文字变化后重做走文档栈（不再误重做笔迹）
             // M3：手动编辑 = 字符画回归普通文本（程序打印/替换不受影响）
             if (!m_settingAscii && m_asciiActive) {
                 m_asciiActive = false;
@@ -559,16 +560,24 @@ public:
         const qreal tlW = fm.horizontalAdvance(s.tl);
         const qreal trW = fm.horizontalAdvance(s.tr);
         const qreal hw = qMax(0.1, fm.horizontalAdvance(s.h));
-        // 关键：总宽落在横线栅格上——hN 条 ─ 恰好填满两角之间
-        // （boxW = tlW + trW + hN×hw，无取整残余）。旧版对 boxW 取整
-        // 横线，横线与角之间差 ±半格 → "左右中间填充线没对齐"
+        // 笔画中心（ink 范围中点）：fallback 框线字形宽窄不一
+        // （实测 │ 推进 1.8、角 6.0）——按字面推进对齐必然错位，
+        // 必须按笔画中心对齐
+        const auto stemC = [&fm](QChar ch) {
+            return fm.leftBearing(ch)
+                 + (fm.horizontalAdvance(ch) - fm.leftBearing(ch)
+                    - fm.rightBearing(ch)) / 2.0;
+        };
+        // 总宽落在横线栅格上——hN 条 ─ 恰好填满两角之间（无取整残余）
         const qreal need = maxW + spw * 2.0 + vw * 2.0;
         const int hN = qMax(1, int(qCeil((need - tlW - trW) / hw)));
         const qreal boxW = tlW + trW + hN * hw;
-        const qreal contentW = boxW - spw - vw * 2.0;
+        // 右竖线的笔画中心 = 右角的笔画中心
+        const qreal target = (boxW - trW) + stemC(s.tr);
         QString out = s.tl + QString(hN, s.h) + s.tr + QLatin1Char('\n');
         for (const QString &l : lines) {
-            const int nSp = qMax(0, int(qRound((contentW - lineW(l)) / spw)));
+            const int nSp = qMax(0, int(qRound(
+                (target - vw - spw - lineW(l) - stemC(s.v)) / spw)));
             out += s.v + QLatin1Char(' ') + l + QString(nSp, QLatin1Char(' '))
                  + s.v + QLatin1Char('\n');
         }
@@ -1092,7 +1101,7 @@ public:
         const QColor block = m_codeMode ? QColor(0xE8, 0xE8, 0xE0) : pp.cursorBlock;
         const int bgSum = pp.bg.red() + pp.bg.green() + pp.bg.blue();
         const int inkSum = pp.ink.red() + pp.ink.green() + pp.ink.blue();
-        const int span = inkSum - bgSum;
+        const int span = qMax(1, inkSum - bgSum); // 防御除零（底=墨时）
         const int w = img.width(), h = img.height();
         // 注意：ARGB32 内存布局为 BGRA，字节直接寻址（见 edgeDiff 同款注释）。
         // 光标可能滚出视口（cursorRect 变负）——循环必须裁剪到图像内，
@@ -1401,11 +1410,16 @@ public:
         for (int l = 0; l < lineIdx; ++l)
             offset += m_asciiPrintLines.at(l).size();
         const QString line = m_asciiPrintLines.at(lineIdx);
+        const int total = m_asciiColors.size();
+        const auto colAt = [&](int idx) {
+            return idx < total ? m_asciiColors.at(idx) : QRgb(0x00FFFFFF);
+        };
         int i = 0;
         while (i < line.size()) {
-            const QRgb col = m_asciiColors.at(offset + i);
+            // 越界钳位：颜色数与字符数不符时不再 at() 崩溃（防御）
+            const QRgb col = colAt(offset + i);
             int j = i + 1;
-            while (j < line.size() && m_asciiColors.at(offset + j) == col)
+            while (j < line.size() && colAt(offset + j) == col)
                 ++j;
             QTextCharFormat fmt;
             fmt.setForeground(QColor(col));

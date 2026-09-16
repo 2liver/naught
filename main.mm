@@ -310,13 +310,13 @@ int main(int argc, char **argv)
         QMenu *fa = menuBar->addMenu(QStringLiteral("项"));
         // ── 视图区（父级收纳）：编/显/图 ──
         QMenu *mBian = fa->addMenu(QStringLiteral("编"));
-        QAction *bBian = mBian->addAction(QStringLiteral("编"));
+        QAction *bBian = mBian->addAction(QStringLiteral("编程高亮"));
         bBian->setShortcut(QKeySequence(QStringLiteral("Ctrl+B")));
         bBian->setCheckable(true);
         QAction *bEsc = mBian->addAction(QStringLiteral("Esc＝退出模式"));
         bEsc->setEnabled(false);
         QMenu *mXian = fa->addMenu(QStringLiteral("显"));
-        QAction *bXian = mXian->addAction(QStringLiteral("显"));
+        QAction *bXian = mXian->addAction(QStringLiteral("模拟显像管"));
         bXian->setShortcut(QKeySequence(QStringLiteral("Ctrl+T")));
         bXian->setCheckable(true);
         QAction *bGreen = mXian->addAction(QStringLiteral("换机"));
@@ -409,9 +409,9 @@ int main(int argc, char **argv)
         bRedo->setShortcut(QKeySequence(QStringLiteral("Ctrl+Y")));
         fa->addSeparator();
         // ── 生死区：自杀 = 动作；重生 = 登录项代理的全局键（提示）──
-        QAction *bSuicide = fa->addAction(QStringLiteral("自杀"));
+        QAction *bSuicide = fa->addAction(QStringLiteral("死"));
         bSuicide->setShortcut(QKeySequence(QStringLiteral("Ctrl+Meta+N")));
-        QAction *bRebirth = fa->addAction(QStringLiteral("重生 ⌃⇧⌘N"));
+        QAction *bRebirth = fa->addAction(QStringLiteral("生 ⌃⇧⌘N"));
         bRebirth->setEnabled(false); // 全局热键由 naught-agent 登录项持有
         QObject::connect(bSuicide, &QAction::triggered, &editor, [&editor] { editor.commitSuicide(); });
         QObject::connect(bMo, &QAction::triggered, &editor, [&editor] { editor.mo(); });
