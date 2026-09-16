@@ -632,6 +632,11 @@ public:
         QDir().mkpath(dir);
         const QStringList classics = {
             QStringLiteral(":/fonts/classic/PressStart2P-Regular.ttf"),
+            QStringLiteral(":/fonts/classic/3270-Regular.ttf"),
+            QStringLiteral(":/fonts/classic/CozetteVector.ttf"),
+            QStringLiteral(":/fonts/classic/ProggyClean.ttf"),
+            QStringLiteral(":/fonts/classic/Silkscreen-Regular.ttf"),
+            QStringLiteral(":/fonts/classic/FSEX302.ttf"),
         };
         for (const QString &res : classics) {
             QFile f(res);

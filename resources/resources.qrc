@@ -5,5 +5,17 @@
         <file>fonts/FusionPixel-OFL.txt</file>
         <file>fonts/VT323-Regular.ttf</file>
         <file>fonts/VT323-OFL.txt</file>
+        <file>fonts/classic/PressStart2P-Regular.ttf</file>
+        <file>fonts/classic/PressStart2P-OFL.txt</file>
+        <file>fonts/classic/3270-Regular.ttf</file>
+        <file>fonts/classic/3270-LICENSE.txt</file>
+        <file>fonts/classic/CozetteVector.ttf</file>
+        <file>fonts/classic/Cozette-LICENSE.txt</file>
+        <file>fonts/classic/ProggyClean.ttf</file>
+        <file>fonts/classic/ProggyClean-LICENSE.txt</file>
+        <file>fonts/classic/Silkscreen-Regular.ttf</file>
+        <file>fonts/classic/Silkscreen-OFL.txt</file>
+        <file>fonts/classic/FSEX302.ttf</file>
+        <file>fonts/classic/FSEX302-LICENSE.txt</file>
     </qresource>
 </RCC>

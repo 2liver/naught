@@ -1,0 +1,10 @@
+Fixedsys Excelsior — Distribution Terms (from https://github.com/kika/fixedsys#distribution-terms)
+
+The font was originally authored by Darien Valentine (@bathos) and provided via
+http://www.fixedsysexcelsior.com.
+
+The creator(s) of this content have released it to the public domain.
+For jurisdictions where this is not permitted, it is released under the terms
+of the Creative Commons Zero Dedication (CC0-1.0).
+
+(SPDX: CC0-1.0)
