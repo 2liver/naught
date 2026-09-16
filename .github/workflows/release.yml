@@ -53,7 +53,13 @@ jobs:
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="${{ runner.temp }}/kf6;${{ env.QT_ROOT_DIR }}" ${{ matrix.cmake_args }}
 
       - name: Build
-        run: cmake --build build --config Release --parallel
+        run: cmake --build build --config Release --parallel > build.log 2>&1
+
+      - name: Build diagnostics (on failure)
+        if: failure()
+        run: |
+          grep -iE "error|fatal|undefined" build.log | tail -3 | awk '{print "::error::" $0}'
+          tail -5 build.log | awk '{print "::warning::" $0}'
 
       - name: Verify deployment target (macOS)
         if: runner.os == 'macOS'
@@ -66,20 +72,20 @@ jobs:
         if: runner.os == 'macOS'
         env:
           QT_QPA_PLATFORM: offscreen
-        run: ./build/naught.app/Contents/MacOS/naught --selftest
+        run: ./build/naught.app/Contents/MacOS/naught --selftest > selftest.log 2>&1 || { grep -iE "selftest FAIL" selftest.log | tail -3 | awk '{print "::error::" $0}'; tail -5 selftest.log | awk '{print "::warning::" $0}'; exit 1; }
 
       - name: Selftest (Linux)
         if: runner.os == 'Linux'
         env:
           QT_QPA_PLATFORM: offscreen
-        run: ./build/naught --selftest
+        run: ./build/naught --selftest > selftest.log 2>&1 || { grep -iE "selftest FAIL" selftest.log | tail -3 | awk '{print "::error::" $0}'; tail -5 selftest.log | awk '{print "::warning::" $0}'; exit 1; }
 
       - name: Selftest (Windows)
         if: runner.os == 'Windows'
-        shell: pwsh
+        shell: bash
         env:
           QT_QPA_PLATFORM: offscreen
-        run: .\build\Release\naught.exe --selftest
+        run: ./build/Release/naught.exe --selftest > selftest.log 2>&1 || { grep -iE "selftest FAIL" selftest.log | tail -3 | awk '{print "::error::" $0}'; tail -5 selftest.log | awk '{print "::warning::" $0}'; exit 1; }
 
       - name: Package macOS (zip + dmg)
         if: runner.os == 'macOS'
