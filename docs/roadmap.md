@@ -116,6 +116,7 @@
   7f16a78 路线图 → cdb2497 光标偏移修复 → 23eb0f5 光栅调制批次 → 2c8ac03 物理拟真批次）。
 - 已部署到 `~/Applications/naught.app`（启动台「無」，自包含 Qt+KF6）。
 - **下一步 = M5 GitHub 里程碑**（naught(無) 更名/概念/README EN/打包分发/推送）。
+- 已额外落地：第三台机器苹果 II（白磷 + NTSC 橙/蓝伪影，Cmd+Shift+M 三机循环，e497a90/0c89e16，调色板经子代理调研校准）；字符画逐行打印 + 画布三缩放语义 + 最佳化（950a565）；实验功能并入体系（字符网格→显模式 Cmd+0，屏幕实体→解锁追随视角）；全屏冻结修复（5734eb2）。
 - 已额外落地：字体三级模型（出厂默认删不掉 / 经典库存可删可改名、整个文件夹删除后重播 / 暂时默认跨启动记忆 + 「恢复默认字体」），6 款经典库存（Press Start 2P、IBM 3270、Cozette、ProggyClean、Silkscreen、Fixedsys Excelsior，befadb2）；字符画双缩放（普通=画布/Shift=内容，a506fbf）；插入图片缩放闪退修复（光标越界 scanLine 段错误，a506fbf）；编模式中性白光标（a2ef62f）。
 - 已知环境坑（别再踩）：
   - Qt 6.8+ QImage 画笔引擎层自动乘图像 DPR——快照里**禁止**手动 `p.scale(dpr)`；
