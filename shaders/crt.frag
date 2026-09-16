@@ -63,9 +63,10 @@ void main()
         float eR = max(0.0, dot(col, w) - dot(rp, w));
         float eB = max(0.0, dot(col, w) - dot(lm, w));
         float apple = step(1.5, ubuf.flags.y);
-        float frg = mix(0.30, 0.55, apple);
-        vec3 tR = mix(vec3(1.0, 0.15, 0.02), vec3(1.0, 0.45, 0.05), apple);
-        vec3 tB = mix(vec3(0.02, 0.15, 1.0), vec3(0.10, 0.20, 1.0), apple);
+        // 调研值：橙 #FF6A00、蓝 #3F5FFF，亮边渗色 30-50% 取 0.45
+        float frg = mix(0.30, 0.45, apple);
+        vec3 tR = mix(vec3(1.0, 0.15, 0.02), vec3(1.0, 0.42, 0.0), apple);
+        vec3 tB = mix(vec3(0.02, 0.15, 1.0), vec3(0.25, 0.37, 1.0), apple);
         col += tR * eR * frg;
         col += tB * eB * frg;
     }

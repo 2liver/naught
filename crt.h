@@ -53,16 +53,18 @@ inline const Palette kGreen{
     0.35,                     // glowAlpha（实例同款）
 };
 
-// 苹果 II（1977）：白磷光 + NTSC 复合信号的橙/蓝色差伪影（子代理调研，
-// 占位值待最终校准）。文本模式本身单色白，"彩色"是色差边缘伪影。
+// 苹果 II（1977）：白磷光 + NTSC 复合信号的橙/蓝色差伪影。
+// 调色板按子代理调研校准（Nerdly Pleasures / Retrocomputing SE /
+// mrob.com 交叉印证）：refl（蓝）/ dust（橙）两槽位正好编码
+// NTSC 橙/蓝伪影双色。
 inline const Palette kApple{
-    QColor(0xF2, 0xF2, 0xE6), // ink（暖白磷光）
-    QColor(0x8A, 0x8A, 0x80), // inkDim
-    QColor(0xFF, 0xFF, 0xFF), // cursorBlock（纯白满束流）
-    QColor(0x05, 0x05, 0x08), // bg（微蓝黑，NTSC 黑电平）
-    QColor(0x59, 0x59, 0x66), // scanTint
-    QColor(0xE6, 0xE6, 0xE0), // refl
-    QColor(0xC8, 0xC8, 0xC0), // dust
+    QColor(0xF0, 0xEC, 0xDD), // ink（暖纸白，P4 类白磷光）
+    QColor(0x7A, 0x78, 0x66), // inkDim（低亮老化灰白）
+    QColor(0xC9, 0xD8, 0xEC), // cursorBlock（反相视频冷白块）
+    QColor(0x0A, 0x0A, 0x0C), // bg（近黑保留余晖感）
+    QColor(0x22, 0x30, 0x3F), // scanTint（冷青石板蓝）
+    QColor(0x3E, 0x6F, 0xA8), // refl（冷蓝反光 = 蓝伪影半边）
+    QColor(0x9A, 0x6E, 0x38), // dust（暖橙尘斑 = 橙伪影半边）
     0.38,                     // glowAlpha
 };
 
