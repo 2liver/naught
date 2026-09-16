@@ -1,0 +1,49 @@
+# naught CI（M8）：三平台构建 + 自测。macOS 产物留档（未公证，仅供自用）。
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            qt: 6.9.3
+            extra: ""
+          - os: ubuntu-22.04
+            qt: 6.9.3
+            extra: "libgl1-mesa-dev libxkbcommon-x11-0"
+          - os: windows-2022
+            qt: 6.9.3
+            extra: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ matrix.qt }}
+          cache: true
+      - name: Linux system deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.extra }}
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Selftest (macOS)
+        if: runner.os == 'macOS'
+        run: ./build/naught.app/Contents/MacOS/naught --selftest
+      - name: Selftest (Linux)
+        if: runner.os == 'Linux'
+        run: QT_QPA_PLATFORM=offscreen ./build/naught --selftest
+      - name: Selftest (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          $env:QT_QPA_PLATFORM = "offscreen"
+          .\build\Release\naught.exe --selftest

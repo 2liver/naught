@@ -32,6 +32,10 @@ qt_add_shaders(naught "shaders"
         shaders/crt.frag
 )
 target_link_libraries(naught PRIVATE Qt6::Widgets)
+if(NOT APPLE)
+    # main.mm 的 ObjC 段全在 Q_OS_MACOS 守卫内——非 Apple 按 C++ 编译
+    set_source_files_properties(main.mm PROPERTIES LANGUAGE CXX)
+endif()
 # aqt 打包缺 RHI 的平铺转发头：补上版本化头目录（仅影响本目标）
 if(APPLE)
     target_include_directories(naught PRIVATE
@@ -41,8 +45,9 @@ if(APPLE)
     target_link_libraries(naught PRIVATE "-framework Carbon" "-framework CoreServices")
 endif()
 
-# M6 重生代理：纯 Cocoa 登录项应用（无 Qt 依赖）——launchd 裸进程
+# M6 重生代理：纯 Cocoa 登录项应用（macOS 专属）——launchd 裸进程
 # 收不到系统热键投递，必须作为真正的登录项应用运行
+if(APPLE)
 add_executable(naught-agent naught_agent.mm)
 target_link_libraries(naught-agent PRIVATE
     "-framework Cocoa" "-framework Carbon" "-framework CoreServices")
@@ -56,8 +61,10 @@ add_custom_command(TARGET naught-agent POST_BUILD
             ${CMAKE_BINARY_DIR}/naught-agent.app/Contents/Info.plist
     COMMAND codesign --force --sign -
             ${CMAKE_BINARY_DIR}/naught-agent.app)
+endif()
 
 # 主应用打包时把代理应用嵌进 Resources（安装程序从主包里拷贝布署）
+if(APPLE)
 add_dependencies(naught naught-agent)
 add_custom_command(TARGET naught POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory
@@ -65,6 +72,7 @@ add_custom_command(TARGET naught POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
             ${CMAKE_BINARY_DIR}/naught-agent.app
             $<TARGET_BUNDLE_CONTENT_DIR:naught>/Resources/naught-agent.app)
+endif()
 
 # 语法高亮（可选）：未找到时 编 模式退化为 等宽字体 + 行号
 find_package(KF6SyntaxHighlighting QUIET)

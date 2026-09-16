@@ -4,3 +4,4 @@ build-asan/
 *.user
 .vscode/
 .idea/
+release/

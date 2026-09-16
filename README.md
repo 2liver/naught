@@ -2,6 +2,44 @@
 
 *Write in vain.*
 
+> **naught** /nɔːt/ — one syllable, Old English for *nothing*, *zero*, *無*.
+> To **come to naught** is to dissolve into nothing — 化为乌有.
+> This is a writing app that believes writing should leave no trace:
+> open it, write, close it. Nothing is saved. Nothing persists. When the
+> app dies, a keystroke brings it back — *nothing becomes something*.
+
+**naught** is a zero-UI writing instrument with a faithful optical
+simulation of the phosphor screens of 1975–1982:
+
+- **Amber** — Osborne Executive-class P3 phosphor
+- **Green** — IBM 5100 (1975), P1 phosphor
+- **C64** — a Commodore 64 on a shadow-mask color monitor: 16-color
+  PETSCII palette, real dot-triad phosphor mask, per-machine calibrated
+  afterglow
+- **White** — IBM PC 5150 (1981), CGA white
+
+The screen phenomena are simulated, not the machines: beam spot physics,
+edge diffraction, double-exponential phosphor persistence (calibrated to
+P1/P3/P4/P22 decay curves), rolling scan excitation, warm-up, vignette —
+no menus, no options, no saving. Type on a typewriter-speed canvas of
+ASCII art, format with boxes/trees/centering, or simply let go.
+
+### Quick start
+
+```sh
+git clone https://github.com/2liver/naught.git
+cd naught
+cmake -B build -DCMAKE_PREFIX_PATH=/path/to/Qt/6.9.3/macos
+cmake --build build
+open build/naught.app
+```
+
+`Cmd+T` enters the CRT; `Cmd+Shift+M` cycles machines; `Cmd+N` clears;
+`⌃⌘N` commits suicide; `⌃⇧⌘N` resurrects (a login-item agent,
+installed by `--install`). See below for the full keymap.
+
+---
+
 空白。打开即写，关闭即无。
 
 - 右键 / 双指点按：**摹**（全选并复制）· **空**（清空，可撤销）── **阴** · **阳** ── **涂**（画）· **擦**（橡皮擦）· **消**（清空全部笔迹）── **编**（代码：等宽字体 + 行号 + 语法高亮，无运行无保存）── **显**（回到过去：琥珀磷光 CRT 质感）── **言**（选中行头尾批量加「」，空行跳过）· **隔**（选中的每一行上下补空行，幂等）
