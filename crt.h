@@ -66,16 +66,16 @@ inline const Palette kGreen{
 // （chrome 调色板按子代理调研：默认浅蓝字 #6F7FDC 于蓝屏 #2A1C6E）。
 // 字符画的颜色来自 kC64Colors 的 16 色量化。
 inline const Palette kC64{
-    QColor(0x6F, 0x7F, 0xDC), // ink（默认浅蓝字）
-    QColor(0x4A, 0x54, 0x90), // inkDim
-    QColor(0x7C, 0x8D, 0xFF), // cursorBlock
-    QColor(0x2A, 0x1C, 0x6E), // bg（蓝屏）
+    QColor(0x8A, 0x9A, 0xE8), // ink（默认浅蓝字，提亮：真机蓝字更亮）
+    QColor(0x5E, 0x6A, 0xA6), // inkDim
+    QColor(0x96, 0xA6, 0xFF), // cursorBlock
+    QColor(0x32, 0x22, 0x7E), // bg（蓝屏，略提亮）
     QColor(0x1B, 0x14, 0x50), // scanTint
     QColor(0x40, 0x40, 0xE0), // refl
     QColor(0x5A, 0x5A, 0x6E), // dust
     0.38,                     // glowAlpha
     { 0.08f, 0.08f, 0.07f },  // P22 彩管余晖：快分量 µs 级（帧级几乎不可见），慢分量短
-    { 0.10f, 0.10f, 0.08f },  // 慢分量：P22 实有可见慢余晖（旧值过狠 → 整体偏暗）
+    { 0.16f, 0.16f, 0.12f },  // 慢分量：P22 实有可见慢余晖（整体亮度的一部分）
 };
 
 // C64 标准 16 色（字符画逐字符前景色的量化目标）

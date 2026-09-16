@@ -288,21 +288,31 @@ public:
                 m_exciteClock.start();
             }
             m_lastCharCount = cc;
-            // P3：增量脏区 = 变化范围内所有块（多行粘贴/清空/替换只标
-            // 首行会漏画——旧版单块标法靠 settle 自愈，连续打字时残影）
+            // P3：增量脏区 = 变化块 + 其下方全部。任何编辑（尤其删除/换行）
+            // 都会让下方内容整体位移——只标变化块会让旧内容与新内容叠加
+            // 成亮斑（重印过曝、按住删字行下方亮得一塌糊涂的真凶）
             {
                 QTextBlock blk = document()->findBlock(qMin(from, qMax(0, cc - 1)));
-                const QTextBlock endBlk =
-                    document()->findBlock(qMin(from + added, qMax(0, cc - 1)));
+                const QTextBlock endBlk = document()->findBlock(
+                    qMin(from + qMax(added, removed), qMax(0, cc - 1)));
+                QRect firstR;
                 for (;;) {
                     QRect r = blockBoundingGeometryPub(blk)
                                   .translated(contentOffsetPub()).toAlignedRect()
                                   .translated(viewport()->pos());
                     r = r.intersected(viewport()->rect().translated(viewport()->pos()));
                     m_snapDirty |= r;
+                    if (firstR.isNull() && !r.isNull())
+                        firstR = r;
                     if (blk == endBlk)
                         break;
                     blk = blk.next();
+                }
+                // 下方至视口底全宽纳入：位移区域
+                if (!firstR.isNull()) {
+                    QRect below = viewport()->rect().translated(viewport()->pos());
+                    below.setTop(firstR.top());
+                    m_snapDirty |= below;
                 }
                 m_snapDirty |= m_lastCursorRect;
                 // 激发辉光（cell ±6px 三圈）超出光标矩形——脏区扩展覆盖
