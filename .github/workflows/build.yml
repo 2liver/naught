@@ -29,15 +29,24 @@ jobs:
         with:
           version: ${{ matrix.qt }}
           cache: true
+          # qt_add_shaders/qsb 在独立模块里，qtbase 不带
+          modules: qtshadertools
       - name: Linux system deps
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y ${{ matrix.extra }}
       - name: Configure
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+        # install-qt-action 只导出 QT_ROOT_DIR，不导出 CMAKE_PREFIX_PATH
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="${{ env.QT_ROOT_DIR }}"
       - name: Build
-        run: cmake --build build --parallel
+        # --config Release：VS 多配置生成器默认 Debug
+        run: cmake --build build --parallel --config Release > build.log 2>&1
+      - name: Build diagnostics (on failure)
+        if: failure()
+        run: tail -60 build.log | awk '{print "::error::" $0}'
       - name: Selftest (macOS)
         if: runner.os == 'macOS'
+        env:
+          QT_QPA_PLATFORM: offscreen
         run: ./build/naught.app/Contents/MacOS/naught --selftest
       - name: Selftest (Linux)
         if: runner.os == 'Linux'
