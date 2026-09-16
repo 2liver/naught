@@ -556,32 +556,71 @@ public:
              QChar(0x2501), QChar(0x2503)}, // 粗线
         };
         const auto &s = st[style];
-        const qreal vw = fm.horizontalAdvance(s.v);
-        const qreal tlW = fm.horizontalAdvance(s.tl);
-        const qreal trW = fm.horizontalAdvance(s.tr);
-        const qreal hw = qMax(0.1, fm.horizontalAdvance(s.h));
-        // 笔画中心（ink 范围中点）：fallback 框线字形宽窄不一
-        // （实测 │ 推进 1.8、角 6.0）——按字面推进对齐必然错位，
-        // 必须按笔画中心对齐
+        // 笔画中心（ink 范围中点）：fallback 框线字形宽窄不一，
+        // 按字面推进对齐必然错位——必须按笔画中心对齐
         const auto stemC = [&fm](QChar ch) {
             return fm.leftBearing(ch)
                  + (fm.horizontalAdvance(ch) - fm.leftBearing(ch)
                     - fm.rightBearing(ch)) / 2.0;
         };
-        // 总宽落在横线栅格上——hN 条 ─ 恰好填满两角之间（无取整残余）
+        // 选竖线字形：候选里挑笔画中心最接近两角平均的——左右竖线
+        // 与角的 stem 一致，四边才连得起来（不同机器 fallback 各异）
+        const QChar vCand[3] = { QChar(0x2502), QChar(0x2503), QChar(0x250B) };
+        QChar vBest = vCand[0];
+        const qreal cornerStem = (stemC(s.tl) + stemC(s.tr)) / 2.0;
+        qreal bestErr = 1e9;
+        for (QChar c : vCand) {
+            const qreal err = qAbs(stemC(c) - cornerStem);
+            if (err < bestErr) {
+                bestErr = err;
+                vBest = c;
+            }
+        }
+        const qreal vw = fm.horizontalAdvance(vBest);
+        const qreal tlW = fm.horizontalAdvance(s.tl);
+        const qreal trW = fm.horizontalAdvance(s.tr);
+        const qreal hw = qMax(0.1, fm.horizontalAdvance(s.h));
+        // 渲染级测量：与编辑器同引擎（QTextLayout），fallback 全对——
+        // 字体指标估算只作初值，最终以渲染宽度为准
+        const auto renderedW = [&](const QString &t) {
+            QTextLayout lay(t, activeFont());
+            QTextOption opt;
+            opt.setWrapMode(QTextOption::NoWrap);
+            lay.setTextOption(opt);
+            lay.beginLayout();
+            lay.createLine();
+            lay.endLayout();
+            return lay.lineAt(0).naturalTextWidth();
+        };
         const qreal need = maxW + spw * 2.0 + vw * 2.0;
-        const int hN = qMax(1, int(qCeil((need - tlW - trW) / hw)));
-        const qreal boxW = tlW + trW + hN * hw;
+        int hN = qMax(1, int(qCeil((need - tlW - trW) / hw)));
+        QString topBar = s.tl + QString(hN, s.h) + s.tr;
+        const qreal barW = renderedW(topBar);
+        // 横线不足/超出：按渲染宽度 ±1 修正
+        if (barW < need - hw * 0.5) {
+            topBar = s.tl + QString(hN + 1, s.h) + s.tr;
+        } else if (barW > need + hw * 0.5 && hN > 1) {
+            topBar = s.tl + QString(hN - 1, s.h) + s.tr;
+        }
+        const qreal boxW = renderedW(topBar);
         // 右竖线的笔画中心 = 右角的笔画中心
         const qreal target = (boxW - trW) + stemC(s.tr);
-        QString out = s.tl + QString(hN, s.h) + s.tr + QLatin1Char('\n');
+        QString out = topBar + QLatin1Char('\n');
         for (const QString &l : lines) {
-            const int nSp = qMax(0, int(qRound(
-                (target - vw - spw - lineW(l) - stemC(s.v)) / spw)));
-            out += s.v + QLatin1Char(' ') + l + QString(nSp, QLatin1Char(' '))
-                 + s.v + QLatin1Char('\n');
+            int nSp = qMax(0, int(qRound(
+                (target - vw - spw - lineW(l) - stemC(vBest)) / spw)));
+            auto body = [&](int n) {
+                return vBest + QLatin1Char(' ') + l
+                     + QString(n, QLatin1Char(' ')) + vBest;
+            };
+            const qreal w0 = renderedW(body(nSp));
+            if (w0 < boxW - spw * 0.5)
+                ++nSp; // 渲染宽度为准：不足补一格
+            else if (w0 > boxW + spw * 0.5 && nSp > 0)
+                --nSp;
+            out += body(nSp) + QLatin1Char('\n');
         }
-        out += s.bl + QString(hN, s.h) + s.br;
+        out += s.bl + QString(topBar.size() - 2, s.h) + s.br;
         const int repStart = first.position();
         const int repEnd = last.position() + last.length() - 1;
         c.beginEditBlock();
