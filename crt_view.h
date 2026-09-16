@@ -19,11 +19,11 @@ class QRhiTexture;
 class QRhiTextureRenderTarget;
 class QRhiRenderPassDescriptor;
 
-class Editor;
+#include "crt_source.h"
 
 class CrtView : public QWidget {
 public:
-    explicit CrtView(Editor *editor);
+    explicit CrtView(CrtSource *source);
     ~CrtView() override;
     void markDirty(bool force = false);
     void syncGeometry();
@@ -49,7 +49,7 @@ private:
     void releaseGpu();
     void renderFrame();
 
-    Editor *m_editor = nullptr;
+    CrtSource *m_source = nullptr;
     QRhi *m_r = nullptr;
     QRhiTexture *m_colorTex = nullptr;
     QRhiTextureRenderTarget *m_rt = nullptr;

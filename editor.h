@@ -64,8 +64,12 @@
 #include "line_number_area.h"
 #include "zen_scroll_bar.h"
 
-class Editor : public QPlainTextEdit {
+class Editor : public QPlainTextEdit, public CrtSource {
 public:
+    // CrtSource 几何（窄接口）：
+    QRect sourceRect() const override { return rect(); }
+    QSize sourceViewportSize() const override { return viewport() ? viewport()->size() : QSize(); }
+    QWidget *sourceWidget() const override { return const_cast<Editor *>(this); }
     Editor()
         : QPlainTextEdit()
         , m_holdTimer(this)

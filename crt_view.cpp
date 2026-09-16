@@ -1,7 +1,7 @@
 // crt_view.cpp —— 自有 QRhi（Metal）离屏渲染 + 回读的「显」显示层实现。
 #include "crt_view.h"
 
-#include "editor.h"
+#include "crt_source.h"
 
 #include <QFile>
 #include <QPainter>
@@ -29,9 +29,9 @@ static QShader loadShader(const QString &name)
     return QShader::fromSerialized(f.readAll());
 }
 
-CrtView::CrtView(Editor *editor)
-    : QWidget(editor)
-    , m_editor(editor)
+CrtView::CrtView(CrtSource *source)
+    : QWidget(source ? source->sourceWidget() : nullptr)
+    , m_source(source)
 {
     // alien 覆盖层：指针/滚轮/手势全部穿透到真实组件（非原生控件上
     // WA_TransparentForMouseEvents 完全有效——画布层已验证同款路径）。
@@ -63,8 +63,8 @@ void CrtView::markDirty(bool force)
 void CrtView::syncGeometry()
 {
     // 整面覆盖：文字区+行号区+滚动条全部进入光栅（无任何"未覆盖"黑区）
-    if (m_editor)
-        setGeometry(m_editor->rect());
+    if (m_source)
+        setGeometry(m_source->sourceRect());
 }
 
 void CrtView::showEvent(QShowEvent *)
@@ -250,28 +250,28 @@ void CrtView::renderFrame()
     if (m_forceNow || !throttled) {
         // P3：增量快照——打字只重画脏区（复用上一帧为底）；无脏区信息
         // （环境拍/首次）走全量兜底。滚动/缩放/换机已标全量
-        const bool fullDirty = m_editor->snapshotFullDirty();
-        const QRect dirty = m_editor->consumeSnapshotDirty();
+        const bool fullDirty = m_source->snapshotFullDirty();
+        const QRect dirty = m_source->consumeSnapshotDirty();
         if (fullDirty || m_pending.isNull() || m_pending.size() != m_texSize) {
             m_pending = QImage(m_texSize, QImage::Format_ARGB32);
             m_pending.setDevicePixelRatio(devicePixelRatioF());
-            m_pending.fill(m_editor->crtPalette().bg); // 随调色板（M2）
-            m_editor->paintTextSnapshot(m_pending);
+            m_pending.fill(m_source->crtPalette().bg); // 随调色板（M2）
+            m_source->paintTextSnapshot(m_pending);
         } else if (!dirty.isEmpty()) {
-            m_editor->paintTextSnapshotRegion(m_pending, dirty);
+            m_source->paintTextSnapshotRegion(m_pending, dirty);
         } else {
             m_pending = QImage(m_texSize, QImage::Format_ARGB32);
             m_pending.setDevicePixelRatio(devicePixelRatioF());
-            m_pending.fill(m_editor->crtPalette().bg);
-            m_editor->paintTextSnapshot(m_pending);
+            m_pending.fill(m_source->crtPalette().bg);
+            m_source->paintTextSnapshot(m_pending);
         }
         // 滚动期间跳过余晖+辉光重活（每 80ms 一帧的全屏逐像素 + 模糊
         // 是滚动卡顿大户）；停稳后 settle 标记全量重拍，痕迹自愈
-        if (!m_editor->isScrolling()) {
+        if (!m_source->isScrolling()) {
             Crt::phosphorPersistence(m_pending, m_prev, m_prev2); // 一期+M4：双指数余晖
             m_prev2 = m_prev; // 上上帧（浅拷贝链：写入时分离）
             m_prev = m_pending; // 上一帧（浅拷贝）
-            Crt::phosphorBloom(m_pending, m_editor->crtPalette().glowAlpha); // 二期三件套：真高斯辉光（随调色板）
+            Crt::phosphorBloom(m_pending, m_source->crtPalette().glowAlpha); // 二期三件套：真高斯辉光（随调色板）
         }
         // 入场暖机：因子由 shader 按 timeInfo.y 计算（CPU 逐像素循环
         // 曾引发帧循环冻结，已整体移入 GPU）
@@ -297,25 +297,25 @@ void CrtView::renderFrame()
     // 观察者 = 鼠标（视差每帧更新，不受快照节流）；锁定（M1）= 复现鼠标
     // 离开窗口后的"完美视角"（观察者站在屏幕正前方，内容完整不被裁剪）
     QPointF view;
-    if (m_editor->crtViewLocked()) {
+    if (m_source->crtViewLocked()) {
         view = QPointF(-0.25, -0.12); // 与无鼠标默认分支同值
     } else {
-        view = m_editor->lastMouseViewport();
+        view = m_source->lastMouseViewport();
         if (view.x() < 0) {
             view = QPointF(-0.25, -0.12);
         } else {
             view = QPointF(
-                (view.x() / qMax(1.0, qreal(m_editor->viewport()->width())) - 0.5) * 2.0,
-                (view.y() / qMax(1.0, qreal(m_editor->viewport()->height())) - 0.5) * 2.0);
+                (view.x() / qMax(1.0, qreal(m_source->sourceViewportSize().width())) - 0.5) * 2.0,
+                (view.y() / qMax(1.0, qreal(m_source->sourceViewportSize().height())) - 0.5) * 2.0);
         }
     }
-    const Crt::Palette &pal = m_editor->crtPalette();
+    const Crt::Palette &pal = m_source->crtPalette();
     const float ub[20] = { float(view.x()), float(view.y()),
                            float(m_texSize.width()), float(m_texSize.height()),
                            float(m_clock.elapsed() / 1000.0),
                            m_warmClock.isValid() ? float(m_warmClock.elapsed()) : -1.0f,
-                           m_editor->screenEntityOn() ? 1.0f : 0.0f,
-                           float(m_editor->machine()), // flags: x=屏幕实体, y=机型
+                           m_source->screenEntityOn() ? 1.0f : 0.0f,
+                           float(m_source->machine()), // flags: x=屏幕实体, y=机型
                            pal.scanTint.redF(), pal.scanTint.greenF(), pal.scanTint.blueF(), 1.0f,
                            pal.refl.redF(), pal.refl.greenF(), pal.refl.blueF(), 1.0f,
                            pal.dust.redF(), pal.dust.greenF(), pal.dust.blueF(), 1.0f };
