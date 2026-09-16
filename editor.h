@@ -137,6 +137,29 @@ public:
                 replaceAsciiArt();
         });
 
+        // M3：字符画逐行打印（打字机效果——每行插入触发磷粉激发）
+        m_asciiPrintTimer.setInterval(35);
+        connect(&m_asciiPrintTimer, &QTimer::timeout, this, [this] {
+            if (!m_asciiPrinting)
+                return;
+            if (m_asciiPrintIdx >= m_asciiPrintLines.size()) {
+                m_asciiPrintTimer.stop();
+                m_asciiPrinting = false;
+                m_settingAscii = false;
+                return;
+            }
+            QTextCursor c = textCursor();
+            c.setPosition(m_asciiPrintPos);
+            m_settingAscii = true;
+            c.insertText(m_asciiPrintLines.at(m_asciiPrintIdx)
+                         + ((m_asciiPrintIdx + 1 < m_asciiPrintLines.size())
+                                ? QStringLiteral("\n") : QString()));
+            m_settingAscii = false;
+            m_asciiPrintPos = c.position();
+            m_asciiEnd = m_asciiPrintPos;
+            ++m_asciiPrintIdx;
+        });
+
         // 换成自绘滚动条：命中区恒 18px，把手闲置 10px / 悬停 18px
         auto *vsb = new ZenScrollBar(Qt::Vertical);
         auto *hsb = new ZenScrollBar(Qt::Horizontal);
@@ -164,9 +187,11 @@ public:
         connect(document(), &QTextDocument::contentsChanged, this, [this] {
             wakeCaret();
             m_lastWasInk = false;
-            // M3：手动编辑 = 字符画回归普通文本（程序替换不受影响）
+            // M3：手动编辑 = 字符画回归普通文本（程序打印/替换不受影响）
             if (!m_settingAscii && m_asciiActive) {
                 m_asciiActive = false;
+                m_asciiPrintTimer.stop(); // 打断逐行打印
+                m_asciiPrinting = false;
                 setLineWrapMode(QPlainTextEdit::WidgetWidth);
             }
             // 磷粉激发（二期三件套·回接）：插入的新字符记下位置与时刻，
@@ -615,24 +640,10 @@ public:
             m_crtView->markDirty(true);
     }
 
-    // 实验（M4.5）：两个可叠加开关——屏幕实体（shader 侧边框/曲率/玻璃）
-    // 与字符网格（真机列数：琥珀 80 列 / 绿磷 64 列）
-    bool screenEntityOn() const { return m_screenEntity; }
-    bool fixedGridOn() const { return m_fixedGrid; }
-    void toggleScreenEntity()
-    {
-        m_screenEntity = !m_screenEntity;
-        if (m_crtView)
-            m_crtView->markDirty(true);
-    }
-    void toggleFixedGrid()
-    {
-        m_fixedGrid = !m_fixedGrid;
-        applyZoom();
-        viewport()->update();
-        if (m_crtView)
-            m_crtView->markDirty(true);
-    }
+    // 屏幕实体（原实验功能，M4.5 并入）：追随视角解锁（非锁定）时生效
+    // ——锁定时是干净"完美视角"，解锁后是沉浸的弯曲玻璃屏（不裁字）
+    bool screenEntityOn() const { return m_crt && !m_viewLock; }
+    bool asciiArtActive() const { return m_asciiActive; } // 画布编辑态（立为图勾选）
 
     // ---- 字体管理（「项」·字体区）：用户字体文件夹 + 上/下一个 ----
     static QString fontDir()
@@ -754,9 +765,10 @@ public:
     }
 
     // ---- M3：拖图片 → 字符画（隐藏功能，README 不提及）----
-    // 在打字光标处插入（不覆盖现有文字）。缩放语义：普通捏合/Cmd+=/滚轮
-    // 永远缩放字符（字号，与无图一致）；Shift+捏合 / Shift+Ctrl+滚轮 =
-    // 画布缩放（网格重渲染，画布越大越细腻）。手动编辑即回归普通文本。
+    // 逐行打印（打字机效果，真机感）：每行插入都触发磷粉激发。
+    // 画布缩放（Shift+捏合 / Shift+Ctrl+滚轮）"再打印"：移除旧块 →
+    // 逐行打印新网格。字符画永不重排（NoWrap，防叠行）；画布放大有
+    // 原生分辨率上限（1 源像素 1 格——再大没有更多细节，也防爆炸）。
     void loadAsciiImage(const QImage &img)
     {
         if (img.isNull())
@@ -766,13 +778,14 @@ public:
         const QFontMetricsF fm(activeFont());
         const qreal cw = qMax(1.0, fm.horizontalAdvance(QLatin1Char('M')));
         m_asciiBaseCols = qMax(2, int(viewport()->width() / cw));
-        if (document()->isEmpty())
-            setLineWrapMode(QPlainTextEdit::NoWrap); // 纯画布：不重排
+        setLineWrapMode(QPlainTextEdit::NoWrap); // 永不重排（防叠行）
         QTextCursor c = textCursor();
         m_asciiStart = c.position();
-        c.insertText(artText());
-        m_asciiEnd = c.position();
+        m_asciiEnd = m_asciiStart;
+        m_lastArtStart = m_asciiStart;
+        m_lastArtEnd = m_asciiStart;
         m_asciiActive = true;
+        printAscii(artText(), m_asciiStart);
         if (m_crtView)
             m_crtView->markDirty();
     }
@@ -781,21 +794,39 @@ public:
         const QFontMetricsF fm(activeFont());
         const qreal cw = qMax(1.0, fm.horizontalAdvance(QLatin1Char('M')));
         const qreal ch = qMax(1.0, fm.height());
-        const int cols = qMax(2, int(m_asciiBaseCols * m_asciiScale));
+        // 画布列数 = 倍率 × 基准；上限 = 源图原生分辨率（防爆炸）
+        const int maxCols = qMax(m_asciiBaseCols, m_asciiImage.width());
+        const int cols = qBound(2, int(m_asciiBaseCols * m_asciiScale), maxCols);
         const int rows = qMax(2, int(cols * (qreal(m_asciiImage.height()) / m_asciiImage.width())
                                      * (cw / ch)));
         return Ascii::imageToText(m_asciiImage, cols, rows);
     }
+    // 逐行打印：m_asciiPrintTimer 每拍插入一行（光标跟进，行行激发）
+    void printAscii(const QString &art, int pos)
+    {
+        m_asciiPrintLines = art.split(QLatin1Char('\n'));
+        m_asciiPrintIdx = 0;
+        m_asciiPrintPos = pos;
+        m_asciiPrinting = true;
+        m_asciiPrintTimer.start();
+    }
     // 「立为图」：把选区栅格化成字符画的源图——之后 Shift+缩放即可调
-    // 画布（网格重渲染）。编辑过的字符画想重新锁定画布，选中它再立为图
-    // 即可（编辑成果保留进源图）。选中任意文字也能立为图。
+    // 画布（网格重渲染）。无选区时自动复选上次立为图的字符；没有上次
+    // 则静默无效果。编辑过的字符画选中再立为图即可（编辑成果保留）。
     void declareArtFromSelection()
     {
         QTextCursor c = textCursor();
-        if (!c.hasSelection())
-            return;
-        const int start = c.selectionStart();
-        const int end = c.selectionEnd();
+        int start = -1, end = -1;
+        if (c.hasSelection()) {
+            start = c.selectionStart();
+            end = c.selectionEnd();
+        } else if (m_lastArtStart >= 0 && m_lastArtEnd > m_lastArtStart
+                   && m_lastArtEnd <= document()->characterCount()) {
+            start = m_lastArtStart; // 自动复选上次立为图的字符
+            end = m_lastArtEnd;
+        } else {
+            return; // 无选区且无上次 → 无任何影响
+        }
         QTextCursor t = textCursor();
         t.setPosition(start);
         t.setPosition(end, QTextCursor::KeepAnchor);
@@ -827,21 +858,25 @@ public:
         m_asciiBaseCols = maxLen; // 当前观感：列数 = 选区最长行
         m_asciiStart = start;
         m_asciiEnd = end;
+        m_lastArtStart = start;
+        m_lastArtEnd = end;
         m_asciiActive = true;
     }
 
-    // 用新画布尺寸原位替换已插入的字符画（不产生重复）
+    // 用新画布尺寸原位替换已插入的字符画（移除旧块 → 再打印）
     void replaceAsciiArt()
     {
         if (!m_asciiActive || m_asciiImage.isNull())
             return;
+        m_asciiPrintTimer.stop();
+        m_asciiPrinting = false;
         QTextCursor c = textCursor();
         c.setPosition(m_asciiStart);
-        c.setPosition(m_asciiEnd, QTextCursor::KeepAnchor);
-        m_settingAscii = true;
-        c.insertText(artText());
-        m_settingAscii = false;
-        m_asciiEnd = c.position();
+        c.setPosition(qMax(m_asciiEnd, m_asciiPrintPos), QTextCursor::KeepAnchor);
+        c.removeSelectedText();
+        m_asciiEnd = m_asciiStart;
+        m_asciiPrintPos = m_asciiStart;
+        printAscii(artText(), m_asciiStart);
         if (m_crtView)
             m_crtView->markDirty(true);
     }
@@ -856,6 +891,17 @@ public:
             m_asciiRenderClock.restart();
         }
         m_asciiSettleTimer.start(120); // 手势停止后补渲染最后一拍
+    }
+    // 画布最佳化（Cmd+0，字符画在场时）：网格贴合窗口——无论字号大小
+    // 都不叠行、不溢出（缩放放大的归位键）
+    void optimizeAsciiCanvas()
+    {
+        if (!m_asciiActive || m_asciiImage.isNull())
+            return;
+        const QFontMetricsF fm(activeFont());
+        const qreal cw = qMax(1.0, fm.horizontalAdvance(QLatin1Char('M')));
+        m_asciiScale = qBound(0.2, qreal(viewport()->width()) / cw / m_asciiBaseCols, 8.0);
+        replaceAsciiArt();
     }
 
 
@@ -924,21 +970,28 @@ public:
 
     void zoom(int delta)
     {
-        m_fixedGrid = false; // 实验·字符网格：手动缩放即退出网格模式
         applyAnchoredZoom(m_size + delta); // 缩放字符（字号）——与无图时一致
     }
 
     void zoomTo(qreal size)
     {
-        m_fixedGrid = false; // 实验·字符网格：手动缩放即退出网格模式
         applyAnchoredZoom(size);
     }
 
     void zoomReset()
     {
         if (m_asciiActive) {
-            m_asciiScale = 1.0;
-            replaceAsciiArt(); // 画布倍率复位
+            optimizeAsciiCanvas(); // 画布最佳化：网格贴合窗口
+            return;
+        }
+        if (m_crt) {
+            // 显·Cmd+0 = 机器原生网格（原实验·字符网格并入）：琥珀 80 列 /
+            // 绿磷 64 列——真机的"原生分辨率"
+            const int cols = m_machineGreen ? 64 : 80;
+            m_size = qMax(6.0, qreal(viewport()->width()) / cols
+                                   / (m_machineGreen ? 1.25 : 1.0));
+            applyAnchoredZoom(m_size);
+            return;
         }
         applyAnchoredZoom(m_baseSize);
     }
@@ -1644,28 +1697,24 @@ public:
                 qWarning("selftest FAIL: view lock re-toggle failed");
                 return false;
             }
-            // M4.5 实验：字符网格（真机列数）+ 屏幕实体（可叠加、缩放退格）
-            e.toggleFixedGrid();
+            // M4.5 并入：显·Cmd+0 = 机器原生网格（80 列）；屏幕实体随
+            // 追随视角解锁生效（screenEntityOn == !locked）
+            e.zoomReset();
             {
                 const QFont gf = e.document()->defaultFont();
                 const int wantPx = qMax(6, e.viewport()->width() / 80);
                 if (qAbs(gf.pixelSize() - wantPx) > 1) {
-                    qWarning("selftest FAIL: fixed grid font size %d want %d",
+                    qWarning("selftest FAIL: crt Cmd+0 grid size %d want %d",
                              gf.pixelSize(), wantPx);
                     return false;
                 }
             }
-            e.zoom(1); // 手动缩放退出网格模式
-            if (e.fixedGridOn()) {
-                qWarning("selftest FAIL: zoom did not exit fixed grid");
-                return false;
-            }
-            e.toggleScreenEntity();
+            e.toggleViewLock(); // 解锁 → 屏幕实体生效
             if (!e.screenEntityOn()) {
-                qWarning("selftest FAIL: screen entity toggle failed");
+                qWarning("selftest FAIL: screen entity not tied to unlocked view");
                 return false;
             }
-            e.toggleScreenEntity();
+            e.toggleViewLock(); // 重新锁定 → 实体关（干净完美视角）
             // M2：切换计算机——默认琥珀，切绿磷（文字/底色/字体随调色板与
             // 出厂字库），切回
             if (e.crtPalette().ink != Crt::kInk) {
@@ -1823,9 +1872,16 @@ public:
                          lines[0].at(0).toLatin1(), lines[0].at(7).toLatin1());
                 return false;
             }
-            // 编辑器路径冒烟：空文档插入 → 整页字符画；非空文档 → 光标处插入
+            // 编辑器路径冒烟：空文档插入 → 逐行打印出整页字符画；
+            // 非空文档 → 光标处插入（不覆盖）
+            auto waitPrint = [] {
+                QEventLoop lp;
+                QTimer::singleShot(600, &lp, &QEventLoop::quit);
+                lp.exec(); // 打字机打印 ~35ms/行
+            };
             e.setPlainText(QString());
             e.loadAsciiImage(simg);
+            waitPrint();
             {
                 const QString doc = e.toPlainText();
                 const QStringList dl = doc.split(QLatin1Char('\n'));
@@ -1850,6 +1906,7 @@ public:
             {
                 e.moveCursor(QTextCursor::End);
                 e.loadAsciiImage(simg);
+                waitPrint();
                 const QString doc = e.toPlainText();
                 if (!doc.startsWith(QStringLiteral("無\n")) || doc.size() < 10) {
                     qWarning("selftest FAIL: ascii art insert overwrote existing text");
@@ -1870,7 +1927,8 @@ public:
                 }
                 e.setPlainText(QStringLiteral("無\n")); // 还原，防污染后续
             }
-            // 「立为图」：任意选区 → 立为图 → 画布缩放可用
+            // 「立为图」：任意选区 → 立为图 → 画布缩放（再打印）可用；
+            // 无选区时复选上次范围
             {
                 e.setPlainText(QStringLiteral("一二三\n四五六\n"));
                 e.selectAll();
@@ -1880,7 +1938,7 @@ public:
                     return false;
                 }
                 e.zoomAsciiCanvas(1.2);
-                QApplication::processEvents();
+                waitPrint();
                 if (e.toPlainText().isEmpty()) {
                     qWarning("selftest FAIL: declare-art canvas zoom emptied doc");
                     return false;
@@ -2560,15 +2618,9 @@ private:
     {
         if (m_crt) {
             // 机器字符 ROM：出厂/手选字体；整数像素号（12px 为设计原大），
-            // 绿磷 VT323 设计号偏大，放大 1.25×；无抗锯齿。
-            // 实验·字符网格：像素号锁定为真机列数（琥珀 80 列 / 绿磷 64 列）
+            // 绿磷 VT323 设计号偏大，放大 1.25×；无抗锯齿
             QFont f = QFont(crtFontFamily());
-            int px = qMax(6, qRound(m_size * (m_machineGreen ? 1.25 : 1.0)));
-            if (m_fixedGrid) {
-                const int cols = m_machineGreen ? 64 : 80;
-                px = qMax(6, viewport()->width() / cols);
-            }
-            f.setPixelSize(px);
+            f.setPixelSize(qMax(6, qRound(m_size * (m_machineGreen ? 1.25 : 1.0))));
             return f;
         }
         QFont f = m_codeMode ? m_codeFont : m_baseFont;
@@ -2943,8 +2995,13 @@ private:
     int m_asciiEnd = 0;
     QTimer m_asciiSettleTimer;   // 画布缩放尾拍兜底
     QElapsedTimer m_asciiRenderClock; // 画布缩放 80ms 节流
-    bool m_screenEntity = false; // 实验·屏幕实体（M4.5）
-    bool m_fixedGrid = false;    // 实验·字符网格（M4.5）
+    QTimer m_asciiPrintTimer;    // 字符画逐行打印
+    QStringList m_asciiPrintLines;
+    int m_asciiPrintIdx = 0;
+    int m_asciiPrintPos = 0;
+    bool m_asciiPrinting = false;
+    int m_lastArtStart = -1;     // 上次立为图/拖图的范围（无选区时复选）
+    int m_lastArtEnd = -1;
     struct InkOp {
         QVector<Canvas::InkStroke> before;
         QVector<Canvas::InkStroke> after;
