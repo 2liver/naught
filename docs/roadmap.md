@@ -136,6 +136,7 @@
 - 已部署到 `~/Applications/naught.app`（启动台「無」，自包含 Qt+KF6）。
 - **下一步 = M7 重构与性能**（crt 管线出 editor.h → crt.{h,cpp}；bench 驱动优化）；M8 GitHub 仍最后。M6 已落地（06457a8）：自杀 ⌃⌘N（「项」菜单 + Control+Meta 双修饰键路由）、--agent 登录项代理（Carbon 全局热键 ⌃⇧⌘N → LSOpen 主应用，无授权要求）、--install 安装程序（plist + launchctl + lsregister，幂等）。**坑：QDir(applicationFilePath) 会把二进制名当目录导致 canonical 为空——用 applicationDirPath。**
 - 已额外落地：四机循环——琥珀/绿磷/**C64 真彩**（16 色逐字符前景色字符画，8f72154）/**IBM PC 5150 白磷**（Fixedsys Excelsior CC0 字库，d7764f1）；切机/切编即时重印（d7764f1）；苹果 II 白磷已归档（NTSC 伪影资料存档案区）。字符画逐行打印 + 画布三缩放语义 + 最佳化（950a565）；实验功能并入体系（字符网格→显模式 Cmd+0，屏幕实体→解锁追随视角）；全屏冻结修复（5734eb2）。
+- 已落地（M7 P1 脏驱动渲染，8b95cd2）：无变化跳过整链（快照+GPU+回读），环境拍 120ms 保底滚动带/颗粒/余晖；块光标闪烁显式标脏。闲置 CPU 从持续 12.5fps 全链降到 8fps 环境拍。
 - 已落地（项目更名 wu→naught + 菜单快捷键父窗口绑定）：快捷键无需先点开菜单；M7 继续中。
 - 已落地（框终版细节 + Metal 后端探测）：竖线原生优先 + 细空格半步；ensureRhi 后端探测回退（Metal→Vulkan→D3D11→D3D12→GLES2→Null），私有头 qrhimetal_p.h 移除——Windows/Linux 编译命门拆除。
 - 已落地（060ae1f）菜单改名（死/生、模拟显像管、编程高亮）；框对齐根治（探针实测 fallback 框线字形推进 │=1.8 vs 角=6.0——改按笔画中心对齐）；M7 开工首批三修（彩色行越界钳位/光标 span 除零防御/双栈撤销复位）。M7 剩余清单：看门狗解绑回读、Metal 后端探测回退（跨平台命门）、脏驱动回读/上屏（P1）、bloom 移 shader（P2）、快照分块、editor.h 拆分、取证清理、日志轮转、跨平台 CI。
