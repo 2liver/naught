@@ -2051,6 +2051,22 @@ protected:
         QPlainTextEdit::dropEvent(event);
     }
 
+    // 全屏/激活后窗口易失焦（macOS 全屏过渡会换 NSWindow）：
+    // 快捷键、光标、捏合全依赖编辑器焦点——拿回焦点即自愈
+    void changeEvent(QEvent *event) override
+    {
+        QPlainTextEdit::changeEvent(event);
+        if (event->type() == QEvent::WindowStateChange) {
+            QTimer::singleShot(0, this, [this] {
+                activateWindow();
+                setFocus();
+            });
+        }
+        if (event->type() == QEvent::ActivationChange && isActiveWindow()) {
+            setFocus();
+        }
+    }
+
     void keyPressEvent(QKeyEvent *event) override
     {
         wakeCaret();
