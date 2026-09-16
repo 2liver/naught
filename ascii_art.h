@@ -119,7 +119,7 @@ inline QString imageToTextColors(const QImage &src, int cols, int rows,
             const int ag = n ? int(sg / n) : 0;
             const int ab = n ? int(sb / n) : 0;
             int best = 0;
-            long bestD = 1L << 60;
+            qint64 bestD = 1LL << 60;
             for (int p = 0; p < 16; ++p) {
                 const int dr = ar - palette[p].red();
                 const int dg = ag - palette[p].green();

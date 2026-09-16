@@ -5,3 +5,5 @@ build-asan/
 .vscode/
 .idea/
 release/
+release/
+aqtinstall.log

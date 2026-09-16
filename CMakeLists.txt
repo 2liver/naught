@@ -36,11 +36,17 @@ if(NOT APPLE)
     # main.mm 的 ObjC 段全在 Q_OS_MACOS 守卫内——非 Apple 按 C++ 编译
     set_source_files_properties(main.mm PROPERTIES LANGUAGE CXX)
 endif()
-# aqt 打包缺 RHI 的平铺转发头：补上版本化头目录（仅影响本目标）
+# Qt 6.9 的 QRhi 公共头（rhi/qrhi.h 等）只存在于版本化目录，且官方
+# 打包缺 rhi 的平铺转发头——代码用 <rhi/...>，这里把版本化目录补进
+# include path（三平台同一套路径规则，Qt6::Gui 的 usage requirement 不含它）
 if(APPLE)
     target_include_directories(naught PRIVATE
-        "${QT6_INSTALL_PREFIX}/lib/QtGui.framework/Versions/A/Headers/${Qt6_VERSION}"
         "${QT6_INSTALL_PREFIX}/lib/QtGui.framework/Versions/A/Headers/${Qt6_VERSION}/QtGui")
+else()
+    target_include_directories(naught PRIVATE
+        "${QT6_INSTALL_PREFIX}/include/QtGui/${Qt6_VERSION}/QtGui")
+endif()
+if(APPLE)
     # M6：全局重生热键（RegisterEventHotKey）与 LaunchServices（LSOpen）
     target_link_libraries(naught PRIVATE "-framework Carbon" "-framework CoreServices")
 endif()

@@ -6,8 +6,8 @@
 #include <QFile>
 #include <QPainter>
 #include <QResizeEvent>
-#include <QtGui/rhi/qrhi.h>
-#include <QtGui/rhi/qshader.h>
+#include <rhi/qrhi.h>
+#include <rhi/qshader.h>
 
 static void shaderLog(const QString &s)
 {

@@ -26,8 +26,10 @@
 #include <QTextCursor>
 #include <QTimer>
 
+#ifdef Q_OS_MACOS
 #include <sys/types.h>
 #include <unistd.h>
+#endif
 
 #ifdef Q_OS_MACOS
 #include <Carbon/Carbon.h>        // RegisterEventHotKey（无需辅助功能授权）
