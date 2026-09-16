@@ -136,6 +136,7 @@
 - 已部署到 `~/Applications/naught.app`（启动台「無」，自包含 Qt+KF6）。
 - **下一步 = M7 重构与性能**（crt 管线出 editor.h → crt.{h,cpp}；bench 驱动优化）；M8 GitHub 仍最后。M6 已落地（06457a8）：自杀 ⌃⌘N（「项」菜单 + Control+Meta 双修饰键路由）、--agent 登录项代理（Carbon 全局热键 ⌃⇧⌘N → LSOpen 主应用，无授权要求）、--install 安装程序（plist + launchctl + lsregister，幂等）。**坑：QDir(applicationFilePath) 会把二进制名当目录导致 canonical 为空——用 applicationDirPath。**
 - 已额外落地：四机循环——琥珀/绿磷/**C64 真彩**（16 色逐字符前景色字符画，8f72154）/**IBM PC 5150 白磷**（Fixedsys Excelsior CC0 字库，d7764f1）；切机/切编即时重印（d7764f1）；苹果 II 白磷已归档（NTSC 伪影资料存档案区）。字符画逐行打印 + 画布三缩放语义 + 最佳化（950a565）；实验功能并入体系（字符网格→显模式 Cmd+0，屏幕实体→解锁追随视角）；全屏冻结修复（5734eb2）。
+- 二轮审查必修项落地（视差/墨迹 markDirty、多块脏区、原生菜单 + ApplicationShortcut、setDark 唤醒、读回尺寸值捕获）；剩余低优项（crt.cpp 拆分、日志真滚动、bench 压力段）随 M8。
 - 已落地（M7 架构解耦：CrtSource 窄接口）：crt_view 不再 include editor.h，契约集中。M7 收官；剩余跨平台 CI 随 M8 GitHub。
 - 已落地（M7 P3 快照增量重拍，a8098d3）：打字只重画脏区（变化块+光标旧新位+辉光余量），滚动/缩放/换机全量；逐字节哨兵（衰减归零精确相等）；滚动条点击测试补沉降。M7 剩余：editor.h 拆分、跨平台 CI（随 M8）。
 - 已落地（M7 加固批，be25097）：撤销基线回归（框/居中 = 一步撤销哨兵）、字体扫描路径去重、代理热键被占 5s 重试。M7 剩余：快照分块、editor.h 拆分、跨平台 CI（随 M8 GitHub）。
