@@ -150,9 +150,11 @@ void main()
             col *= stripe(sp.x, 0.0, 1.0, beamW, grad);
         }
     }
-    float scanline = step(0.5, fract(sp.y));
-    col *= 1.0 - 0.18 * scanline;
-    col *= 1.0 - 0.06 * scanline * ubuf.scanTint.rgb;
+    // 扫描线：2 物理像素周期柔波（正弦）。旧版硬阶梯 step() 与像素格
+    // 拍频形成摩尔纹——静态的宽窄黑条（用户报）；正弦无锯齿、无拍频
+    float sl = 0.5 + 0.5 * sin(sp.y * 3.14159265);
+    col *= 1.0 - 0.14 * sl;
+    col *= 1.0 - 0.05 * sl * ubuf.scanTint.rgb;
 
     // 噪声与灰尘：细颗粒闪烁 + 稀疏灰尘点（时间驱动，极克制）
     {

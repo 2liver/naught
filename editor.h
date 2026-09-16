@@ -157,23 +157,42 @@ public:
                 m_asciiPrinting = false;
                 endAsciiEditBlock(); // 整轮移除+重印 = 一步撤销（防逐行残步）
                 m_settingAscii = false;
+                // 打印结束：CRT 一次性追拍（打印期间已解耦，见下）
+                if (m_crtView) {
+                    m_crtView->markDirty();
+                    m_crtSettleTimer.start(400);
+                }
                 return;
             }
             QTextCursor c = textCursor();
             c.setPosition(m_asciiPrintPos);
             m_settingAscii = true;
-            if (m_asciiColors.isEmpty())
-                c.insertText(m_asciiPrintLines.at(m_asciiPrintIdx));
-            else
-                insertColoredLine(c, m_asciiPrintIdx); // C64 真彩：逐字符前景色
-            if (m_asciiPrintIdx + 1 < m_asciiPrintLines.size())
-                c.insertText(QStringLiteral("\n"));
+            // 行块打印：每拍插入多行 = 每拍一次重排——总拍数 ~40、
+            // 间隔 40ms → 总时长 ~1.6s。旧版逐行插入：文档重排成本
+            // ×行数，全屏 200+ 行时 20-30 秒
+            const int end = qMin(m_asciiPrintIdx + m_asciiLinesPerTick,
+                                 m_asciiPrintLines.size());
+            if (m_asciiColors.isEmpty()) {
+                QStringList chunk;
+                for (int i = m_asciiPrintIdx; i < end; ++i)
+                    chunk.append(m_asciiPrintLines.at(i));
+                QString txt = chunk.join(QLatin1Char('\n'));
+                if (end < m_asciiPrintLines.size())
+                    txt += QLatin1Char('\n');
+                c.insertText(txt);
+            } else {
+                for (int i = m_asciiPrintIdx; i < end; ++i) {
+                    insertColoredLine(c, i); // C64 真彩：逐字符前景色
+                    if (i + 1 < m_asciiPrintLines.size())
+                        c.insertText(QStringLiteral("\n"));
+                }
+            }
             m_settingAscii = false;
             m_asciiPrintPos = c.position();
             m_asciiEnd = m_asciiPrintPos;
             m_lastArtStart = m_asciiStart; // 打印推进时同步"上次范围"
             m_lastArtEnd = m_asciiEnd;
-            ++m_asciiPrintIdx;
+            m_asciiPrintIdx = end;
         });
 
         // 换成自绘滚动条：命中区恒 18px，把手闲置 10px / 悬停 18px
@@ -235,7 +254,10 @@ public:
             // 行号区：文档一变立即重绘，否则清空/换行不会刷新（假行号）
             m_canvas->update();
             updateGutterWidth();
-            if (m_crtView) {
+            // 打印期间不解耦的话：每拍标脏 → CRT 全屏快照（余晖+辉光，
+            // CPU 大户）霸占主线程 → 打印拍被饿死（全屏 20-30s 的元凶）。
+            // 打印中跳过，收尾拍（打印定时器末拍）一次性追拍
+            if (m_crtView && !m_asciiPrinting) {
                 m_crtView->markDirty();
                 m_crtSettleTimer.start(400); // 打字停顿后半拍重拍（痕迹自愈）
             }
@@ -469,13 +491,26 @@ public:
         if (last.position() == c.selectionEnd() && last != first)
             last = last.previous(); // 选区恰在行首结束：上一行才是最后受影响行
         QStringList lines;
-        int maxW = 1;
         for (QTextBlock b = first;; b = b.next()) {
             lines.append(b.text());
-            maxW = qMax(maxW, displayWidth(lines.last()));
             if (b == last)
                 break;
         }
+        // 按字体真实推进像素级对齐：框宽 = 最长行宽 + 左右各一格空白。
+        // 旧版用 CJK=2 的字符格计数——与字体实际推进不符时右边
+        // 多出一大截（用户报）。这里每字符量推进、空格与框线也量推进，
+        // 任何字体/混排都严丝合缝。
+        const QFontMetricsF fm(activeFont());
+        const qreal spw = qMax(0.1, fm.horizontalAdvance(QLatin1Char(' ')));
+        const auto lineW = [&](const QString &t) {
+            qreal w = 0.0;
+            for (QChar ch : t)
+                w += fm.horizontalAdvance(ch);
+            return w;
+        };
+        qreal maxW = 0.0;
+        for (const QString &l : lines)
+            maxW = qMax(maxW, lineW(l));
         const struct {
             QChar tl, tr, bl, br, h, v;
         } st[4] = {
@@ -489,15 +524,18 @@ public:
              QChar(0x2501), QChar(0x2503)}, // 粗线
         };
         const auto &s = st[style];
-        const int pad = 1;
-        QString out = s.tl + QString(maxW + pad * 2, s.h) + s.tr
-                    + QLatin1Char('\n');
+        const qreal vw = fm.horizontalAdvance(s.v);
+        const qreal boxW = maxW + spw * 2.0 + vw * 2.0;
+        const qreal hw = qMax(0.1, fm.horizontalAdvance(s.h));
+        const int hN = qMax(1, int(qCeil((boxW - fm.horizontalAdvance(s.tl)
+                                          - fm.horizontalAdvance(s.tr)) / hw)));
+        QString out = s.tl + QString(hN, s.h) + s.tr + QLatin1Char('\n');
         for (const QString &l : lines) {
-            out += s.v + QLatin1Char(' ') + l
-                 + QString(maxW - displayWidth(l) + pad, QLatin1Char(' '))
+            const int nSp = qMax(0, int(qCeil((boxW - vw * 2.0 - spw - lineW(l)) / spw)));
+            out += s.v + QLatin1Char(' ') + l + QString(nSp, QLatin1Char(' '))
                  + s.v + QLatin1Char('\n');
         }
-        out += s.bl + QString(maxW + pad * 2, s.h) + s.br;
+        out += s.bl + QString(hN, s.h) + s.br;
         const int repStart = first.position();
         const int repEnd = last.position() + last.length() - 1;
         c.beginEditBlock();
@@ -536,6 +574,9 @@ public:
         if (kept.isEmpty())
             return;
         const QString joined = kept.join(QLatin1Char(' '));
+        m_joinMemory = sel; // 记住原文：还原 = 原样恢复（可逆）
+        m_joinJoined = joined;
+        m_joinMemoryValid = true;
         c.beginEditBlock();
         c.setPosition(repStart);
         c.setPosition(repEnd, QTextCursor::KeepAnchor);
@@ -564,10 +605,42 @@ public:
             repEnd = lastBlk.position() + qMax(0, lastBlk.length() - 1);
         }
         const QString text = doc->toPlainText().mid(repStart, repEnd - repStart);
-        if (!text.contains(QLatin1Char(';')) && !text.contains(QLatin1Char('{'))
-            && !text.contains(QLatin1Char('}')))
+        // 1) 刚压完且内容未再编辑：原样恢复（压行/还原可逆）
+        if (m_joinMemoryValid && text == m_joinJoined) {
+            m_joinMemoryValid = false;
+            c.beginEditBlock();
+            c.setPosition(repStart);
+            c.setPosition(repEnd, QTextCursor::KeepAnchor);
+            c.insertText(m_joinMemory);
+            c.endEditBlock();
+            c.setPosition(repStart);
+            c.setPosition(repStart + m_joinMemory.size(), QTextCursor::KeepAnchor);
+            setTextCursor(c);
+            wakeCaret();
             return;
+        }
         QString out;
+        const bool hasCode = text.contains(QLatin1Char(';'))
+                          || text.contains(QLatin1Char('{'))
+                          || text.contains(QLatin1Char('}'));
+        if (!hasCode) {
+            // 2) 散文：按句读（。！？…!?）切回一行一句（无句读则静默）
+            bool any = false;
+            for (QChar ch : text) {
+                out += ch;
+                if (ch == QChar(0x3002) || ch == QChar(0xFF01) || ch == QChar(0xFF1F)
+                    || ch == QChar(0x2026) || ch == QLatin1Char('!')
+                    || ch == QLatin1Char('?')) {
+                    out += QLatin1Char('\n');
+                    any = true;
+                }
+            }
+            if (!any)
+                return;
+            out = out.trimmed(); // 尾部句读后的换行并成一段
+            if (out.isEmpty())
+                return;
+        } else {
         int indent = 0;
         int paren = 0;
         const auto ind = [&indent] { return QString(2 * indent, QLatin1Char(' ')); };
@@ -612,6 +685,7 @@ public:
                 out += ch;
             }
         }
+        }
         out.replace(QRegularExpression(QStringLiteral("\n{3,}")), QStringLiteral("\n\n"));
         out = out.trimmed();
         c.beginEditBlock();
@@ -654,8 +728,11 @@ public:
             const QString line = raw.trimmed();
             if (line.isEmpty())
                 continue;
-            const bool isDir = line.endsWith(QLatin1Char('/'));
-            QStringList parts = line.split(QLatin1Char('/'), Qt::SkipEmptyParts);
+            const bool isDir = line.endsWith(QLatin1Char('/'))
+                            || line.endsWith(QLatin1Char('\\'));
+            // '/' 与 '\' 都按层级分隔（Windows 路径无需预处理）
+            QStringList parts =
+                line.split(QRegularExpression(QStringLiteral("[\\\\/]")), Qt::SkipEmptyParts);
             Node *node = &root;
             for (int i = 0; i < parts.size(); ++i) {
                 const QString name = parts.at(i);
@@ -1276,17 +1353,17 @@ public:
             i = j;
         }
     }
-    // 逐行打印：m_asciiPrintTimer 每拍插入一行（光标跟进，行行激发）。
-    // 间隔自适应行数：总时长 ~1.6s 封顶（真机一帧即满屏，打印是剧场
-    // 不是机器速度——大图不能等比变慢），8–45ms/行
+    // 逐块打印：m_asciiPrintTimer 每拍插入一个行块（光标跟进，行行激发）。
+    // 每拍一次文档重排（成本大户），总拍数 ~40、间隔 40ms → 总时长
+    // ~1.6s 不随分辨率变慢（真机一帧满屏，打印是剧场不是机器速度）
     void printAscii(const QString &art, int pos)
     {
         m_asciiPrintLines = art.split(QLatin1Char('\n'));
         m_asciiPrintIdx = 0;
         m_asciiPrintPos = pos;
         m_asciiPrinting = true;
-        m_asciiPrintTimer.setInterval(
-            qBound(8, 1600 / qMax(1, m_asciiPrintLines.size()), 45));
+        m_asciiLinesPerTick = qMax(1, m_asciiPrintLines.size() / 40);
+        m_asciiPrintTimer.setInterval(40);
         m_asciiPrintTimer.start();
     }
     // 画布合并撤销策略：程序写入（移除+整轮重印）期间暂停撤销记录。
@@ -2399,10 +2476,11 @@ public:
         {
             e.setPlainText(QStringLiteral("無无\nA\n"));
             e.selectAll();
-            e.formatBox(0); // 单线框（CJK 双格对齐）
+            e.formatBox(0); // 单线框（字体真实推进对齐）
             const QString boxed = e.toPlainText();
-            if (!boxed.startsWith(QStringLiteral("┌──────┐"))
-                || !boxed.endsWith(QStringLiteral("└──────┘\n"))) {
+            if (!boxed.startsWith(QStringLiteral("┌"))
+                || !boxed.endsWith(QStringLiteral("┘\n"))
+                || !boxed.contains(QStringLiteral("無无"))) {
                 qWarning("selftest FAIL: box render wrong: %s",
                          boxed.toUtf8().constData());
                 return false;
@@ -2412,6 +2490,21 @@ public:
             e.joinLinesTo(); // 压行
             if (e.toPlainText() != QStringLiteral("一 二 三 四")) {
                 qWarning("selftest FAIL: join lines wrong");
+                return false;
+            }
+            e.selectAll();
+            e.restoreLines(); // 还原 = 原样恢复（可逆）
+            if (e.toPlainText() != QStringLiteral("一 二\n三\n\n四\n")) {
+                qWarning("selftest FAIL: restore lines wrong: %s",
+                         e.toPlainText().toUtf8().constData());
+                return false;
+            }
+            e.setPlainText(QStringLiteral("甲。乙！丙？\n"));
+            e.selectAll();
+            e.restoreLines(); // 无记忆、无代码分隔符 → 按句读切
+            if (e.toPlainText() != QStringLiteral("甲。\n乙！\n丙？")) {
+                qWarning("selftest FAIL: prose restore wrong: %s",
+                         e.toPlainText().toUtf8().constData());
                 return false;
             }
             e.setPlainText(QStringLiteral("if (a;b) { x; y } z;"));
@@ -2425,9 +2518,7 @@ public:
             e.selectAll();
             e.pathsToTree(); // 路径 → 树
             const QString tree = e.toPlainText();
-            if (!tree.contains(QStringLiteral("├── "))
-                || !tree.contains(QStringLiteral("└── "))
-                || !tree.contains(QStringLiteral("b/"))) {
+            if (tree != QStringLiteral("├── a\n└── b/\n    ├── c\n    └── d/")) {
                 qWarning("selftest FAIL: pathsToTree wrong: %s",
                          tree.toUtf8().constData());
                 return false;
@@ -2436,6 +2527,14 @@ public:
             e.treeToPaths(); // 树 → 路径（往返必须还原）
             if (e.toPlainText() != QStringLiteral("a\nb/c\nb/d/")) {
                 qWarning("selftest FAIL: treeToPaths roundtrip wrong: %s",
+                         e.toPlainText().toUtf8().constData());
+                return false;
+            }
+            e.setPlainText(QStringLiteral("a\nb\\c\nb\\d\\\n"));
+            e.selectAll();
+            e.pathsToTree(); // 反斜杠路径（Windows）同样嵌套
+            if (e.toPlainText() != QStringLiteral("├── a\n└── b/\n    ├── c\n    └── d/")) {
+                qWarning("selftest FAIL: backslash tree wrong: %s",
                          e.toPlainText().toUtf8().constData());
                 return false;
             }
@@ -3824,8 +3923,12 @@ private:
     QStringList m_asciiPrintLines;
     QVector<QRgb> m_asciiColors; // C64 真彩：与字符一一对应的前景色
     int m_asciiPrintIdx = 0;
+    int m_asciiLinesPerTick = 1; // 每拍插入的行数（~40 拍打完）
     int m_asciiPrintPos = 0;
     bool m_asciiUndoPaused = false; // 画布程序写入期间撤销记录已暂停
+    QString m_joinMemory;      // 压行记住的原文（还原 = 原样恢复）
+    QString m_joinJoined;      // 压行后的文本（校验期间未被再编辑）
+    bool m_joinMemoryValid = false;
     bool m_asciiPrinting = false;
     int m_lastArtStart = -1;     // 上次立为图/拖图的范围（无选区时复选）
     int m_lastArtEnd = -1;
