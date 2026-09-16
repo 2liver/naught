@@ -9,7 +9,7 @@ set(CMAKE_AUTORCC ON)
 find_package(Qt6 REQUIRED COMPONENTS Widgets ShaderTools)
 
 qt_add_executable(naught WIN32 MACOSX_BUNDLE
-    main.cpp
+    main.mm
     crt_view.cpp
     line_number_area.cpp
     canvas.h

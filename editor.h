@@ -3230,8 +3230,9 @@ protected:
                 return;
             case Qt::Key_N:
                 if ((event->modifiers() & Qt::ControlModifier)
-                    && (event->modifiers() & Qt::MetaModifier))
-                    commitSuicide(); // 自杀（M6）：Ctrl+Cmd+N = 立即退出
+                    && (event->modifiers() & Qt::MetaModifier)
+                    && !(event->modifiers() & Qt::ShiftModifier))
+                    commitSuicide(); // 自杀（M6）：⌃⌘N；⌃⇧⌘N 归代理（重生）
                 else if (event->modifiers() & Qt::ShiftModifier)
                     clearInk(); // 消：N=消除=naught（对应 Cmd+N 清文字）
                 else

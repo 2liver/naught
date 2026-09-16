@@ -30,6 +30,7 @@
 #ifdef Q_OS_MACOS
 #include <Carbon/Carbon.h>        // RegisterEventHotKey（无需辅助功能授权）
 #include <CoreServices/CoreServices.h> // LSOpenCFURLRef
+#include <AppKit/AppKit.h>        // NSApplication：Accessory 激活策略（会话 GUI 进程）
 #endif
 
 #include "editor.h"
@@ -64,14 +65,28 @@ QString naughtAgentPlistXml(const QString &binPath)
 
 #ifdef Q_OS_MACOS
 // 热键回调（Carbon 需 C 函数指针）：打开/激活主应用 = 重生
+static void naughtAgentLog(const QString &msg)
+{
+    QFile logf(QDir::homePath()
+               + QStringLiteral("/Library/Application Support/naught/agent.log"));
+    if (logf.open(QIODevice::WriteOnly | QIODevice::Append)) {
+        logf.write((msg + QLatin1Char('\n')).toUtf8());
+        logf.close();
+    }
+}
+
 static OSStatus naughtHotKeyHandler(EventHandlerCallRef, EventRef, void *user)
 {
     const QString *path = static_cast<const QString *>(user);
+    naughtAgentLog(QStringLiteral("hotkey fired: opening %1").arg(*path));
     CFURLRef url = CFURLCreateWithFileSystemPath(
         nullptr, path->toCFString(), kCFURLPOSIXPathStyle, true);
     if (url) {
-        LSOpenCFURLRef(url, nullptr);
+        const OSStatus rc = LSOpenCFURLRef(url, nullptr);
+        naughtAgentLog(QStringLiteral("LSOpen result: %1").arg(int(rc)));
         CFRelease(url);
+    } else {
+        naughtAgentLog(QStringLiteral("LSOpen failed: null URL"));
     }
     return noErr;
 }
@@ -80,8 +95,13 @@ static OSStatus naughtHotKeyHandler(EventHandlerCallRef, EventRef, void *user)
 // 打开主应用（应用死亡 = 重生；应用在跑 = 激活）。无窗口、无 Dock。
 static int runNaughtAgent(int argc, char **argv)
 {
-    QCoreApplication app(argc, argv);
+    // QGuiApplication：代理必须是真正的会话 GUI 进程——launchd 起的
+    // 裸进程收不到系统级热键投递（重生的致命一环）。Accessory 策略 =
+    // 无 Dock 图标、无菜单栏，但完整接入窗口服务器事件通道。
+    QGuiApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("無"));
+    [[NSApplication sharedApplication]
+        setActivationPolicy:NSApplicationActivationPolicyAccessory];
     const QString supportDir = QDir::homePath()
         + QStringLiteral("/Library/Application Support/naught");
     QDir().mkpath(supportDir);
@@ -112,6 +132,22 @@ static int runNaughtAgent(int argc, char **argv)
                         bundlePath, nullptr);
     qInfo("naught agent: holding Cmd+Ctrl+Shift+N for %s",
           qPrintable(bundle));
+    const bool selfTest = argc > 1
+        && QString::fromLocal8Bit(argv[1]) == QLatin1String("--agent-selftest");
+    if (selfTest) {
+        // 合成热键事件直投自身事件目标：验证 CFRunLoop 泵 + handler + LSOpen
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, int64_t(NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            EventRef ev = nullptr;
+            CreateEvent(nullptr, kEventClassKeyboard, kEventHotKeyPressed,
+                        GetCurrentEventTime(), kEventAttributeNone, &ev);
+            if (ev) {
+                SendEventToEventTarget(ev, GetApplicationEventTarget());
+                ReleaseEvent(ev);
+            }
+            naughtAgentLog(QStringLiteral("agent-selftest: synthetic hotkey posted"));
+        });
+    }
     {
         // 日志落盘：launchd 丢弃 stderr，出问题时看这里
         QFile logf(supportDir + QStringLiteral("/agent.log"));
