@@ -651,6 +651,7 @@ public:
     // ——锁定时是干净"完美视角"，解锁后是沉浸的弯曲玻璃屏（不裁字）
     bool screenEntityOn() const { return m_crt && !m_viewLock; }
     bool asciiArtActive() const { return m_asciiActive; } // 画布编辑态（立为图勾选）
+    bool asciiPrintingDbg() const { return m_asciiPrinting; }
 
     // ---- 字体管理（「项」·字体区）：用户字体文件夹 + 上/下一个 ----
     static QString fontDir()
@@ -881,7 +882,9 @@ public:
         QTextCursor c = textCursor();
         c.setPosition(m_asciiStart);
         c.setPosition(qMax(m_asciiEnd, m_asciiPrintPos), QTextCursor::KeepAnchor);
+        m_settingAscii = true; // 程序替换不算手动编辑——否则画布态被自己杀掉
         c.removeSelectedText();
+        m_settingAscii = false;
         m_asciiEnd = m_asciiStart;
         m_asciiPrintPos = m_asciiStart;
         printAscii(artText(), m_asciiStart);
@@ -1060,7 +1063,12 @@ public:
         e.setPlainText(lines);
         e.resize(400, 300);
         e.show();
-        QApplication::processEvents();
+        for (int s = 0; s < 5; ++s) { // 布局沉降：负载高时 resize 竞态
+            QApplication::processEvents();
+            QEventLoop lp;
+            QTimer::singleShot(10, &lp, &QEventLoop::quit);
+            lp.exec();
+        }
         const int len = e.document()->firstBlock().length() - 1;
         QWidget *vp = e.viewport();
 
@@ -1890,10 +1898,12 @@ public:
             }
             // 编辑器路径冒烟：空文档插入 → 逐行打印出整页字符画；
             // 非空文档 → 光标处插入（不覆盖）
-            auto waitPrint = [] {
-                QEventLoop lp;
-                QTimer::singleShot(600, &lp, &QEventLoop::quit);
-                lp.exec(); // 打字机打印 ~35ms/行
+            auto waitPrint = [&e] {
+                for (int guard = 0; e.asciiPrintingDbg() && guard < 100; ++guard) {
+                    QEventLoop lp;
+                    QTimer::singleShot(50, &lp, &QEventLoop::quit);
+                    lp.exec(); // 打字机打印 ~35ms/行，等到完
+                }
             };
             e.setPlainText(QString());
             e.loadAsciiImage(simg);
@@ -1957,6 +1967,16 @@ public:
                 waitPrint();
                 if (e.toPlainText().isEmpty()) {
                     qWarning("selftest FAIL: declare-art canvas zoom emptied doc");
+                    return false;
+                }
+                if (!e.m_asciiActive) {
+                    qWarning("selftest FAIL: canvas zoom deactivated art");
+                    return false;
+                }
+                e.zoomAsciiCanvas(1.2); // 第二次画布缩放仍应生效（再打印）
+                waitPrint();
+                if (!e.m_asciiActive || e.toPlainText().isEmpty()) {
+                    qWarning("selftest FAIL: second canvas zoom failed");
                     return false;
                 }
                 e.setPlainText(QStringLiteral("無\n"));
