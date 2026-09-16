@@ -226,10 +226,14 @@ void CrtView::renderFrame()
         m_pending.setDevicePixelRatio(devicePixelRatioF());
         m_pending.fill(m_editor->crtPalette().bg); // 随调色板（M2）
         m_editor->paintTextSnapshot(m_pending);
-        Crt::phosphorPersistence(m_pending, m_prev, m_prev2); // 一期+M4：双指数余晖
-        m_prev2 = m_prev; // 上上帧（浅拷贝链：写入时分离）
-        m_prev = m_pending; // 上一帧（浅拷贝）
-        Crt::phosphorBloom(m_pending, m_editor->crtPalette().glowAlpha); // 二期三件套：真高斯辉光（随调色板）
+        // 滚动期间跳过余晖+辉光重活（每 80ms 一帧的全屏逐像素 + 模糊
+        // 是滚动卡顿大户）；停稳后 settle 标记全量重拍，痕迹自愈
+        if (!m_editor->isScrolling()) {
+            Crt::phosphorPersistence(m_pending, m_prev, m_prev2); // 一期+M4：双指数余晖
+            m_prev2 = m_prev; // 上上帧（浅拷贝链：写入时分离）
+            m_prev = m_pending; // 上一帧（浅拷贝）
+            Crt::phosphorBloom(m_pending, m_editor->crtPalette().glowAlpha); // 二期三件套：真高斯辉光（随调色板）
+        }
         // 入场暖机：因子由 shader 按 timeInfo.y 计算（CPU 逐像素循环
         // 曾引发帧循环冻结，已整体移入 GPU）
         {

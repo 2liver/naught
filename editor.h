@@ -242,6 +242,13 @@ public:
                 m_asciiPrinting = false;
                 endAsciiEditBlock(); // 打印块收口：不得并入用户的编辑
                 setLineWrapMode(QPlainTextEdit::WidgetWidth);
+                // 剥掉 C64 逐字符前景色：反激活 = 回归普通文本。否则换机时
+                // （画布不在场不重印）真彩跟着文字走到琥珀/绿磷机上
+                QTextCursor fc(document());
+                fc.select(QTextCursor::Document);
+                QTextCharFormat plain;
+                plain.setForeground(QBrush()); // 无效画刷：合并即清除前景
+                fc.setCharFormat(plain);
             }
             // 磷粉激发（二期三件套·回接）：插入的新字符记下位置与时刻，
             // 快照在 ~900ms 内给它画三圈软边增亮（指数回落）
@@ -316,6 +323,22 @@ public:
         };
         connect(verticalScrollBar(), &QScrollBar::rangeChanged, this, syncCrtGeo);
         connect(horizontalScrollBar(), &QScrollBar::rangeChanged, this, syncCrtGeo);
+        // 滚动态：滚动期间 CRT 快照跳过余晖+辉光重活（卡顿大户），
+        // 停稳后半拍补全量——滚动手感优先，痕迹自愈
+        m_scrollSettle.setSingleShot(true);
+        connect(&m_scrollSettle, &QTimer::timeout, this, [this] {
+            m_scrolling = false;
+            if (m_crtView)
+                m_crtView->markDirty(true);
+        });
+        connect(verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int) {
+            m_scrolling = true;
+            m_scrollSettle.start(180);
+        });
+        connect(horizontalScrollBar(), &QScrollBar::valueChanged, this, [this](int) {
+            m_scrolling = true;
+            m_scrollSettle.start(180);
+        });
 
         applyScheme();
         applyZoom();
@@ -525,13 +548,16 @@ public:
         };
         const auto &s = st[style];
         const qreal vw = fm.horizontalAdvance(s.v);
-        const qreal boxW = maxW + spw * 2.0 + vw * 2.0;
+        // 内容区宽按空格网格取整：等宽字体下每行补齐的空格数为整数，
+        // 右封口线逐行严丝合缝（旧版 qCeil 逐行进位 → 右缘成弧线）
+        const qreal contentW = spw * qCeil(qMax(1.0, maxW / spw));
+        const qreal boxW = contentW + spw + vw * 2.0;
         const qreal hw = qMax(0.1, fm.horizontalAdvance(s.h));
-        const int hN = qMax(1, int(qCeil((boxW - fm.horizontalAdvance(s.tl)
-                                          - fm.horizontalAdvance(s.tr)) / hw)));
+        const int hN = qMax(1, int(qRound((boxW - fm.horizontalAdvance(s.tl)
+                                           - fm.horizontalAdvance(s.tr)) / hw)));
         QString out = s.tl + QString(hN, s.h) + s.tr + QLatin1Char('\n');
         for (const QString &l : lines) {
-            const int nSp = qMax(0, int(qCeil((boxW - vw * 2.0 - spw - lineW(l)) / spw)));
+            const int nSp = qMax(0, int(qRound((contentW - lineW(l)) / spw)));
             out += s.v + QLatin1Char(' ') + l + QString(nSp, QLatin1Char(' '))
                  + s.v + QLatin1Char('\n');
         }
@@ -884,8 +910,14 @@ public:
             return;
         QTextCursor c = textCursor();
         const QFontMetricsF fm(activeFont());
-        const int cell = qMax(1, int(fm.horizontalAdvance(QLatin1Char('M'))));
-        const int cols = qMax(8, viewport()->width() / cell);
+        const qreal spw = qMax(0.1, fm.horizontalAdvance(QLatin1Char(' ')));
+        const qreal winW = qMax(1.0, qreal(viewport()->width()));
+        const auto lineW = [&](const QString &t) {
+            qreal w = 0.0;
+            for (QChar ch : t)
+                w += fm.horizontalAdvance(ch);
+            return w;
+        };
         QTextBlock first = doc->findBlock(c.selectionStart());
         QTextBlock last = doc->findBlock(c.selectionEnd());
         if (last.position() == c.selectionEnd() && last != first)
@@ -894,9 +926,10 @@ public:
         bool changed = false;
         for (QTextBlock b = first;; b = b.next()) {
             QString t = b.text();
-            const int pad = cols - displayWidth(t);
-            if (pad > 0) {
-                t.prepend(QString(pad / 2, QLatin1Char(' ')));
+            // 按字体真实推进居中（旧版 CJK=2 计数与字体不符 → 偏右）
+            const int nSp = int((winW - lineW(t)) / (2.0 * spw));
+            if (nSp > 0) {
+                t.prepend(QString(nSp, QLatin1Char(' ')));
                 changed = true;
             }
             out.append(t);
@@ -1164,6 +1197,7 @@ public:
     // 屏幕实体（原实验功能，M4.5 并入）：追随视角解锁（非锁定）时生效
     // ——锁定时是干净"完美视角"，解锁后是沉浸的弯曲玻璃屏（不裁字）
     bool screenEntityOn() const { return m_crt && !m_viewLock; }
+    bool isScrolling() const { return m_scrolling; } // CRT 快照降载信号
     bool asciiArtActive() const { return m_asciiActive; } // 画布编辑态（立为图勾选）
     bool colorMachine() const { return m_machine == 2; }   // C64：字符画逐字符真彩
     bool asciiPrintingDbg() const { return m_asciiPrinting; }
@@ -2863,6 +2897,52 @@ public:
                 }
                 e.setPlainText(QStringLiteral("無\n"));
             }
+            // 回归（用户报：格式化→重勾立为图后缩放/换机失效、真彩泄漏）
+            {
+                e.setPlainText(QString());
+                while (e.machine() != 2)
+                    e.toggleMachine(); // C64
+                e.loadAsciiImage(simg);
+                waitPrint();
+                if (e.m_asciiColors.isEmpty()) {
+                    qWarning("selftest FAIL: c64 art produced no colors");
+                    return false;
+                }
+                e.yan(); // 格式化（言）→ 反激活 + 叠行（预期）
+                if (e.m_asciiActive) {
+                    qWarning("selftest FAIL: yan did not deactivate art");
+                    return false;
+                }
+                e.declareArtFromSelection(); // 无选区 → 复选上次范围（恢复路径）
+                if (!e.m_asciiActive) {
+                    qWarning("selftest FAIL: re-declare did not reactivate");
+                    return false;
+                }
+                e.zoomAsciiCanvas(1.2); // 缩放必须可用
+                waitPrint();
+                if (!e.m_asciiActive || e.toPlainText().isEmpty()) {
+                    qWarning("selftest FAIL: zoom after re-declare failed");
+                    return false;
+                }
+                const QString afterZoom = e.toPlainText();
+                e.zoomAsciiCanvas(0.8);
+                waitPrint();
+                if (e.toPlainText() == afterZoom) {
+                    qWarning("selftest FAIL: second zoom after re-declare no-op");
+                    return false;
+                }
+                // 换机不得泄漏真彩：非 C64 机上文档不得再带彩色前景
+                e.yan(); // 再反激活（画布不在场）
+                while (e.machine() != 0)
+                    e.toggleMachine(); // 琥珀
+                QTextCursor fc(e.document());
+                fc.movePosition(QTextCursor::NextCharacter);
+                if (fc.charFormat().foreground().style() != Qt::NoBrush) {
+                    qWarning("selftest FAIL: c64 colors leaked to amber machine");
+                    return false;
+                }
+                e.setPlainText(QStringLiteral("無\n"));
+            }
         }
         // 字体管理：空/不存在目录 → 扫描为空；循环后族名永不为空（出厂回退）
         {
@@ -3953,6 +4033,8 @@ private:
     static inline QString s_greenFamily; // 出厂绿磷：VT323（qrc）
     static inline QString s_whiteFamily; // 出厂白磷：Fixedsys Excelsior（CC0，qrc）
     QTimer m_crtSettleTimer;
+    QTimer m_scrollSettle;  // 滚动停稳计时：结束后补全量快照
+    bool m_scrolling = false;
 
 #ifdef NAUGHT_WITH_HIGHLIGHT
     KSyntaxHighlighting::Repository *m_repo = nullptr;

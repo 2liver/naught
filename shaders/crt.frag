@@ -159,7 +159,7 @@ void main()
     // 噪声与灰尘：细颗粒闪烁 + 稀疏灰尘点（时间驱动，极克制）
     {
         float t = ubuf.timeInfo.x;
-        float grain = (hash21(sp + fract(t) * 61.7) - 0.5) * 0.05;
+        float grain = (hash21(sp + fract(t) * 61.7) - 0.5) * 0.02; // 0.05→0.02：静场颗粒太闪（打字时扰眼）
         float dust = step(0.9992, hash21(floor(sp * 0.05) + floor(t * 8.0)))
                      * (0.5 + 0.5 * hash21(floor(sp * 0.05)));
         col += grain + dust * ubuf.dustCol.rgb * 0.10;
@@ -183,10 +183,10 @@ void main()
             float H = ubuf.texSize.y;
             float scan = fract(ubuf.timeInfo.x * (1.0 / 0.7)); // 自上而下
             float d = sp.y - scan * H; // >0 未扫到；<0 刚扫过
-            float tail = exp(max(d, -H) * (16.0 / H)); // 熄灭指数（略长略软）
-            float pulse = smoothstep(-H * 0.07, 0.0, d); // 束流在线上
+            float tail = exp(max(d, -H) * (14.0 / H)); // 熄灭指数（更长更软）
+            float pulse = smoothstep(-H * 0.08, 0.0, d); // 束流在线上
             float exc = clamp(tail * pulse, 0.0, 1.0);
-            col *= 0.93 + 0.13 * exc; // 微明微亮：慢放下的冷热交替不刺眼
+            col *= 0.96 + 0.07 * exc; // 再柔和：波面存在但不闪（打字机器要安静）
         } else {
             float phase = fract(ubuf.timeInfo.x * 0.333);
             float band = 1.0 - smoothstep(0.0, 0.035, abs(v_uv.y - phase));
@@ -210,7 +210,7 @@ void main()
     // 暗角（屏幕空间——玻璃固定）；实验·屏幕实体：暗角略强 + 边框
     // 阴影带（压暗但不裁字——文字仍可见）+ 一道固定对角玻璃反光
     float d = length(v_uv - 0.5) * 1.5;
-    col *= 1.0 - mix(0.22, 0.30, ent) * smoothstep(0.4, 1.0, d);
+    col *= 1.0 - mix(0.14, 0.20, ent) * smoothstep(0.55, 1.0, d); // 暗角软化：真 CRT 的四角渐暗，但旧值在 C64 蓝底上显得简陋
     if (ent > 0.5) {
         vec2 ed = abs(v_uv - 0.5) * 2.0; // 0 中心 → 1 边缘
         float bezel = smoothstep(0.86, 1.0, max(ed.x, ed.y));

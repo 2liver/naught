@@ -190,6 +190,56 @@ int main(int argc, char **argv)
     {
         QMenuBar *menuBar = new QMenuBar(nullptr);
         QMenu *fa = menuBar->addMenu(QStringLiteral("项"));
+        // ── 视图区：编/显/机器/画布 ──
+        QAction *bBian = fa->addAction(QStringLiteral("编"));
+        bBian->setShortcut(QKeySequence(QStringLiteral("Ctrl+B")));
+        bBian->setCheckable(true);
+        QAction *bXian = fa->addAction(QStringLiteral("显"));
+        bXian->setShortcut(QKeySequence(QStringLiteral("Ctrl+T")));
+        bXian->setCheckable(true);
+        QAction *bGreen = fa->addAction(QStringLiteral("换机"));
+        bGreen->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+M")));
+        QAction *bLock = fa->addAction(QStringLiteral("追随视角锁定"));
+        bLock->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+T")));
+        bLock->setCheckable(true);
+        bLock->setChecked(true);
+        QAction *bDeclare = fa->addAction(QStringLiteral("立为图"));
+        bDeclare->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+A")));
+        bDeclare->setCheckable(true);
+        QAction *bAscii = fa->addAction(QStringLiteral("拖入图片 → 字符画"));
+        bAscii->setEnabled(false); // 自释性提示：隐藏功能，README 不写
+        QAction *bEsc = fa->addAction(QStringLiteral("Esc＝退出模式"));
+        bEsc->setEnabled(false);
+        fa->addSeparator();
+        // ── 格式化区：言/隔/居中/格式库 ──
+        QAction *bYan = fa->addAction(QStringLiteral("言"));
+        bYan->setShortcut(QKeySequence(QStringLiteral("Ctrl+L")));
+        QAction *bGe = fa->addAction(QStringLiteral("隔"));
+        bGe->setShortcut(QKeySequence(QStringLiteral("Ctrl+F")));
+        QAction *bCenter = fa->addAction(QStringLiteral("居中"));
+        bCenter->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+C")));
+        // 格式库（自 AsciiTools 移植）：按功能分区——框/压行/路径树
+        QMenu *mFmt = fa->addMenu(QStringLiteral("格式"));
+        QAction *bBoxSingle = mFmt->addAction(QStringLiteral("单线框"));
+        bBoxSingle->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+1")));
+        QAction *bBoxDouble = mFmt->addAction(QStringLiteral("双线框"));
+        bBoxDouble->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+2")));
+        QAction *bBoxRound = mFmt->addAction(QStringLiteral("圆角框"));
+        bBoxRound->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+3")));
+        QAction *bBoxBold = mFmt->addAction(QStringLiteral("粗线框"));
+        bBoxBold->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+4")));
+        mFmt->addSeparator();
+        QAction *bJoin = mFmt->addAction(QStringLiteral("压成一行"));
+        bJoin->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+J")));
+        QAction *bSplit = mFmt->addAction(QStringLiteral("还原为多行"));
+        bSplit->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+K")));
+        mFmt->addSeparator();
+        QAction *bPathsToTree = mFmt->addAction(QStringLiteral("路径列表 → 树"));
+        bPathsToTree->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+P")));
+        QAction *bTreeToPaths = mFmt->addAction(QStringLiteral("树 → 路径列表"));
+        bTreeToPaths->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+R")));
+        fa->addSeparator();
+        // ── 工具区：摹/空、阴/阳、涂/擦/消 ──
         QAction *bMo = fa->addAction(QStringLiteral("摹"));
         bMo->setShortcut(QKeySequence(QStringLiteral("Ctrl+S")));
         QAction *bKong = fa->addAction(QStringLiteral("空"));
@@ -213,26 +263,15 @@ int main(int argc, char **argv)
         QAction *bHold = fa->addAction(QStringLiteral("按住 Shift 拖动＝按住笔刷"));
         bHold->setEnabled(false);
         fa->addSeparator();
-        QAction *bBian = fa->addAction(QStringLiteral("编"));
-        bBian->setShortcut(QKeySequence(QStringLiteral("Ctrl+B")));
-        bBian->setCheckable(true);
-        QAction *bXian = fa->addAction(QStringLiteral("显"));
-        bXian->setShortcut(QKeySequence(QStringLiteral("Ctrl+T")));
-        bXian->setCheckable(true);
-        QAction *bLock = fa->addAction(QStringLiteral("追随视角锁定"));
-        bLock->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+T")));
-        bLock->setCheckable(true);
-        bLock->setChecked(true);
-        QAction *bGreen = fa->addAction(QStringLiteral("换机"));
-        bGreen->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+M")));
-        QAction *bAscii = fa->addAction(QStringLiteral("拖入图片 → 字符画"));
-        bAscii->setEnabled(false); // 自释性提示：隐藏功能，README 不写
-        QAction *bDeclare = fa->addAction(QStringLiteral("立为图"));
-        bDeclare->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+A")));
-        bDeclare->setCheckable(true);
-        QAction *bEsc = fa->addAction(QStringLiteral("Esc＝退出模式"));
-        bEsc->setEnabled(false);
-        fa->addSeparator(); // 字体区（子菜单：内容渐多，分区收纳）
+        // ── 字号/笔刷区：不做成真键等效（系统接管会毁掉按住加速），提示内嵌标签 ──
+        QAction *bZoomIn = fa->addAction(QStringLiteral("字号放大 ⌘="));
+        QAction *bZoomOut = fa->addAction(QStringLiteral("字号缩小 ⌘-"));
+        QAction *bZoom0 = fa->addAction(QStringLiteral("字号复位 ⌘0"));
+        QAction *bBrushIn = fa->addAction(QStringLiteral("笔刷加粗 ⇧⌘="));
+        QAction *bBrushOut = fa->addAction(QStringLiteral("笔刷变细 ⇧⌘-"));
+        QAction *bBrush0 = fa->addAction(QStringLiteral("笔刷复位 ⇧⌘0"));
+        fa->addSeparator();
+        // ── 字体区（子菜单）──
         QMenu *mFont = fa->addMenu(QStringLiteral("字体"));
         QAction *bFontDir = mFont->addAction(QStringLiteral("打开字体文件夹"));
         QAction *bFontPrev = mFont->addAction(QStringLiteral("上一字体"));
@@ -240,33 +279,6 @@ int main(int argc, char **argv)
         QAction *bFontNext = mFont->addAction(QStringLiteral("下一字体"));
         bFontNext->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+.")));
         QAction *bFontReset = mFont->addAction(QStringLiteral("恢复默认字体"));
-        fa->addSeparator(); // 视图轴与格式化（言·隔）分区
-        QAction *bYan = fa->addAction(QStringLiteral("言"));
-        bYan->setShortcut(QKeySequence(QStringLiteral("Ctrl+L")));
-        QAction *bGe = fa->addAction(QStringLiteral("隔"));
-        bGe->setShortcut(QKeySequence(QStringLiteral("Ctrl+F")));
-        QAction *bCenter = fa->addAction(QStringLiteral("居中"));
-        bCenter->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+C")));
-        // 格式库（自 AsciiTools 移植）：按功能分区——框/压行/路径树
-        QMenu *mFmt = fa->addMenu(QStringLiteral("格式"));
-        QAction *bBoxSingle = mFmt->addAction(QStringLiteral("单线框"));
-        QAction *bBoxDouble = mFmt->addAction(QStringLiteral("双线框"));
-        QAction *bBoxRound = mFmt->addAction(QStringLiteral("圆角框"));
-        QAction *bBoxBold = mFmt->addAction(QStringLiteral("粗线框"));
-        mFmt->addSeparator();
-        QAction *bJoin = mFmt->addAction(QStringLiteral("压成一行"));
-        QAction *bSplit = mFmt->addAction(QStringLiteral("还原为多行"));
-        mFmt->addSeparator();
-        QAction *bPathsToTree = mFmt->addAction(QStringLiteral("路径列表 → 树"));
-        QAction *bTreeToPaths = mFmt->addAction(QStringLiteral("树 → 路径列表"));
-        fa->addSeparator();
-        // 字号/笔刷不做成真键等效（系统接管会毁掉按住加速），提示内嵌标签
-        QAction *bZoomIn = fa->addAction(QStringLiteral("字号放大 ⌘="));
-        QAction *bZoomOut = fa->addAction(QStringLiteral("字号缩小 ⌘-"));
-        QAction *bZoom0 = fa->addAction(QStringLiteral("字号复位 ⌘0"));
-        QAction *bBrushIn = fa->addAction(QStringLiteral("笔刷加粗 ⇧⌘="));
-        QAction *bBrushOut = fa->addAction(QStringLiteral("笔刷变细 ⇧⌘-"));
-        QAction *bBrush0 = fa->addAction(QStringLiteral("笔刷复位 ⇧⌘0"));
         fa->addSeparator();
         QAction *bUndo = fa->addAction(QStringLiteral("撤销"));
         bUndo->setShortcut(QKeySequence(QStringLiteral("Ctrl+Z")));
