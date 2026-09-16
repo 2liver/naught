@@ -160,12 +160,13 @@ void main()
             // 已补偿遮罩损耗，调色板是"穿罩后的亮度"——点阵只提供
             // 纹理（0.70 底 + 点 1.0），不得二次压暗（旧版点太小，
             // 透光 ~5%，把 C64 亮度砍到琥珀的一半）
-            // 亮度自适应：亮处（文字）给 0.70 底（束流补偿遮罩），
-            // 暗处（底色）用全纹理——底保持深蓝，字不被压暗
-            float tex = mix(0.0, 0.30, smoothstep(0.08, 0.5, lum));
-            col.r *= (1.0 - tex) + tex * triadDot(sp, 0.0);
-            col.g *= (1.0 - tex) + tex * triadDot(sp, 1.0);
-            col.b *= (1.0 - tex) + tex * triadDot(sp, 2.0);
+            // 阴罩物理：纹理可见度 ∝ 束流强度——亮字显出三色点，
+            // 暗底几乎无点纹（磷粉几乎未激发，点纹对比趋于零）；
+            // 且束流已补偿遮罩，平均透射保持高位（字不暗）
+            float texStrength = mix(0.04, 0.35, smoothstep(0.05, 0.6, lum)); // 正常视距三色点细密，振幅 0.35 足够
+            col.r *= 1.0 - texStrength * (1.0 - triadDot(sp, 0.0));
+            col.g *= 1.0 - texStrength * (1.0 - triadDot(sp, 1.0));
+            col.b *= 1.0 - texStrength * (1.0 - triadDot(sp, 2.0));
         } else {
             col *= stripe(sp.x, 0.0, 1.0, beamW, grad);
         }

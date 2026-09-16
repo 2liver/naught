@@ -70,7 +70,7 @@ inline const Palette kC64{
     // 饱和后的近白亮蓝（名义 #6C6CEB 只是色度），亮度级接近琥珀/绿磷
     // 的激发水平；底是深蓝（#2114B9 系），对比强烈——旧版墨不够亮、
     // 底太浅，观感发闷
-    QColor(0xDC, 0xE8, 0xFF), // ink（饱和亮蓝，≈白蓝的激发亮度）
+    QColor(0xE6, 0xF0, 0xFF), // ink（饱和亮蓝，≈白蓝的激发亮度）
     QColor(0x96, 0xA4, 0xD4), // inkDim
     QColor(0xE4, 0xEA, 0xFF), // cursorBlock（近白）
     QColor(0x18, 0x10, 0x70), // bg（深蓝 #2114B9 系：实测真机底 ≈ 亮度 8-12，旧值 30 过亮）
