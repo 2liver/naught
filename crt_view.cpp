@@ -11,8 +11,12 @@
 
 static void shaderLog(const QString &s)
 {
+    // 轮转：日志超 64KB 截断重来（防无限增长）
     QFile f(QStringLiteral("/tmp/naught-crt-shader.log"));
-    f.open(QIODevice::Append);
+    if (f.size() > 65536)
+        f.open(QIODevice::WriteOnly | QIODevice::Truncate);
+    else
+        f.open(QIODevice::Append);
     f.write(s.toUtf8() + "\n");
     f.close();
 }

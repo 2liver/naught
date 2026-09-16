@@ -230,11 +230,34 @@ inline void phosphorBloom(QImage &img, qreal alpha = 0.42)
 {
     if (img.isNull() || img.width() < 8 || img.height() < 8)
         return;
-    QImage glow = img.scaled(img.size() / 4, Qt::IgnoreAspectRatio,
-                             Qt::SmoothTransformation)
-                      .convertToFormat(QImage::Format_ARGB32);
+    // P2 降载：4×4 平均降采样（Smooth 滤镜在 1/4 图上是 CPU 大户，
+    // 平均采样对辉光完全足够）+ 最近邻放大（辉光本就平滑，4×4 块
+    // 不可见；Smooth 放大到全图是最大的单笔开销）
+    QImage glow(qMax(1, img.width() / 4), qMax(1, img.height() / 4),
+                QImage::Format_ARGB32);
+    for (int y = 0; y < glow.height(); ++y) {
+        uchar *dst = glow.scanLine(y);
+        const int y0 = qMin(y * 4, img.height() - 1);
+        for (int x = 0; x < glow.width(); ++x) {
+            long b = 0, g = 0, r = 0;
+            const int x0 = qMin(x * 4, img.width() - 1);
+            for (int dy = 0; dy < 4; ++dy) {
+                const uchar *src = img.constScanLine(qMin(y0 + dy, img.height() - 1));
+                for (int dx = 0; dx < 4; ++dx) {
+                    const int i = qMin(x0 + dx, img.width() - 1) * 4;
+                    b += src[i];
+                    g += src[i + 1];
+                    r += src[i + 2];
+                }
+            }
+            dst[x * 4] = uchar(b / 16);
+            dst[x * 4 + 1] = uchar(g / 16);
+            dst[x * 4 + 2] = uchar(r / 16);
+            dst[x * 4 + 3] = 255;
+        }
+    }
     glow = gaussianBlur(glow, 2, 3); // 半径 2（1/4 图 = 全图 8px 光晕）
-    glow = glow.scaled(img.size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    glow = glow.scaled(img.size(), Qt::IgnoreAspectRatio, Qt::FastTransformation);
     const int w = qMin(img.width(), glow.width());
     const int h = qMin(img.height(), glow.height());
     for (int y = 0; y < h; ++y) {

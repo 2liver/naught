@@ -1661,23 +1661,6 @@ public:
                 m_lineNumberArea->hide();
             setFocus();
             activateWindow();
-            // 临时取证：开显 1.2 秒后保存纯 CPU 快照
-            QTimer::singleShot(1200, this, [this] {
-                if (!m_crt || !m_crtView)
-                    return;
-                m_crtView->frameImage().save(QStringLiteral("/tmp/naught-crt-frame.png"));
-                QFile f(QStringLiteral("/tmp/naught-crt-geo.log"));
-                f.open(QIODevice::Append);
-                f.write(QStringLiteral("geo=%1 visible=%2 hidden=%3 size=%4x%5 vp=%6\n")
-                            .arg(m_crtView->geometry().x())
-                            .arg(m_crtView->isVisible())
-                            .arg(m_crtView->isHidden())
-                            .arg(m_crtView->width())
-                            .arg(m_crtView->height())
-                            .arg(viewport()->geometry().x())
-                            .toUtf8());
-                f.close();
-            });
         } else {
             // 常驻对象，只隐藏。无原生窗口：隐藏即彻底让位，
             // 不需要销毁、不需要摘除任何属性——事件分发天然恢复。

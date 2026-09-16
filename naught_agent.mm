@@ -27,6 +27,13 @@ static void agentLog(NSString *msg)
                           [NSDate date], msg];
         [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
         [fh closeFile];
+        // 轮转：超 64KB 截断（防无限增长）
+        NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil];
+        if ([[attrs objectForKey:NSFileSize] longLongValue] > 65536) {
+            NSFileHandle *tf = [NSFileHandle fileHandleForWritingAtPath:path];
+            [tf truncateFileAtOffset:0];
+            [tf closeFile];
+        }
     }
 }
 
