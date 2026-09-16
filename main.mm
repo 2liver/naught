@@ -8,6 +8,7 @@
 #include <QApplication>
 #include <QCoreApplication>
 #include <QDir>
+#include <functional>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
@@ -306,9 +307,10 @@ int main(int argc, char **argv)
     // 系统菜单栏上的「法」：快捷键说明随原生 key equivalent 显示。
     // Windows/Linux 不设菜单栏（无），其右键菜单为 Qt 自绘、自带快捷键列。
     {
-        // 父窗口 = 编辑器：快捷键上下文立即绑定（旧版 nullptr 父——
-        // 无窗口可挂，⌘ 快捷键要等菜单被点开一次才生效）
-        QMenuBar *menuBar = new QMenuBar(&editor);
+        // 原生全局菜单栏（nullptr 父）。快捷键即时生效靠下方
+        // ApplicationShortcut 上下文——不靠父窗口（带父菜单栏在 macOS
+        // 上会退化为非原生、不可见的栏）
+        QMenuBar *menuBar = new QMenuBar(nullptr);
         QMenu *fa = menuBar->addMenu(QStringLiteral("项"));
         // ── 视图区（父级收纳）：编/显/图 ──
         QMenu *mBian = fa->addMenu(QStringLiteral("编"));
@@ -415,6 +417,17 @@ int main(int argc, char **argv)
         bSuicide->setShortcut(QKeySequence(QStringLiteral("Ctrl+Meta+N")));
         QAction *bRebirth = fa->addAction(QStringLiteral("生 ⌃⇧⌘N"));
         bRebirth->setEnabled(false); // 全局热键由 naught-agent 登录项持有
+        // 快捷键上下文 = ApplicationShortcut：无需窗口/菜单先被点开即
+        // 可触发（旧版 WindowShortcut + 无窗口 = 要等菜单点开一次）
+        const std::function<void(QMenu *)> setCtx = [&](QMenu *m) {
+            for (QAction *a : m->actions()) {
+                if (a->menu())
+                    setCtx(a->menu());
+                else
+                    a->setShortcutContext(Qt::ApplicationShortcut);
+            }
+        };
+        setCtx(fa);
         QObject::connect(bSuicide, &QAction::triggered, &editor, [&editor] { editor.commitSuicide(); });
         QObject::connect(bMo, &QAction::triggered, &editor, [&editor] { editor.mo(); });
         QObject::connect(bKong, &QAction::triggered, &editor, [&editor] { editor.kong(); });

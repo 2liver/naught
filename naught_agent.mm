@@ -15,8 +15,6 @@ static void agentLog(NSString *msg)
                                                attributes:nil error:nil];
     NSString *path = [dir stringByAppendingPathComponent:@"agent.log"];
     NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
-    if (!fh)
-        fh = [NSFileHandle fileHandleForWritingAtPath:path];
     if (!fh) {
         [[NSData data] writeToFile:path atomically:YES];
         fh = [NSFileHandle fileHandleForWritingAtPath:path];

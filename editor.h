@@ -285,14 +285,22 @@ public:
                 m_exciteClock.start();
             }
             m_lastCharCount = cc;
-            // P3：增量脏区 = 变化块 + 光标旧/新位置（编辑器坐标）
+            // P3：增量脏区 = 变化范围内所有块（多行粘贴/清空/替换只标
+            // 首行会漏画——旧版单块标法靠 settle 自愈，连续打字时残影）
             {
-                const QTextBlock blk = document()->findBlock(qMin(from, qMax(0, cc - 1)));
-                QRect r = blockBoundingGeometryPub(blk)
-                              .translated(contentOffsetPub()).toAlignedRect()
-                              .translated(viewport()->pos());
-                r = r.intersected(viewport()->rect().translated(viewport()->pos()));
-                m_snapDirty |= r;
+                QTextBlock blk = document()->findBlock(qMin(from, qMax(0, cc - 1)));
+                const QTextBlock endBlk =
+                    document()->findBlock(qMin(from + added, qMax(0, cc - 1)));
+                for (;;) {
+                    QRect r = blockBoundingGeometryPub(blk)
+                                  .translated(contentOffsetPub()).toAlignedRect()
+                                  .translated(viewport()->pos());
+                    r = r.intersected(viewport()->rect().translated(viewport()->pos()));
+                    m_snapDirty |= r;
+                    if (blk == endBlk)
+                        break;
+                    blk = blk.next();
+                }
                 m_snapDirty |= m_lastCursorRect;
                 // 激发辉光（cell ±6px 三圈）超出光标矩形——脏区扩展覆盖
                 const int halo = qCeil(fontMetrics().horizontalAdvance(QLatin1Char('M'))) + 12;
@@ -416,6 +424,8 @@ public:
             return;
         m_dark = dark;
         markSnapshotFullDirty(); // 配色全变：增量不适用
+        if (m_crtView)
+            m_crtView->markDirty(); // 同时唤醒渲染环（否则等环境拍）
         applyScheme();
     }
 
@@ -593,7 +603,7 @@ public:
             {QChar(0x250F), QChar(0x2513), QChar(0x2517), QChar(0x251B),
              QChar(0x2501), QChar(0x2503)}, // 粗线
         };
-        const auto &s = st[style];
+        const auto &s = st[qBound(0, style, 3)]; // 防御：菜单只传 0-3
         // 笔画中心（ink 范围中点）：fallback 框线字形宽窄不一，
         // 按字面推进对齐必然错位——必须按笔画中心对齐
         const auto stemC = [&fm](QChar ch) {
@@ -3674,7 +3684,7 @@ protected:
             // 记录指针位置（画笔足迹用，所有模式都跟踪）；鼠标即人眼——
             // 着色器逐帧读它做视差
             if (event->type() == QEvent::MouseMove && m_crtView && m_crt)
-                m_crtView->update();
+                m_crtView->markDirty(); // 视差/墨迹/足迹需即时（update 被 P1 压到环境拍）
             // 离开视口（非作画会话）：清足迹并重置缩放锚点，避免锚在陈旧位置
             if (event->type() == QEvent::Leave && !m_inkSession) {
                 m_lastMouse = QPointF(-1, -1);

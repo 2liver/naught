@@ -338,13 +338,14 @@ void CrtView::renderFrame()
     m_readbackInFlight = true;
     m_readbackClock.start();
     const int gen = ++m_readbackGen;
-    rb->completed = [this, rb, gen] {
-        QMetaObject::invokeMethod(this, [this, rb, gen] {
+    const QSize readSize = m_texSize; // 值捕获：回读期间 resize 不改目标尺寸
+    rb->completed = [this, rb, gen, readSize] {
+        QMetaObject::invokeMethod(this, [this, rb, gen, readSize] {
             if (gen != m_readbackGen) { // 看门狗已复位管线：陈旧回读作废
                 delete rb;
                 return;
             }
-            QImage img(m_texSize, QImage::Format_RGBA8888);
+            QImage img(readSize, QImage::Format_RGBA8888);
             if (!img.isNull() && !rb->data.isEmpty())
                 memcpy(img.bits(), rb->data.constData(),
                        qMin(size_t(img.sizeInBytes()), size_t(rb->data.size())));
