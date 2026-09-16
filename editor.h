@@ -199,7 +199,20 @@ public:
             }
             syncNativeCaretWidth();
         });
-        connect(document(), &QTextDocument::contentsChanged, this, [this] {
+        connect(document(), &QTextDocument::contentsChange, this,
+                [this](int, int removed, int added) {
+            // 只有真实文字变化（插入/删除）才算"手动编辑"；
+            // 格式变化（高亮器 rehighlight 的同步/异步 chunk）不杀画布——
+            // 否则打印期间连按 Cmd+B：高亮器在切编之后异步上色，
+            // contentsChanged(0,0,0) 误触发反激活 → 打印被杀、画布被吞。
+            const bool textChange = removed > 0 || added > 0;
+            if (!textChange) {
+                if (m_crtView) {
+                    m_crtView->markDirty();
+                    m_crtSettleTimer.start(400);
+                }
+                return;
+            }
             wakeCaret();
             m_lastWasInk = false;
             // M3：手动编辑 = 字符画回归普通文本（程序打印/替换不受影响）
@@ -2144,6 +2157,32 @@ public:
                 QApplication::processEvents();
                 if (e.toPlainText() != afterZoom) {
                     qWarning("selftest FAIL: post-art typing not undoable");
+                    return false;
+                }
+                e.setPlainText(QStringLiteral("無\n"));
+            }
+            // 回归（用户报：打印期间 Cmd+B 会删字符）：打印不等待，
+            // 连续多次切编交错打印拍 → 画布必须一字不少
+            {
+                e.setPlainText(QString());
+                e.loadAsciiImage(simg);
+                waitPrint();
+                const int fullLen = e.toPlainText().size(); // 参考全长
+                e.setPlainText(QStringLiteral("开头文字\n"));
+                e.moveCursor(QTextCursor::End);
+                e.loadAsciiImage(simg); // 打印开始——不等待
+                for (int i = 0; i < 10; ++i) {
+                    QKeyEvent kb(QEvent::KeyPress, Qt::Key_B, Qt::ControlModifier);
+                    QApplication::sendEvent(&e, &kb); // 打印期间切编
+                    QEventLoop lp; // 让打印拍与切编交错
+                    QTimer::singleShot(5, &lp, &QEventLoop::quit);
+                    lp.exec();
+                }
+                waitPrint();
+                if (!e.m_asciiActive || !e.toPlainText().startsWith(QStringLiteral("开头文字\n"))
+                    || e.toPlainText().size() != fullLen + 5) {
+                    qWarning("selftest FAIL: rapid code toggles during print ate text (cc=%d want %d)",
+                             int(e.toPlainText().size()), fullLen + 5);
                     return false;
                 }
                 e.setPlainText(QStringLiteral("無\n"));
