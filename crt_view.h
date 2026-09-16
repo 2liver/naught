@@ -65,6 +65,8 @@ private:
     bool m_forceNow = false;
     bool m_readbackInFlight = false;
     int m_readbackGen = 0; // 回读代次：看门狗复位后陈旧回调作废
+    bool m_renderDirty = false;   // 脏驱动：有变化才整链渲染
+    QElapsedTimer m_ambientClock; // 环境动态（滚动带/颗粒/余晖）低帧率拍
     QElapsedTimer m_sinceRefresh;
     QElapsedTimer m_clock;    // 运行秒数（噪声/刷新带的时间源）
     QElapsedTimer m_warmClock; // 入场暖机（showEvent 起拍）

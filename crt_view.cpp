@@ -52,6 +52,7 @@ void CrtView::markDirty(bool force)
 {
     if (force)
         m_forceNow = true; // 绕过 80ms 节流（缩放等必须立即重拍）
+    m_renderDirty = true; // 脏驱动：整链（快照+GPU+回读）只在有变化时跑
     update();
 }
 
@@ -219,6 +220,15 @@ void CrtView::renderFrame()
     }
     if (m_readbackInFlight)
         return;
+    // P1 脏驱动：无变化且未到环境拍 → 整链跳过（旧版无脏也每 80ms
+    // 全屏快照+GPU+回读，闲置 CPU 与电池被持续吃掉）。环境拍 120ms
+    // 保底滚动带/颗粒/余晖的持续推进
+    const bool dirty = m_renderDirty || m_forceNow;
+    const bool ambient = !m_ambientClock.isValid() || m_ambientClock.elapsed() > 120;
+    if (!dirty && !ambient)
+        return;
+    m_renderDirty = false;
+    m_ambientClock.restart();
     const QSize want(qMax(1, int(width() * devicePixelRatioF())),
                      qMax(1, int(height() * devicePixelRatioF())));
     if (want != m_texSize) {

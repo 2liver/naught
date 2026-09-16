@@ -226,6 +226,8 @@ public:
                 return;
             }
             syncNativeCaretWidth();
+            if (m_crtView)
+                m_crtView->markDirty(); // 脏驱动下块光标闪烁需显式标脏
         });
         connect(document(), &QTextDocument::contentsChange, this,
                 [this](int, int removed, int added) {
