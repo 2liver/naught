@@ -94,6 +94,12 @@ public:
             if (id >= 0 && !QFontDatabase::applicationFontFamilies(id).isEmpty())
                 s_greenFamily = QFontDatabase::applicationFontFamilies(id).first();
         }
+        if (s_whiteFamily.isEmpty()) {
+            const int id = QFontDatabase::addApplicationFont(
+                QStringLiteral(":/fonts/classic/FSEX302.ttf"));
+            if (id >= 0 && !QFontDatabase::applicationFontFamilies(id).isEmpty())
+                s_whiteFamily = QFontDatabase::applicationFontFamilies(id).first();
+        }
         seedClassicFonts(); // 出厂经典库存（首次启动播种，可删可改名）
         refreshFonts(); // 用户字体文件夹（可含嵌套子文件夹）
         // 暂时默认：跨启动记忆上次选用的字体（按机器；字体被删则回出厂）
@@ -634,16 +640,18 @@ public:
     {
         return m_machine == 1 ? Crt::kGreen
              : m_machine == 2 ? Crt::kC64
-             : m_machine == 3 ? Crt::kApple
+             : m_machine == 3 ? Crt::kWhite
              : Crt::kAmber;
     }
     int machine() const { return m_machine; }
     bool machineGreen() const { return m_machine == 1; }
     void toggleMachine()
     {
-        m_machine = (m_machine + 1) % 4; // 琥珀 → 绿磷 → C64 → 苹果 II → 琥珀
+        m_machine = (m_machine + 1) % 4; // 琥珀 → 绿磷 → C64 → IBM PC → 琥珀
         applyScheme();
         applyZoom(); // 字体随机器切换（Fusion Pixel ↔ VT323）
+        if (m_asciiActive)
+            replaceAsciiArt(); // 画布在场 → 按新机器重印（真彩 ↔ 单色即时切换）
         viewport()->update();
         if (m_canvas)
             m_canvas->update();
@@ -728,7 +736,8 @@ public:
         refreshFonts(); // 每次重扫：刚拖入的字体即时可用
         if (m_userFonts.isEmpty())
             return;
-        const QString factory = (m_machine == 0) ? s_crtFamily : s_greenFamily;
+        const QString factory = (m_machine == 0) ? s_crtFamily
+                               : (m_machine == 3) ? s_whiteFamily : s_greenFamily;
         const QStringList all = QStringList() << factory << m_userFonts;
         int idx = all.indexOf(crtFontFamily());
         if (idx < 0)
@@ -777,7 +786,8 @@ public:
         const QString &u = m_machine == 1 ? m_greenUser : m_machine == 2 ? m_appleUser : m_amberUser;
         if (!u.isEmpty() && m_userFonts.contains(u))
             return u;
-        return (m_machine == 0) ? s_crtFamily : s_greenFamily; // 出厂回退（绿磷/苹果共用 VT323）
+        return (m_machine == 0) ? s_crtFamily
+             : (m_machine == 3) ? s_whiteFamily : s_greenFamily; // 出厂回退
     }
 
     // ---- M3：拖图片 → 字符画（隐藏功能，README 不提及）----
@@ -901,6 +911,10 @@ public:
         m_asciiEnd = end;
         m_lastArtStart = start;
         m_lastArtEnd = end;
+        // 清掉上一轮画布的残留打印状态（防旧打印头污染新画布范围）
+        m_asciiPrintTimer.stop();
+        m_asciiPrinting = false;
+        m_asciiPrintPos = start;
         m_asciiActive = true;
     }
 
@@ -1786,12 +1800,12 @@ public:
                 qWarning("selftest FAIL: C64 machine palette not applied");
                 return false;
             }
-            e.toggleMachine(); // 苹果 II（白磷 + 橙/蓝伪影）
-            if (e.crtPalette().ink != Crt::kApple.ink
-                || e.palette().color(QPalette::Text) != Crt::kApple.ink
-                || e.palette().color(QPalette::Base) != Crt::kApple.bg
+            e.toggleMachine(); // IBM PC 白磷（CGA 白字，FSEX302 字库）
+            if (e.crtPalette().ink != Crt::kWhite.ink
+                || e.palette().color(QPalette::Text) != Crt::kWhite.ink
+                || e.palette().color(QPalette::Base) != Crt::kWhite.bg
                 || e.machine() != 3) {
-                qWarning("selftest FAIL: apple machine palette not applied");
+                qWarning("selftest FAIL: white machine palette not applied");
                 return false;
             }
             e.toggleMachine();
@@ -2654,6 +2668,8 @@ private:
             stopHighlight();
 #endif
         }
+        if (m_asciiActive)
+            replaceAsciiArt(); // 画布在场 → 按当前机器/字体重印（防"失去颜色"）
         viewport()->update();
     }
 
@@ -3081,7 +3097,7 @@ private:
     qreal m_brushSize = 20.0;
     QPointF m_lastMouse = QPointF(-1, -1);
     bool m_viewLock = true; // 显·追随视角锁定（M1）：进显重置，Cmd+Shift+T 切换
-    int m_machine = 0;        // 显·切换计算机：0 琥珀 / 1 绿磷 / 2 C64 真彩 / 3 苹果 II
+    int m_machine = 0;        // 显·切换计算机：0 琥珀 / 1 绿磷 / 2 C64 真彩 / 3 IBM PC 白磷
     QStringList m_userFonts;  // 字体文件夹族名（文件顺序）
     QString m_amberUser;      // 琥珀机器的手选字体（会话内，空 = 出厂）
     QString m_greenUser;      // 绿磷机器的手选字体（会话内，空 = 出厂）
@@ -3122,6 +3138,7 @@ private:
     CrtView *m_crtView = nullptr;
     static inline QString s_crtFamily;   // 出厂琥珀：Fusion Pixel（qrc）
     static inline QString s_greenFamily; // 出厂绿磷：VT323（qrc）
+    static inline QString s_whiteFamily; // 出厂白磷：Fixedsys Excelsior（CC0，qrc）
     QTimer m_crtSettleTimer;
 
 #ifdef NAUGHT_WITH_HIGHLIGHT
