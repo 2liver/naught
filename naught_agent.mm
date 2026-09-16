@@ -75,20 +75,26 @@ int main(int argc, char **argv)
                              stringByDeletingLastPathComponent];
         NSString *keep = mainApp; // 回调数据（进程存续期持有）
 
-        // ⌃⇧⌘N
-        EventHotKeyRef hotKey = NULL;
+        // ⌃⇧⌘N：被占不退出——5 秒后重试，成功即装 handler（常驻等让位）
+        __block EventHotKeyRef hotKey = NULL;
         const EventHotKeyID hotKeyId = { 'nagt', 1 };
-        const OSStatus st = RegisterEventHotKey(kVK_ANSI_N, cmdKey | controlKey | shiftKey,
-                                                hotKeyId, GetApplicationEventTarget(),
-                                                0, &hotKey);
-        if (st != noErr) {
-            agentLog([NSString stringWithFormat:@"hotkey registration failed: %d", (int)st]);
-            return 1;
-        }
-        const EventTypeSpec spec = { kEventClassKeyboard, kEventHotKeyPressed };
-        InstallEventHandler(GetApplicationEventTarget(),
-                            NewEventHandlerUPP(hotKeyHandler), 1, &spec,
-                            (__bridge void *)keep, NULL);
+        void (^tryRegister)(void) = ^{
+            const OSStatus st2 = RegisterEventHotKey(kVK_ANSI_N, cmdKey | controlKey | shiftKey,
+                                                     hotKeyId, GetApplicationEventTarget(),
+                                                     0, &hotKey);
+            if (st2 == noErr) {
+                const EventTypeSpec spec = { kEventClassKeyboard, kEventHotKeyPressed };
+                InstallEventHandler(GetApplicationEventTarget(),
+                                    NewEventHandlerUPP(hotKeyHandler), 1, &spec,
+                                    (__bridge void *)keep, NULL);
+                agentLog(@"agent up (registered)");
+            } else {
+                agentLog([NSString stringWithFormat:@"hotkey busy (%d), retry in 5s", (int)st2]);
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC),
+                               dispatch_get_main_queue(), tryRegister);
+            }
+        };
+        tryRegister();
         agentLog([@"agent up: " stringByAppendingString:mainApp]);
         [NSApp run]; // 登录项应用的事件循环：Carbon 热键在此派发
     }

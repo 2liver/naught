@@ -37,6 +37,7 @@
 #include <QRegularExpression>
 #include <QResizeEvent>
 #include <QScrollBar>
+#include <QSet>
 #include <QSettings>
 #include <QStandardPaths>
 #include <QStyleHints>
@@ -1327,11 +1328,17 @@ public:
         QDirIterator it(dir, { QStringLiteral("*.ttf"), QStringLiteral("*.otf") },
                         QDir::Files, QDirIterator::Subdirectories);
         while (it.hasNext()) {
-            const int id = QFontDatabase::addApplicationFont(it.next());
+            const QString path = QFileInfo(it.next()).canonicalFilePath();
+            // 去重：cycleCrtFont 每次重扫重复注册同一文件，字体库缓存增长
+            if (s_registeredFonts.contains(path))
+                continue;
+            const int id = QFontDatabase::addApplicationFont(path);
             if (id >= 0) {
                 const QStringList fams = QFontDatabase::applicationFontFamilies(id);
-                if (!fams.isEmpty())
+                if (!fams.isEmpty()) {
+                    s_registeredFonts.insert(path);
                     families.append(fams.first());
+                }
             }
         }
         return families;
@@ -2660,6 +2667,31 @@ public:
             e.centerToWidth(); // 居中：左补空格
             if (!e.toPlainText().startsWith(QLatin1Char(' '))) {
                 qWarning("selftest FAIL: centerToWidth no padding");
+                return false;
+            }
+            e.setPlainText(QStringLiteral("無\n"));
+        }
+        // 撤销基线回归：格式化操作 = 一步撤销（Qt 编辑块合并语义是
+        // 本应用的依赖项——升级 Qt 前必过的哨兵）
+        {
+            e.setPlainText(QStringLiteral("甲\n乙\n丙\n"));
+            e.selectAll();
+            e.formatBox(0); // 框 = 一步撤销
+            const QString boxed2 = e.toPlainText();
+            QKeyEvent ku(QEvent::KeyPress, Qt::Key_Z, Qt::ControlModifier);
+            QApplication::sendEvent(&e, &ku);
+            QApplication::processEvents();
+            if (e.toPlainText() != QStringLiteral("甲\n乙\n丙\n")) {
+                qWarning("selftest FAIL: box not one-undo-step");
+                return false;
+            }
+            e.setPlainText(QStringLiteral("甲乙\n"));
+            e.selectAll();
+            e.centerToWidth();
+            QApplication::sendEvent(&e, &ku);
+            QApplication::processEvents();
+            if (!e.toPlainText().startsWith(QStringLiteral("甲乙"))) {
+                qWarning("selftest FAIL: center not one-undo-step");
                 return false;
             }
             e.setPlainText(QStringLiteral("無\n"));
@@ -4160,6 +4192,7 @@ private:
     static inline QString s_greenFamily; // 出厂绿磷：VT323（qrc）
     static inline QString s_whiteFamily; // 出厂白磷：Fixedsys Excelsior（CC0，qrc）
     static inline QString s_c64Family;  // 出厂 C64：Press Start 2P（OFL，qrc）
+    static inline QSet<QString> s_registeredFonts; // 已注册字体文件（去重）
     QTimer m_crtSettleTimer;
     QTimer m_scrollSettle;  // 滚动停稳计时：结束后补全量快照
     bool m_scrolling = false;
