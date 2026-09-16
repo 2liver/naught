@@ -41,6 +41,16 @@ float hash21(vec2 p)
     return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
 }
 
+// 磷粉栅条纹：束斑扫过栅条的软调制。period = 栅周期（物理像素），
+// phase = 通道相位。C64 真彩管红/绿/蓝三栅各差 1/3 周期（3px 一组
+// RGB），白色笔画上逐列轮流压暗一个通道——细密 RGB 栅纹（彩色 CRT
+// 指纹）；单色机整面单色粉，无三色结构，保持 1px 周期单栅
+float stripe(float spx, float phase, float period, float halfW, float grad)
+{
+    float maskPhase = fract((spx + phase + grad) / period);
+    return 1.0 - 0.22 * smoothstep(0.5 - halfW, 0.5 + halfW, maskPhase);
+}
+
 void main()
 {
     // ---- 内容空间：弯曲的电子图像（含视差）。栅网/扫描线/玻璃都在
@@ -53,8 +63,7 @@ void main()
 
     // 真衍射：内容空间亮边 ±1px R/B 彩边（bright(x)−bright(x±1) 差分，
     // 与 Crt::edgeDiff 同模型，强度 kDiffAlpha=0.30）。
-    // 苹果 II（flags.y=2）：NTSC 复合信号的橙/蓝色差伪影——同机制、
-    // 更宽更强、色相改橙/蓝
+    // 白磷机（flags.y=3，IBM PC 5150）：单色荧光粉——衍射无彩，改中性白边
     {
         const float px = 1.0 / ubuf.texSize.x;
         vec3 lm = sampleAt(clamp(cuv - vec2(px, 0.0), 0.0, 1.0));
@@ -62,11 +71,10 @@ void main()
         const vec3 w = vec3(0.333);
         float eR = max(0.0, dot(col, w) - dot(rp, w));
         float eB = max(0.0, dot(col, w) - dot(lm, w));
-        float apple = step(2.5, ubuf.flags.y); // 机器 3 = 苹果 II
-        // 调研值：橙 #FF6A00、蓝 #3F5FFF，亮边渗色 30-50% 取 0.45
-        float frg = mix(0.30, 0.45, apple);
-        vec3 tR = mix(vec3(1.0, 0.15, 0.02), vec3(1.0, 0.42, 0.0), apple);
-        vec3 tB = mix(vec3(0.02, 0.15, 1.0), vec3(0.25, 0.37, 1.0), apple);
+        float white = step(3.5, ubuf.flags.y); // 机器 3 = 白磷（苹果 II 已归档）
+        float frg = mix(0.30, 0.22, white);
+        vec3 tR = mix(vec3(1.0, 0.15, 0.02), vec3(0.90, 0.92, 1.0), white);
+        vec3 tB = mix(vec3(0.02, 0.15, 1.0), vec3(0.90, 0.92, 1.0), white);
         col += tR * eR * frg;
         col += tB * eB * frg;
     }
@@ -102,16 +110,25 @@ void main()
 
     // ---- 屏幕空间：固定不动的磷粉栅、扫描线（真玻璃结构）----
     vec2 sp = v_uv * ubuf.texSize; // 屏幕物理像素
-    // 磷粉栅：束斑扫过栅条的软调制——束斑越宽（亮处）暗带越宽；
-    // 束斑水平偏转（内容水平梯度）让栅相位微移，斜边出摩尔纹
+    // 磷粉栅：束斑越宽（亮处）暗带越宽；束斑水平偏转（内容水平梯度）
+    // 让栅相位微移，斜边出摩尔纹。
+    // C64（flags.y=2）真彩管：红/绿/蓝三条荧光粉栅按 3px 周期错相排列
+    // ——逐通道调制，白字出 RGB 栅纹；单色机保持单栅
     {
         const float px = 1.0 / ubuf.texSize.x;
         float lumL = dot(sampleAt(clamp(cuv - vec2(px, 0.0), 0.0, 1.0)), vec3(0.333));
         float lumR = dot(sampleAt(clamp(cuv + vec2(px, 0.0), 0.0, 1.0)), vec3(0.333));
         float beamW = mix(0.12, 0.42, smoothstep(0.05, 0.9, lum));
-        float maskPhase = fract(sp.x + (lumL - lumR) * 0.5);
-        float stripe = 1.0 - 0.22 * smoothstep(0.5 - beamW, 0.5 + beamW, maskPhase);
-        col *= stripe;
+        float grad = (lumL - lumR) * 0.5;
+        bool c64 = ubuf.flags.y > 1.5 && ubuf.flags.y < 2.5;
+        if (c64) {
+            float hw = mix(0.08, 0.20, smoothstep(0.05, 0.9, lum));
+            col.r *= stripe(sp.x, 0.0, 3.0, hw, grad);
+            col.g *= stripe(sp.x, 1.0, 3.0, hw, grad);
+            col.b *= stripe(sp.x, 2.0, 3.0, hw, grad);
+        } else {
+            col *= stripe(sp.x, 0.0, 1.0, beamW, grad);
+        }
     }
     float scanline = step(0.5, fract(sp.y));
     col *= 1.0 - 0.18 * scanline;
@@ -133,11 +150,26 @@ void main()
         col += ubuf.refl.rgb * refl * 0.045;
     }
 
-    // 滚动刷新带：暗带 3 秒扫一周（屏幕空间，扫描时序）
+    // 滚动刷新带。单色机：暗带 3 秒扫一周（屏幕空间，气氛）。
+    // C64（flags.y=2）：真扫描时序——激励线 0.7s 扫一场的慢放镜头：
+    // 电子束逐点逐行轰击、先亮后灭——线上束流过冲（1.30），线后
+    // ~6% 屏高内指数熄灭（P22 快分量），线下方本场未扫到、靠上一场
+    // 余晖微暗（0.86）。波面清晰可辨但不闪眼。
     {
-        float phase = fract(ubuf.timeInfo.x * 0.333);
-        float band = 1.0 - smoothstep(0.0, 0.035, abs(v_uv.y - phase));
-        col *= 1.0 - 0.22 * (1.0 - band);
+        bool c64 = ubuf.flags.y > 1.5 && ubuf.flags.y < 2.5;
+        if (c64) {
+            float H = ubuf.texSize.y;
+            float scan = fract(ubuf.timeInfo.x * (1.0 / 0.7)); // 自上而下
+            float d = sp.y - scan * H; // >0 未扫到；<0 刚扫过
+            float tail = exp(max(d, -H) * (20.0 / H)); // 熄灭指数
+            float pulse = smoothstep(-H * 0.06, 0.0, d); // 束流在线上
+            float exc = clamp(tail * pulse, 0.0, 1.0);
+            col *= 0.86 + 0.44 * exc; // 0.86 → 1.30 过冲 → 回落
+        } else {
+            float phase = fract(ubuf.timeInfo.x * 0.333);
+            float band = 1.0 - smoothstep(0.0, 0.035, abs(v_uv.y - phase));
+            col *= 1.0 - 0.22 * (1.0 - band);
+        }
     }
 
     // 入场暖机：由暗到亮的一次预热脉冲（过冲后回落，~1.4s 结束）

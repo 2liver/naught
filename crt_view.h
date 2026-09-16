@@ -36,6 +36,7 @@ public:
         ensureRhi();
     }
     QImage frameImage() const { return m_pending; }
+    QImage shownImage() const { return m_shown; } // 着色后回读帧（GPU 真输出）
 
 protected:
     void paintEvent(QPaintEvent *) override;

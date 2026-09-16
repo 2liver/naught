@@ -645,6 +645,10 @@ public:
     {
         return m_crtView ? m_crtView->frameImage() : QImage();
     }
+    QImage crtShownImage() const
+    {
+        return m_crtView ? m_crtView->shownImage() : QImage();
+    }
     // 人眼代理：鼠标在视口内的位置（反光视差追踪用）
     QPointF lastMouseViewport() const { return m_lastMouse; }
     // 追随视角锁定（M1）：true = 复现鼠标离开窗口后的"完美视角"
@@ -1986,6 +1990,46 @@ public:
             QApplication::processEvents();
             if (!relocked) {
                 qWarning("selftest FAIL: view lock not reset on re-entering CRT");
+                return false;
+            }
+        }
+        // CRT 管线冒烟（C64 三色栅 + 行扫描激励）：渲两机各一帧落盘，
+        // 供人工/取证核对（shader 编译失败 = 黑帧 + 空图）
+        {
+            auto waitFrames = [&](int ms) {
+                QElapsedTimer clk;
+                clk.start();
+                while (clk.elapsed() < ms) {
+                    QEventLoop lp;
+                    QTimer::singleShot(30, &lp, &QEventLoop::quit);
+                    lp.exec();
+                }
+            };
+            e.setPlainText(QStringLiteral("無無無 WuWu\nAABBCC 123456\n"));
+            while (e.machine() != 2)
+                e.toggleMachine(); // C64
+            e.toggleCrt();
+            waitFrames(1600);
+            const QImage f2 = e.crtSnapImage();
+            f2.save(QStringLiteral("/tmp/crt_c64_a.png"));
+            e.crtShownImage().save(QStringLiteral("/tmp/crt_c64_a_gpu.png"));
+            waitFrames(600);
+            e.crtShownImage().save(QStringLiteral("/tmp/crt_c64_b_gpu.png"));
+            e.toggleCrt();
+            if (f2.isNull() || f2.size().isEmpty()) {
+                qWarning("selftest FAIL: c64 crt frame empty");
+                return false;
+            }
+            while (e.machine() != 0)
+                e.toggleMachine(); // 琥珀（单色栅对照）
+            e.toggleCrt();
+            waitFrames(1600);
+            const QImage f0 = e.crtSnapImage();
+            f0.save(QStringLiteral("/tmp/crt_amber.png"));
+            e.crtShownImage().save(QStringLiteral("/tmp/crt_amber_gpu.png"));
+            e.toggleCrt();
+            if (f0.isNull() || f0.size().isEmpty()) {
+                qWarning("selftest FAIL: amber crt frame empty");
                 return false;
             }
         }
