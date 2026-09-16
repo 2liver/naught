@@ -627,7 +627,9 @@ public:
     static void seedClassicFonts()
     {
         const QString dir = fontDir();
-        if (QDir(dir).exists())
+        // 文件夹存在但为空（例如「打开字体文件夹」先建了空目录）也要播种；
+        // 删光后重启 = 重新播种（软恢复出厂）
+        if (QDir(dir).exists() && !QDir(dir).entryList(QDir::Files, QDir::Name).isEmpty())
             return;
         QDir().mkpath(dir);
         const QStringList classics = {
@@ -765,6 +767,50 @@ public:
                                      * (cw / ch)));
         return Ascii::imageToText(m_asciiImage, cols, rows);
     }
+    // 「立为图」：把选区栅格化成字符画的源图——之后 Shift+缩放即可调
+    // 画布（网格重渲染）。编辑过的字符画想重新锁定画布，选中它再立为图
+    // 即可（编辑成果保留进源图）。选中任意文字也能立为图。
+    void declareArtFromSelection()
+    {
+        QTextCursor c = textCursor();
+        if (!c.hasSelection())
+            return;
+        const int start = c.selectionStart();
+        const int end = c.selectionEnd();
+        QTextCursor t = textCursor();
+        t.setPosition(start);
+        t.setPosition(end, QTextCursor::KeepAnchor);
+        const QString sel = t.selectedText();
+        const QFont f = activeFont();
+        const QFontMetricsF fm(f);
+        const qreal cw = fm.horizontalAdvance(QLatin1Char('M'));
+        const qreal lh = fm.height();
+        const QStringList lines = sel.split(QLatin1Char('\n'));
+        int maxLen = 1;
+        for (const QString &l : lines)
+            maxLen = qMax(maxLen, int(l.size()));
+        QImage raster(qMax(8, int(maxLen * cw) + 8),
+                      qMax(8, int(lines.size() * lh) + 8),
+                      QImage::Format_ARGB32);
+        raster.fill(Qt::black);
+        {
+            QPainter p(&raster);
+            p.setFont(f);
+            p.setPen(Qt::white);
+            qreal y = lh;
+            for (const QString &l : lines) {
+                p.drawText(QPointF(4.0, y), l);
+                y += lh;
+            }
+        }
+        m_asciiImage = raster;
+        m_asciiScale = 1.0;
+        m_asciiBaseCols = maxLen; // 当前观感：列数 = 选区最长行
+        m_asciiStart = start;
+        m_asciiEnd = end;
+        m_asciiActive = true;
+    }
+
     // 用新画布尺寸原位替换已插入的字符画（不产生重复）
     void replaceAsciiArt()
     {
@@ -1781,6 +1827,23 @@ public:
                 }
                 e.setPlainText(QStringLiteral("無\n")); // 还原，防污染后续
             }
+            // 「立为图」：任意选区 → 立为图 → 画布缩放可用
+            {
+                e.setPlainText(QStringLiteral("一二三\n四五六\n"));
+                e.selectAll();
+                e.declareArtFromSelection();
+                if (!e.m_asciiActive) {
+                    qWarning("selftest FAIL: declare-art did not activate");
+                    return false;
+                }
+                e.zoomAsciiCanvas(1.2);
+                QApplication::processEvents();
+                if (e.toPlainText().isEmpty()) {
+                    qWarning("selftest FAIL: declare-art canvas zoom emptied doc");
+                    return false;
+                }
+                e.setPlainText(QStringLiteral("無\n"));
+            }
         }
         // 字体管理：空/不存在目录 → 扫描为空；循环后族名永不为空（出厂回退）
         {
@@ -2004,6 +2067,10 @@ protected:
             case Qt::Key_M:
                 if (event->modifiers() & Qt::ShiftModifier)
                     toggleMachine(); // 显·切换计算机：M = Machine（琥珀 ↔ 绿磷）
+                return;
+            case Qt::Key_A:
+                if (event->modifiers() & Qt::ShiftModifier)
+                    declareArtFromSelection(); // 立为图：选区 → 字符画源图（可调画布）
                 return;
             case Qt::Key_I:
                 setDark(true); // 阴：I 如冰（阴冷）
