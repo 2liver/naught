@@ -136,6 +136,7 @@
 - 已部署到 `~/Applications/naught.app`（启动台「無」，自包含 Qt+KF6）。
 - **下一步 = M7 重构与性能**（crt 管线出 editor.h → crt.{h,cpp}；bench 驱动优化）；M8 GitHub 仍最后。M6 已落地（06457a8）：自杀 ⌃⌘N（「项」菜单 + Control+Meta 双修饰键路由）、--agent 登录项代理（Carbon 全局热键 ⌃⇧⌘N → LSOpen 主应用，无授权要求）、--install 安装程序（plist + launchctl + lsregister，幂等）。**坑：QDir(applicationFilePath) 会把二进制名当目录导致 canonical 为空——用 applicationDirPath。**
 - 已额外落地：四机循环——琥珀/绿磷/**C64 真彩**（16 色逐字符前景色字符画，8f72154）/**IBM PC 5150 白磷**（Fixedsys Excelsior CC0 字库，d7764f1）；切机/切编即时重印（d7764f1）；苹果 II 白磷已归档（NTSC 伪影资料存档案区）。字符画逐行打印 + 画布三缩放语义 + 最佳化（950a565）；实验功能并入体系（字符网格→显模式 Cmd+0，屏幕实体→解锁追随视角）；全屏冻结修复（5734eb2）。
+- 已修复（重生·终局）：launchd 裸进程收不到系统热键投递（日志实证按键从未到达）——代理改为独立纯 Cocoa 登录项应用 naught-agent.app（LSUIElement，LSSharedFileList 注册登录项，NSApp 事件循环）。Launchpad「已不能再打开」= LS 陈旧注册 + 部署包累积脏状态 → 病方：rm -rf 部署包 → 全新 install → macdeployqt → KF6 → codesign（install_name_tool 后必须重签）→ --install → open。
 - 已修复（重生热键无反应·二连）：(1) 应用侧自杀键未判 Shift——⌃⇧⌘N 会先自杀（补 !Shift 隔离）；(2) launchd 裸进程收不到系统级热键投递——代理改 QGuiApplication + NSApplication Accessory 激活策略（无 Dock 的会话 GUI 进程，main.cpp→main.mm）。handler 落盘日志 + --agent-selftest 合成事件自测（已验证 handler→LSOpen 全链）。
 - 已修复（7f4d998）立为图 \u2029 巨行炸弹（换机连按卡死）：selectedText() 段落分隔为 \u2029，split('\n') 劈不开 → 整段一行 → baseCols=全文长度 → 换机重印 200 万字符级巨幅 → 卡死。改 toPlainText().mid() + 画布列数封顶 400 + 总量护栏（任何路径 ≤20 万字符等比缩回）。同类排查：其余 split 均作用于 toPlainText（安全）。
 - 已修复（f2c665d）八点反馈：居中偏右（CJK=2 计数→字体真实推进）；线框右封口弧线（内容区宽按空格网格取整）；格式化触碰画布→重勾恢复链路（反激活剥 C64 前景色，换机不再泄漏真彩）；滚动降载（滚动期快照跳过余晖+辉光，停稳补全量）；柔和化（颗粒 0.02、C64 波 0.96+0.07、暗角 0.14/0.20 起暗后移）；「项」菜单分区重排 + 格式库快捷键（⇧⌘1-4/J/K/P/R）。
