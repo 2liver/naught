@@ -34,6 +34,7 @@
 #include <QPalette>
 #include <QPlainTextEdit>
 #include <QPointF>
+#include <QRegularExpression>
 #include <QResizeEvent>
 #include <QScrollBar>
 #include <QSettings>
@@ -440,6 +441,403 @@ public:
         c.endEditBlock();
         c.setPosition(lines.first().position());
         c.setPosition(lines.last().position() + lines.last().length() - 1, QTextCursor::KeepAnchor);
+        setTextCursor(c);
+        wakeCaret();
+    }
+
+    // ---- 格式化库（自 AsciiTools 移植：框/压行/路径树）+ 居中 ----
+    // CJK 等宽字符按 2 格计算（与 AsciiTools 同约定，保证对齐）
+    static int displayWidth(const QString &s)
+    {
+        int w = 0;
+        for (QChar ch : s) {
+            const ushort cp = ch.unicode();
+            w += (cp > 0x2E80 && cp != 0x303F) ? 2 : 1;
+        }
+        return w;
+    }
+    // 框：选区（或当前行）加框线图——单线/双线/圆角/粗线。整框保持选中
+    // （链式操作）；一步撤销
+    void formatBox(int style)
+    {
+        QTextDocument *doc = document();
+        if (doc->isEmpty())
+            return;
+        QTextCursor c = textCursor();
+        QTextBlock first = doc->findBlock(c.selectionStart());
+        QTextBlock last = doc->findBlock(c.selectionEnd());
+        if (last.position() == c.selectionEnd() && last != first)
+            last = last.previous(); // 选区恰在行首结束：上一行才是最后受影响行
+        QStringList lines;
+        int maxW = 1;
+        for (QTextBlock b = first;; b = b.next()) {
+            lines.append(b.text());
+            maxW = qMax(maxW, displayWidth(lines.last()));
+            if (b == last)
+                break;
+        }
+        const struct {
+            QChar tl, tr, bl, br, h, v;
+        } st[4] = {
+            {QChar(0x250C), QChar(0x2510), QChar(0x2514), QChar(0x2518),
+             QChar(0x2500), QChar(0x2502)}, // 单线
+            {QChar(0x2554), QChar(0x2557), QChar(0x255A), QChar(0x255D),
+             QChar(0x2550), QChar(0x2551)}, // 双线
+            {QChar(0x256D), QChar(0x256E), QChar(0x2570), QChar(0x256F),
+             QChar(0x2500), QChar(0x2502)}, // 圆角
+            {QChar(0x250F), QChar(0x2513), QChar(0x2517), QChar(0x251B),
+             QChar(0x2501), QChar(0x2503)}, // 粗线
+        };
+        const auto &s = st[style];
+        const int pad = 1;
+        QString out = s.tl + QString(maxW + pad * 2, s.h) + s.tr
+                    + QLatin1Char('\n');
+        for (const QString &l : lines) {
+            out += s.v + QLatin1Char(' ') + l
+                 + QString(maxW - displayWidth(l) + pad, QLatin1Char(' '))
+                 + s.v + QLatin1Char('\n');
+        }
+        out += s.bl + QString(maxW + pad * 2, s.h) + s.br;
+        const int repStart = first.position();
+        const int repEnd = last.position() + last.length() - 1;
+        c.beginEditBlock();
+        c.setPosition(repStart);
+        c.setPosition(repEnd, QTextCursor::KeepAnchor);
+        c.insertText(out);
+        c.endEditBlock();
+        c.setPosition(repStart);
+        c.setPosition(repStart + out.size(), QTextCursor::KeepAnchor);
+        setTextCursor(c);
+        wakeCaret();
+    }
+    // 压行：选区（或全文）每行去首尾空白、空行跳过、以空格连成一行
+    void joinLinesTo()
+    {
+        QTextDocument *doc = document();
+        if (doc->isEmpty())
+            return;
+        QTextCursor c = textCursor();
+        const bool hadSel = c.hasSelection();
+        const int repStart = hadSel ? c.selectionStart() : 0;
+        int repEnd;
+        if (hadSel) {
+            repEnd = c.selectionEnd();
+        } else {
+            const QTextBlock lastBlk = doc->lastBlock();
+            repEnd = lastBlk.position() + qMax(0, lastBlk.length() - 1);
+        }
+        const QString sel = doc->toPlainText().mid(repStart, repEnd - repStart);
+        QStringList kept;
+        for (const QString &l : sel.split(QLatin1Char('\n'))) {
+            const QString t = l.trimmed();
+            if (!t.isEmpty())
+                kept.append(t);
+        }
+        if (kept.isEmpty())
+            return;
+        const QString joined = kept.join(QLatin1Char(' '));
+        c.beginEditBlock();
+        c.setPosition(repStart);
+        c.setPosition(repEnd, QTextCursor::KeepAnchor);
+        c.insertText(joined);
+        c.endEditBlock();
+        c.setPosition(repStart);
+        c.setPosition(repStart + joined.size(), QTextCursor::KeepAnchor);
+        setTextCursor(c);
+        wakeCaret();
+    }
+    // 还原：按 ; { } 语义切分回多行 + 2 空格缩进（括号内分号不切）；
+    // 内容不含代码分隔符则静默无效果（刚压完想反悔直接 Cmd+Z）
+    void restoreLines()
+    {
+        QTextDocument *doc = document();
+        if (doc->isEmpty())
+            return;
+        QTextCursor c = textCursor();
+        const bool hadSel = c.hasSelection();
+        const int repStart = hadSel ? c.selectionStart() : 0;
+        int repEnd;
+        if (hadSel) {
+            repEnd = c.selectionEnd();
+        } else {
+            const QTextBlock lastBlk = doc->lastBlock();
+            repEnd = lastBlk.position() + qMax(0, lastBlk.length() - 1);
+        }
+        const QString text = doc->toPlainText().mid(repStart, repEnd - repStart);
+        if (!text.contains(QLatin1Char(';')) && !text.contains(QLatin1Char('{'))
+            && !text.contains(QLatin1Char('}')))
+            return;
+        QString out;
+        int indent = 0;
+        int paren = 0;
+        const auto ind = [&indent] { return QString(2 * indent, QLatin1Char(' ')); };
+        for (int i = 0; i < text.size(); ++i) {
+            const QChar ch = text.at(i);
+            if (ch == QLatin1Char('('))
+                ++paren;
+            else if (ch == QLatin1Char(')'))
+                paren = qMax(0, paren - 1);
+            if (ch == QLatin1Char('{')) {
+                out += QLatin1Char('{');
+                out += QLatin1Char('\n');
+                ++indent;
+                while (i + 1 < text.size() && text.at(i + 1) == QLatin1Char(' '))
+                    ++i;
+                out += ind();
+            } else if (ch == QLatin1Char('}')) {
+                while (out.endsWith(QLatin1Char(' ')) || out.endsWith(QLatin1Char('\n')))
+                    out.chop(1);
+                indent = qMax(0, indent - 1);
+                out += QLatin1Char('\n');
+                out += ind();
+                out += QLatin1Char('}');
+                if (i + 1 < text.size() && text.at(i + 1) == QLatin1Char(';')) {
+                    out += QLatin1Char(';');
+                    ++i;
+                }
+                if (i + 1 < text.size()) {
+                    while (i + 1 < text.size() && text.at(i + 1) == QLatin1Char(' '))
+                        ++i;
+                    out += QLatin1Char('\n');
+                    out += ind();
+                }
+            } else if (ch == QLatin1Char(';') && paren == 0
+                       && (i + 1 == text.size() || text.at(i + 1) == QLatin1Char(' '))) {
+                out += QLatin1Char(';');
+                out += QLatin1Char('\n');
+                out += ind();
+                if (i + 1 < text.size() && text.at(i + 1) == QLatin1Char(' '))
+                    ++i;
+            } else {
+                out += ch;
+            }
+        }
+        out.replace(QRegularExpression(QStringLiteral("\n{3,}")), QStringLiteral("\n\n"));
+        out = out.trimmed();
+        c.beginEditBlock();
+        c.setPosition(repStart);
+        c.setPosition(repEnd, QTextCursor::KeepAnchor);
+        c.insertText(out);
+        c.endEditBlock();
+        c.setPosition(repStart);
+        c.setPosition(repStart + out.size(), QTextCursor::KeepAnchor);
+        setTextCursor(c);
+        wakeCaret();
+    }
+    // 路径→树：选区（或全文）每行一个路径（'/' 分层；行尾 '/' = 目录）
+    // → ├──/└── ASCII 树（自 AsciiTools 移植）
+    void pathsToTree()
+    {
+        struct Node {
+            QString name;
+            bool isDir = false;
+            QVector<Node> children;
+        };
+        QTextDocument *doc = document();
+        if (doc->isEmpty())
+            return;
+        QTextCursor c = textCursor();
+        const bool hadSel = c.hasSelection();
+        const int repStart = hadSel ? c.selectionStart() : 0;
+        int repEnd;
+        if (hadSel) {
+            repEnd = c.selectionEnd();
+        } else {
+            const QTextBlock lastBlk = doc->lastBlock();
+            repEnd = lastBlk.position() + qMax(0, lastBlk.length() - 1);
+        }
+        const QStringList rawLines =
+            doc->toPlainText().mid(repStart, repEnd - repStart).split(QLatin1Char('\n'));
+        Node root;
+        root.isDir = true;
+        for (const QString &raw : rawLines) {
+            const QString line = raw.trimmed();
+            if (line.isEmpty())
+                continue;
+            const bool isDir = line.endsWith(QLatin1Char('/'));
+            QStringList parts = line.split(QLatin1Char('/'), Qt::SkipEmptyParts);
+            Node *node = &root;
+            for (int i = 0; i < parts.size(); ++i) {
+                const QString name = parts.at(i);
+                Node *child = nullptr;
+                for (Node &n : node->children) {
+                    if (n.name == name) {
+                        child = &n;
+                        break;
+                    }
+                }
+                if (!child) {
+                    node->children.append(Node{name, (i < parts.size() - 1) || isDir, {}});
+                    child = &node->children.last();
+                }
+                if (isDir && i == parts.size() - 1)
+                    child->isDir = true;
+                node = child;
+            }
+        }
+        QStringList out;
+        std::function<void(const Node &, const QString &, bool)> render =
+            [&](const Node &node, const QString &prefix, bool isLast) {
+                out.append(prefix + (isLast ? QStringLiteral("└── ") : QStringLiteral("├── "))
+                           + node.name + (node.isDir ? QStringLiteral("/") : QString()));
+                const QString childPrefix = prefix + (isLast ? QStringLiteral("    ")
+                                                             : QStringLiteral("│   "));
+                for (int i = 0; i < node.children.size(); ++i)
+                    render(node.children.at(i), childPrefix, i == node.children.size() - 1);
+            };
+        for (int i = 0; i < root.children.size(); ++i)
+            render(root.children.at(i), QString(), i == root.children.size() - 1);
+        if (out.isEmpty())
+            return;
+        const QString tree = out.join(QLatin1Char('\n'));
+        c.beginEditBlock();
+        c.setPosition(repStart);
+        c.setPosition(repEnd, QTextCursor::KeepAnchor);
+        c.insertText(tree);
+        c.endEditBlock();
+        c.setPosition(repStart);
+        c.setPosition(repStart + tree.size(), QTextCursor::KeepAnchor);
+        setTextCursor(c);
+        wakeCaret();
+    }
+    // 树→路径：├──/└── 树解析回 '/' 路径列表（目录行尾带 '/'）——
+    // 路径树的还原（自 AsciiTools 移植）
+    void treeToPaths()
+    {
+        struct Node {
+            QString name;
+            bool isDir = false;
+            QVector<Node> children;
+        };
+        QTextDocument *doc = document();
+        if (doc->isEmpty())
+            return;
+        QTextCursor c = textCursor();
+        const bool hadSel = c.hasSelection();
+        const int repStart = hadSel ? c.selectionStart() : 0;
+        int repEnd;
+        if (hadSel) {
+            repEnd = c.selectionEnd();
+        } else {
+            const QTextBlock lastBlk = doc->lastBlock();
+            repEnd = lastBlk.position() + qMax(0, lastBlk.length() - 1);
+        }
+        const QStringList rawLines =
+            doc->toPlainText().mid(repStart, repEnd - repStart).split(QLatin1Char('\n'));
+        Node root;
+        root.isDir = true;
+        QVector<QPair<int, Node *>> stack; // (depth, node)
+        bool any = false;
+        for (const QString &raw : rawLines) {
+            QString line = raw;
+            while (line.endsWith(QLatin1Char(' ')) || line.endsWith(QLatin1Char('\t')))
+                line.chop(1);
+            if (line.trimmed().isEmpty())
+                continue;
+            int p = 0;
+            while (p < line.size()
+                   && (line.at(p) == QChar(0x2502) || line.at(p) == QLatin1Char(' ')))
+                ++p;
+            const QString prefix = line.left(p); // 前缀只含 │ 与空格
+            QString rest = line.mid(p);
+            const bool branch = rest.startsWith(QStringLiteral("├── "))
+                             || rest.startsWith(QStringLiteral("└── "));
+            QString nameRaw = branch ? rest.mid(4).trimmed() : rest.trimmed();
+            if (nameRaw.isEmpty())
+                continue;
+            const bool isDir = nameRaw.endsWith(QLatin1Char('/'));
+            QString name = nameRaw;
+            if (isDir)
+                name.chop(1);
+            // 每 4 字符前缀块 = 一层（├──/└── 缩进约定）
+            const int depth = prefix.size() / 4;
+            if (!branch) { // 根名行：容忍但本工具不产出
+                root.name = name;
+                root.isDir = isDir;
+                stack.clear();
+                stack.append({0, &root});
+                continue;
+            }
+            while (!stack.isEmpty() && stack.last().first >= depth)
+                stack.removeLast();
+            Node *parent = stack.isEmpty() ? &root : stack.last().second;
+            parent->children.append(Node{name, isDir, {}});
+            stack.append({depth, &parent->children.last()});
+            any = true;
+        }
+        if (!any)
+            return;
+        QStringList out;
+        std::function<void(const Node &, const QString &)> walk =
+            [&](const Node &node, const QString &prefix) {
+                const QString full =
+                    prefix.isEmpty() ? node.name : prefix + QLatin1Char('/') + node.name;
+                if (node.isDir) {
+                    if (node.children.isEmpty())
+                        out.append(full + QLatin1Char('/'));
+                    for (const Node &ch : node.children)
+                        walk(ch, full);
+                } else {
+                    out.append(full);
+                }
+            };
+        if (root.children.isEmpty() && !root.name.isEmpty()) {
+            walk(root, QString());
+        } else {
+            for (const Node &ch : root.children)
+                walk(ch, root.name);
+        }
+        const QString paths = out.join(QLatin1Char('\n'));
+        c.beginEditBlock();
+        c.setPosition(repStart);
+        c.setPosition(repEnd, QTextCursor::KeepAnchor);
+        c.insertText(paths);
+        c.endEditBlock();
+        c.setPosition(repStart);
+        c.setPosition(repStart + paths.size(), QTextCursor::KeepAnchor);
+        setTextCursor(c);
+        wakeCaret();
+    }
+    // 居中：选区（或当前行）每一行按窗口宽度居中——左补半差空格
+    // （CJK 双格）；超宽行不动（不毁字）
+    void centerToWidth()
+    {
+        QTextDocument *doc = document();
+        if (doc->isEmpty())
+            return;
+        QTextCursor c = textCursor();
+        const QFontMetricsF fm(activeFont());
+        const int cell = qMax(1, int(fm.horizontalAdvance(QLatin1Char('M'))));
+        const int cols = qMax(8, viewport()->width() / cell);
+        QTextBlock first = doc->findBlock(c.selectionStart());
+        QTextBlock last = doc->findBlock(c.selectionEnd());
+        if (last.position() == c.selectionEnd() && last != first)
+            last = last.previous();
+        QStringList out;
+        bool changed = false;
+        for (QTextBlock b = first;; b = b.next()) {
+            QString t = b.text();
+            const int pad = cols - displayWidth(t);
+            if (pad > 0) {
+                t.prepend(QString(pad / 2, QLatin1Char(' ')));
+                changed = true;
+            }
+            out.append(t);
+            if (b == last)
+                break;
+        }
+        if (!changed)
+            return;
+        const int repStart = first.position();
+        const int repEnd = last.position() + last.length() - 1;
+        const QString joined = out.join(QLatin1Char('\n'));
+        c.beginEditBlock();
+        c.setPosition(repStart);
+        c.setPosition(repEnd, QTextCursor::KeepAnchor);
+        c.insertText(joined);
+        c.endEditBlock();
+        c.setPosition(repStart);
+        c.setPosition(repStart + joined.size(), QTextCursor::KeepAnchor);
         setTextCursor(c);
         wakeCaret();
     }
@@ -878,13 +1276,17 @@ public:
             i = j;
         }
     }
-    // 逐行打印：m_asciiPrintTimer 每拍插入一行（光标跟进，行行激发）
+    // 逐行打印：m_asciiPrintTimer 每拍插入一行（光标跟进，行行激发）。
+    // 间隔自适应行数：总时长 ~1.6s 封顶（真机一帧即满屏，打印是剧场
+    // 不是机器速度——大图不能等比变慢），8–45ms/行
     void printAscii(const QString &art, int pos)
     {
         m_asciiPrintLines = art.split(QLatin1Char('\n'));
         m_asciiPrintIdx = 0;
         m_asciiPrintPos = pos;
         m_asciiPrinting = true;
+        m_asciiPrintTimer.setInterval(
+            qBound(8, 1600 / qMax(1, m_asciiPrintLines.size()), 45));
         m_asciiPrintTimer.start();
     }
     // 画布合并撤销策略：程序写入（移除+整轮重印）期间暂停撤销记录。
@@ -1992,6 +2394,59 @@ public:
                 qWarning("selftest FAIL: view lock not reset on re-entering CRT");
                 return false;
             }
+        }
+        // 格式化库（自 AsciiTools 移植）：框/压行/还原/路径树往返/居中
+        {
+            e.setPlainText(QStringLiteral("無无\nA\n"));
+            e.selectAll();
+            e.formatBox(0); // 单线框（CJK 双格对齐）
+            const QString boxed = e.toPlainText();
+            if (!boxed.startsWith(QStringLiteral("┌──────┐"))
+                || !boxed.endsWith(QStringLiteral("└──────┘\n"))) {
+                qWarning("selftest FAIL: box render wrong: %s",
+                         boxed.toUtf8().constData());
+                return false;
+            }
+            e.setPlainText(QStringLiteral("一 二\n三\n\n四\n"));
+            e.selectAll();
+            e.joinLinesTo(); // 压行
+            if (e.toPlainText() != QStringLiteral("一 二 三 四")) {
+                qWarning("selftest FAIL: join lines wrong");
+                return false;
+            }
+            e.setPlainText(QStringLiteral("if (a;b) { x; y } z;"));
+            e.selectAll();
+            e.restoreLines(); // 还原（代码语义）
+            if (!e.toPlainText().contains(QStringLiteral("{\n"))) {
+                qWarning("selftest FAIL: restore lines wrong");
+                return false;
+            }
+            e.setPlainText(QStringLiteral("a\nb/c\nb/d/\n"));
+            e.selectAll();
+            e.pathsToTree(); // 路径 → 树
+            const QString tree = e.toPlainText();
+            if (!tree.contains(QStringLiteral("├── "))
+                || !tree.contains(QStringLiteral("└── "))
+                || !tree.contains(QStringLiteral("b/"))) {
+                qWarning("selftest FAIL: pathsToTree wrong: %s",
+                         tree.toUtf8().constData());
+                return false;
+            }
+            e.selectAll();
+            e.treeToPaths(); // 树 → 路径（往返必须还原）
+            if (e.toPlainText() != QStringLiteral("a\nb/c\nb/d/")) {
+                qWarning("selftest FAIL: treeToPaths roundtrip wrong: %s",
+                         e.toPlainText().toUtf8().constData());
+                return false;
+            }
+            e.setPlainText(QStringLiteral("無\n"));
+            e.selectAll();
+            e.centerToWidth(); // 居中：左补空格
+            if (!e.toPlainText().startsWith(QLatin1Char(' '))) {
+                qWarning("selftest FAIL: centerToWidth no padding");
+                return false;
+            }
+            e.setPlainText(QStringLiteral("無\n"));
         }
         // CRT 管线冒烟（C64 三色栅 + 行扫描激励）：渲两机各一帧落盘，
         // 供人工/取证核对（shader 编译失败 = 黑帧 + 空图）

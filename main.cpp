@@ -245,6 +245,20 @@ int main(int argc, char **argv)
         bYan->setShortcut(QKeySequence(QStringLiteral("Ctrl+L")));
         QAction *bGe = fa->addAction(QStringLiteral("隔"));
         bGe->setShortcut(QKeySequence(QStringLiteral("Ctrl+F")));
+        QAction *bCenter = fa->addAction(QStringLiteral("居中"));
+        bCenter->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+C")));
+        // 格式库（自 AsciiTools 移植）：按功能分区——框/压行/路径树
+        QMenu *mFmt = fa->addMenu(QStringLiteral("格式"));
+        QAction *bBoxSingle = mFmt->addAction(QStringLiteral("单线框"));
+        QAction *bBoxDouble = mFmt->addAction(QStringLiteral("双线框"));
+        QAction *bBoxRound = mFmt->addAction(QStringLiteral("圆角框"));
+        QAction *bBoxBold = mFmt->addAction(QStringLiteral("粗线框"));
+        mFmt->addSeparator();
+        QAction *bJoin = mFmt->addAction(QStringLiteral("压成一行"));
+        QAction *bSplit = mFmt->addAction(QStringLiteral("还原为多行"));
+        mFmt->addSeparator();
+        QAction *bPathsToTree = mFmt->addAction(QStringLiteral("路径列表 → 树"));
+        QAction *bTreeToPaths = mFmt->addAction(QStringLiteral("树 → 路径列表"));
         fa->addSeparator();
         // 字号/笔刷不做成真键等效（系统接管会毁掉按住加速），提示内嵌标签
         QAction *bZoomIn = fa->addAction(QStringLiteral("字号放大 ⌘="));
@@ -276,6 +290,15 @@ int main(int argc, char **argv)
         QObject::connect(bFontReset, &QAction::triggered, &editor, [&editor] { editor.restoreDefaultFont(); });
         QObject::connect(bYan, &QAction::triggered, &editor, [&editor] { editor.yan(); });
         QObject::connect(bGe, &QAction::triggered, &editor, [&editor] { editor.ge(); });
+        QObject::connect(bCenter, &QAction::triggered, &editor, [&editor] { editor.centerToWidth(); });
+        QObject::connect(bBoxSingle, &QAction::triggered, &editor, [&editor] { editor.formatBox(0); });
+        QObject::connect(bBoxDouble, &QAction::triggered, &editor, [&editor] { editor.formatBox(1); });
+        QObject::connect(bBoxRound, &QAction::triggered, &editor, [&editor] { editor.formatBox(2); });
+        QObject::connect(bBoxBold, &QAction::triggered, &editor, [&editor] { editor.formatBox(3); });
+        QObject::connect(bJoin, &QAction::triggered, &editor, [&editor] { editor.joinLinesTo(); });
+        QObject::connect(bSplit, &QAction::triggered, &editor, [&editor] { editor.restoreLines(); });
+        QObject::connect(bPathsToTree, &QAction::triggered, &editor, [&editor] { editor.pathsToTree(); });
+        QObject::connect(bTreeToPaths, &QAction::triggered, &editor, [&editor] { editor.treeToPaths(); });
         QObject::connect(bZoomIn, &QAction::triggered, &editor, [&editor] { editor.zoom(1); });
         QObject::connect(bZoomOut, &QAction::triggered, &editor, [&editor] { editor.zoom(-1); });
         QObject::connect(bZoom0, &QAction::triggered, &editor, [&editor] { editor.zoomReset(); });

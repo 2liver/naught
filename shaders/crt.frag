@@ -61,22 +61,42 @@ void main()
     vec2 cuv = clamp(curve(inuv), 0.0, 1.0);
     vec3 col = sampleAt(cuv);
 
-    // 真衍射：内容空间亮边 ±1px R/B 彩边（bright(x)−bright(x±1) 差分，
-    // 与 Crt::edgeDiff 同模型，强度 kDiffAlpha=0.30）。
-    // 白磷机（flags.y=3，IBM PC 5150）：单色荧光粉——衍射无彩，改中性白边
+    // 真衍射。单色机：亮边 ±1px R/B 微彩边（bright(x)−bright(x±1) 差分，
+    // 与 Crt::edgeDiff 同模型，强度 kDiffAlpha=0.30）——单色光衍射出
+    // 单色条纹（物理），不硬造彩虹；白磷机（flags.y=3）衍射无彩，
+    // 改中性白边。C64（flags.y=2）：光栅色散——白边按波长散开，
+    // 红偏转最大（±2px）、绿居中（±1px）、蓝最小（±0.5px），
+    // 亮度（能量）随距离衰减（二阶更弱）
     {
         const float px = 1.0 / ubuf.texSize.x;
         vec3 lm = sampleAt(clamp(cuv - vec2(px, 0.0), 0.0, 1.0));
         vec3 rp = sampleAt(clamp(cuv + vec2(px, 0.0), 0.0, 1.0));
         const vec3 w = vec3(0.333);
-        float eR = max(0.0, dot(col, w) - dot(rp, w));
-        float eB = max(0.0, dot(col, w) - dot(lm, w));
-        float white = step(3.5, ubuf.flags.y); // 机器 3 = 白磷（苹果 II 已归档）
-        float frg = mix(0.30, 0.22, white);
-        vec3 tR = mix(vec3(1.0, 0.15, 0.02), vec3(0.90, 0.92, 1.0), white);
-        vec3 tB = mix(vec3(0.02, 0.15, 1.0), vec3(0.90, 0.92, 1.0), white);
-        col += tR * eR * frg;
-        col += tB * eB * frg;
+        bool c64disp = ubuf.flags.y > 1.5 && ubuf.flags.y < 2.5;
+        if (c64disp) {
+            vec3 lm2 = sampleAt(clamp(cuv - vec2(px * 2.0, 0.0), 0.0, 1.0));
+            vec3 rp2 = sampleAt(clamp(cuv + vec2(px * 2.0, 0.0), 0.0, 1.0));
+            vec3 lmh = sampleAt(clamp(cuv - vec2(px * 0.5, 0.0), 0.0, 1.0));
+            vec3 rph = sampleAt(clamp(cuv + vec2(px * 0.5, 0.0), 0.0, 1.0));
+            float eR2 = max(0.0, dot(col, w) - dot(rp2, w));
+            float eL2 = max(0.0, dot(col, w) - dot(lm2, w));
+            float eR1 = max(0.0, dot(col, w) - dot(rp, w));
+            float eL1 = max(0.0, dot(col, w) - dot(lm, w));
+            float eRh = max(0.0, dot(col, w) - dot(rph, w));
+            float eLh = max(0.0, dot(col, w) - dot(lmh, w));
+            col.r += (eR2 + eL2) * 0.30 + (eR1 + eL1) * 0.12; // 红：2px 为主
+            col.g += (eR1 + eL1) * 0.30;                     // 绿：1px
+            col.b += (eRh + eLh) * 0.30;                     // 蓝：0.5px
+        } else {
+            float eR = max(0.0, dot(col, w) - dot(rp, w));
+            float eB = max(0.0, dot(col, w) - dot(lm, w));
+            float white = step(3.5, ubuf.flags.y); // 机器 3 = 白磷（苹果 II 已归档）
+            float frg = mix(0.30, 0.22, white);
+            vec3 tR = mix(vec3(1.0, 0.15, 0.02), vec3(0.90, 0.92, 1.0), white);
+            vec3 tB = mix(vec3(0.02, 0.15, 1.0), vec3(0.90, 0.92, 1.0), white);
+            col += tR * eR * frg;
+            col += tB * eB * frg;
+        }
     }
 
     // 亮度（束斑宽度与栅条调制的共同输入）
@@ -161,10 +181,10 @@ void main()
             float H = ubuf.texSize.y;
             float scan = fract(ubuf.timeInfo.x * (1.0 / 0.7)); // 自上而下
             float d = sp.y - scan * H; // >0 未扫到；<0 刚扫过
-            float tail = exp(max(d, -H) * (20.0 / H)); // 熄灭指数
-            float pulse = smoothstep(-H * 0.06, 0.0, d); // 束流在线上
+            float tail = exp(max(d, -H) * (16.0 / H)); // 熄灭指数（略长略软）
+            float pulse = smoothstep(-H * 0.07, 0.0, d); // 束流在线上
             float exc = clamp(tail * pulse, 0.0, 1.0);
-            col *= 0.86 + 0.44 * exc; // 0.86 → 1.30 过冲 → 回落
+            col *= 0.93 + 0.13 * exc; // 微明微亮：慢放下的冷热交替不刺眼
         } else {
             float phase = fract(ubuf.timeInfo.x * 0.333);
             float band = 1.0 - smoothstep(0.0, 0.035, abs(v_uv.y - phase));
