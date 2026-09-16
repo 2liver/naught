@@ -1809,8 +1809,11 @@ public:
             // 显·Cmd+0 = 机器原生网格（原实验·字符网格并入）：琥珀 80 列 /
             // 绿磷 64 列——真机的"原生分辨率"
             const int cols = (m_machine == 0) ? 80 : (m_machine == 1) ? 64 : 40;
-            m_size = qMax(6.0, qreal(viewport()->width()) / cols
-                                   / (m_machine == 0 ? 1.0 : 1.25));
+            qreal sz = qreal(viewport()->width()) / cols
+                       / (m_machine == 0 ? 1.0 : 1.25);
+            if (m_machine == 2)
+                sz = qMin(sz, 20.0); // C64：真机字符 ≈ 物理 4mm——大窗口不无限放大
+            m_size = qMax(6.0, sz);
             applyAnchoredZoom(m_size);
             return;
         }

@@ -300,7 +300,7 @@ int main(int argc, char **argv)
 
     Editor editor;
     editor.setWindowTitle(QString());
-    editor.resize(900, 600);
+    editor.resize(960, 720); // 默认 4:3（真机画幅；开后可自由调整）
     editor.show();
 
 #ifdef Q_OS_MACOS

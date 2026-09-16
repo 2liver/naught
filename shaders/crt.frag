@@ -54,6 +54,16 @@ float stripe(float spx, float phase, float period, float halfW, float grad)
     return 1.0 - 0.22 * smoothstep(0.5 - halfW, 0.5 + halfW, maskPhase);
 }
 
+// 阴罩圆点（C64 的 1702 真结构）：3px 水平间距的六角点阵，
+// 行奇偶错位 1.5px——每通道在其所属点的位置采样亮度
+float triadDot(vec2 sp, float phase)
+{
+    float rowParity = mod(floor(sp.y), 2.0);
+    float px = mod(sp.x - phase - rowParity * 1.5, 3.0) - 1.5;
+    float py = mod(sp.y, 2.0) - 1.0;
+    return smoothstep(0.78, 0.30, sqrt(px * px + py * py));
+}
+
 void main()
 {
     // ---- 内容空间：弯曲的电子图像（含视差）。栅网/扫描线/玻璃都在
@@ -145,10 +155,11 @@ void main()
         float grad = (lumL - lumR) * 0.5;
         bool c64 = ubuf.flags.y > 1.5 && ubuf.flags.y < 2.5;
         if (c64) {
-            float hw = mix(0.08, 0.20, smoothstep(0.05, 0.9, lum));
-            col.r *= stripe(sp.x, 0.0, 3.0, hw, grad);
-            col.g *= stripe(sp.x, 1.0, 3.0, hw, grad);
-            col.b *= stripe(sp.x, 2.0, 3.0, hw, grad);
+            // 1702 阴罩圆点三色组（旧版竖条栅是 Trinitron 结构，
+            // 与真机不符——用户拍板改为点阵）
+            col.r *= triadDot(sp, 0.0);
+            col.g *= triadDot(sp, 1.0);
+            col.b *= triadDot(sp, 2.0);
         } else {
             col *= stripe(sp.x, 0.0, 1.0, beamW, grad);
         }
@@ -175,12 +186,11 @@ void main()
         col += ubuf.refl.rgb * refl * 0.045;
     }
 
-    // 滚动刷新带。单色机：暗带 3 秒扫一周（屏幕空间，气氛）。
-    // C64（flags.y=2）：真扫描时序——激励线 0.7s 扫一场的慢放镜头：
-    // 电子束逐点逐行轰击、先亮后灭——线上束流过冲（1.30），线后
-    // ~6% 屏高内指数熄灭（P22 快分量），线下方本场未扫到、靠上一场
-    // 余晖微暗（0.86）。波面清晰可辨但不闪眼。
-    {
+    // 扫描时序：真机 60Hz 场扫描肉眼不可见（视觉暂留）——日常状态
+    // 无慢带。慢放镜头（C64 0.7s 激励线 / 单色 3s 暗带）只在解锁追随
+    // 视角（flags.x=1，风格化现场）时出现——用户拍板：日常打字不要，
+    // 留在 Cmd+Shift+T 的现场里
+    if (ubuf.flags.x > 0.5) {
         bool c64 = ubuf.flags.y > 1.5 && ubuf.flags.y < 2.5;
         if (c64) {
             float H = ubuf.texSize.y;
@@ -189,7 +199,7 @@ void main()
             float tail = exp(max(d, -H) * (14.0 / H)); // 熄灭指数（更长更软）
             float pulse = smoothstep(-H * 0.08, 0.0, d); // 束流在线上
             float exc = clamp(tail * pulse, 0.0, 1.0);
-            col *= 0.96 + 0.07 * exc; // 再柔和：波面存在但不闪（打字机器要安静）
+            col *= 0.96 + 0.07 * exc; // 柔和：波面存在但不闪
         } else {
             float phase = fract(ubuf.timeInfo.x * 0.333);
             float band = 1.0 - smoothstep(0.0, 0.035, abs(v_uv.y - phase));

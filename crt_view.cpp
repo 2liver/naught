@@ -268,7 +268,8 @@ void CrtView::renderFrame()
         // 滚动期间跳过余晖+辉光重活（每 80ms 一帧的全屏逐像素 + 模糊
         // 是滚动卡顿大户）；停稳后 settle 标记全量重拍，痕迹自愈
         if (!m_source->isScrolling()) {
-            Crt::phosphorPersistence(m_pending, m_prev, m_prev2); // 一期+M4：双指数余晖
+            Crt::phosphorPersistence(m_pending, m_prev, m_prev2,
+                                     m_source->crtPalette()); // 余晖按机型实测标定
             m_prev2 = m_prev; // 上上帧（浅拷贝链：写入时分离）
             m_prev = m_pending; // 上一帧（浅拷贝）
             Crt::phosphorBloom(m_pending, m_source->crtPalette().glowAlpha); // 二期三件套：真高斯辉光（随调色板）

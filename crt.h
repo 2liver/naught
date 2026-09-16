@@ -25,6 +25,11 @@ struct Palette {
     QColor refl;        // 玻璃反光色
     QColor dust;        // 灰尘点色
     qreal glowAlpha;    // 辉光叠加强度（1a7s39ge 实例参考）
+    // 余晖实测标定：双指数快/慢分量的逐通道帧间残留（按各磷粉
+    // P1/P3/P4/P22 的实测衰减时标换算到 80ms 快照帧率——真机余晖
+    // 一两帧内散尽，旧版拖尾是风格化不是拟真）
+    qreal persist1[3] = { 0.08f, 0.05f, 0.02f }; // 快分量（B,G,R 旧约定）
+    qreal persist2[3] = { 0.12f, 0.08f, 0.03f }; // 慢分量
 };
 
 // 琥珀（Osborne Executive 1982）：出厂机器
@@ -37,6 +42,8 @@ inline const Palette kAmber{
     QColor(0xFF, 0xE0, 0x9E), // refl (1.0,0.88,0.62)
     QColor(0xE6, 0xCC, 0x99), // dust (0.9,0.8,0.6)
     0.42,                     // glowAlpha
+    { 0.35f, 0.25f, 0.10f },  // P3 琥珀余晖：中余晖，10% 点 ~60ms
+    { 0.15f, 0.10f, 0.04f },
 };
 
 // 绿磷（IBM 5100 1975）：按 1a7s39ge 实例「终端绿」主题校准
@@ -51,6 +58,8 @@ inline const Palette kGreen{
     QColor(0xBF, 0xEA, 0xCC), // refl (0.75,0.92,0.8)
     QColor(0xB3, 0xE6, 0xBF), // dust (0.7,0.9,0.75)
     0.35,                     // glowAlpha（实例同款）
+    { 0.18f, 0.22f, 0.12f },  // P1 绿磷余晖：中短，10% 点 ~30ms
+    { 0.06f, 0.09f, 0.04f },
 };
 
 // C64（Commodore 64 1982）：真彩机型——蓝屏 + 16 色逐字符前景色
@@ -65,6 +74,8 @@ inline const Palette kC64{
     QColor(0x40, 0x40, 0xE0), // refl
     QColor(0x5A, 0x5A, 0x6E), // dust
     0.38,                     // glowAlpha
+    { 0.06f, 0.06f, 0.05f },  // P22 彩管余晖：快分量 µs 级（帧级几乎不可见），慢分量短
+    { 0.03f, 0.03f, 0.02f },
 };
 
 // C64 标准 16 色（字符画逐字符前景色的量化目标）
@@ -88,6 +99,8 @@ inline const Palette kWhite{
     QColor(0xE0, 0xE0, 0xD8), // refl
     QColor(0xC0, 0xC0, 0xB8), // dust
     0.38,                     // glowAlpha
+    { 0.22f, 0.22f, 0.20f },  // P4 白磷余晖：中短
+    { 0.09f, 0.09f, 0.08f },
 };
 
 // 兼容别名（出厂琥珀；自检黄金参考沿用）
@@ -194,26 +207,30 @@ inline QImage gaussianBlur(const QImage &src, int radius, int iterations)
 // 加法混入新帧——快分量 = 1 帧内的亮回响，慢分量 = 长尾余热（真磷粉
 // 的双指数衰减近似）。分通道权重：红磷拖尾最长、绿次之、蓝最快，
 // 残影因此偏暖。静态画面微微增亮（磷粉永不完全熄灭）。
-inline void phosphorPersistence(QImage &img, const QImage &prev1, const QImage &prev2)
+inline void phosphorPersistence(QImage &img, const QImage &prev1, const QImage &prev2,
+                                 const Palette &pal)
 {
     if (prev1.isNull() || prev1.size() != img.size())
         return;
     const bool have2 = !prev2.isNull() && prev2.size() == img.size();
     const int w = img.width(), h = img.height();
-    // BGRA 权重：快（R,G,B）= (0.08,0.05,0.02)；慢 = (0.12,0.08,0.03)
+    // BGRA 权重：按调色板的实测标定（各磷粉 P1/P3/P4/P22 的衰减时标
+    // 换算到快照帧率）——真机余晖一两帧内散尽
+    const qreal *p1 = pal.persist1;
+    const qreal *p2 = pal.persist2;
     for (int y = 0; y < h; ++y) {
         uchar *dst = img.scanLine(y);
         const uchar *s1 = prev1.constScanLine(y);
         const uchar *s2 = have2 ? prev2.constScanLine(y) : nullptr;
         for (int x = 0; x < w; ++x) {
             const int i = x * 4;
-            int b = dst[i] + int(s1[i] * 0.02);
-            int g = dst[i + 1] + int(s1[i + 1] * 0.05);
-            int r = dst[i + 2] + int(s1[i + 2] * 0.08);
+            int b = dst[i] + int(s1[i] * p1[0]);
+            int g = dst[i + 1] + int(s1[i + 1] * p1[1]);
+            int r = dst[i + 2] + int(s1[i + 2] * p1[2]);
             if (s2) {
-                b += int(s2[i] * 0.03);
-                g += int(s2[i + 1] * 0.08);
-                r += int(s2[i + 2] * 0.12);
+                b += int(s2[i] * p2[0]);
+                g += int(s2[i + 1] * p2[1]);
+                r += int(s2[i + 2] * p2[2]);
             }
             dst[i] = qMin(255, b);
             dst[i + 1] = qMin(255, g);
