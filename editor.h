@@ -2060,6 +2060,12 @@ protected:
             QTimer::singleShot(0, this, [this] {
                 activateWindow();
                 setFocus();
+                if (m_crt && m_crtView) {
+                    // 全屏过渡换 NSWindow 后 Metal 回读可能失联（画面冻结）：
+                    // 强制重置管线并同步几何
+                    m_crtView->resetPipeline();
+                    m_crtView->syncGeometry();
+                }
             });
         }
         if (event->type() == QEvent::ActivationChange && isActiveWindow()) {

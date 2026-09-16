@@ -27,6 +27,14 @@ public:
     ~CrtView() override;
     void markDirty(bool force = false);
     void syncGeometry();
+    // 全屏/窗口过渡后 Metal 回读可能失联：强制重置管线（下一帧全量重建）
+    void resetPipeline()
+    {
+        m_readbackInFlight = false;
+        releaseGpu();
+        m_forceNow = true;
+        ensureRhi();
+    }
     QImage frameImage() const { return m_pending; }
 
 protected:
@@ -58,6 +66,7 @@ private:
     QElapsedTimer m_sinceRefresh;
     QElapsedTimer m_clock;    // 运行秒数（噪声/刷新带的时间源）
     QElapsedTimer m_warmClock; // 入场暖机（showEvent 起拍）
+    QElapsedTimer m_readbackClock; // 回读看门狗（超时强制复位）
     QSize m_texSize;
     QTimer m_frameTimer;
 };

@@ -112,8 +112,13 @@ void CrtView::releaseGpu()
 
 void CrtView::ensureRhi()
 {
-    if (m_r)
-        return;
+    if (m_r && m_ps && m_srb && m_pxbuf && m_ubuf)
+        return; // 资源完整
+    // 半残状态（releaseGpu 释放了子资源但保留 rhi——resize/全屏重建路径
+    // 的坑）：整体重建。否则 m_r 存活导致提前返回，管线永远半残，
+    // 帧循环从此冻结（全屏后画面冻死的根因）。
+    delete m_r;
+    m_r = nullptr;
     QRhiMetalInitParams params;
     m_r = QRhi::create(QRhi::Metal, &params);
     if (!m_r) {
@@ -188,7 +193,19 @@ void CrtView::renderFrame()
     if (!isVisible())
         return;
     ensureRhi();
-    if (!m_r || !m_ps || !m_srb || !m_pxbuf || !m_ubuf || m_readbackInFlight)
+    if (!m_r || !m_ps || !m_srb || !m_pxbuf || !m_ubuf) {
+        return;
+    }
+    // 回读看门狗：全屏过渡等场景下 Metal 回读可能失联——超时强制复位
+    if (m_readbackInFlight && m_readbackClock.isValid()
+        && m_readbackClock.elapsed() > 800) {
+        m_readbackInFlight = false;
+        releaseGpu();
+        ensureRhi();
+        m_forceNow = true;
+        m_sinceRefresh.invalidate();
+    }
+    if (m_readbackInFlight)
         return;
     const QSize want(qMax(1, int(width() * devicePixelRatioF())),
                      qMax(1, int(height() * devicePixelRatioF())));
@@ -275,6 +292,7 @@ void CrtView::renderFrame()
     // 一律排队回主线程处理）
     QRhiReadbackResult *rb = new QRhiReadbackResult;
     m_readbackInFlight = true;
+    m_readbackClock.start();
     rb->completed = [this, rb] {
         QMetaObject::invokeMethod(this, [this, rb] {
             QImage img(m_texSize, QImage::Format_RGBA8888);
