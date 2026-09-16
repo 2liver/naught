@@ -34,6 +34,8 @@ if(APPLE)
     target_include_directories(naught PRIVATE
         "${QT6_INSTALL_PREFIX}/lib/QtGui.framework/Versions/A/Headers/${Qt6_VERSION}"
         "${QT6_INSTALL_PREFIX}/lib/QtGui.framework/Versions/A/Headers/${Qt6_VERSION}/QtGui")
+    # M6：全局重生热键（RegisterEventHotKey）与 LaunchServices（LSOpen）
+    target_link_libraries(naught PRIVATE "-framework Carbon" "-framework CoreServices")
 endif()
 
 # 语法高亮（可选）：未找到时 编 模式退化为 等宽字体 + 行号

@@ -63,6 +63,8 @@
 #include "line_number_area.h"
 #include "zen_scroll_bar.h"
 
+QString naughtAgentPlistXml(const QString &binPath); // main.cpp：M6 代理 plist（自测核对）
+
 class Editor : public QPlainTextEdit {
 public:
     Editor()
@@ -950,6 +952,12 @@ public:
         c.setPosition(repStart + joined.size(), QTextCursor::KeepAnchor);
         setTextCursor(c);
         wakeCaret();
+    }
+
+    // 自杀（M6）：立即退出，无保存提示——"关闭即无"的极致
+    void commitSuicide()
+    {
+        QApplication::quit();
     }
 
     void undoAll()
@@ -2591,6 +2599,18 @@ public:
             }
             e.setPlainText(QStringLiteral("無\n"));
         }
+        // M6 自杀与重生：代理 plist 内容（安装程序的纯函数部分）
+        {
+            const QString xml = naughtAgentPlistXml(QStringLiteral("/tmp/naught.app/Contents/MacOS/naught"));
+            if (!xml.contains(QStringLiteral("com.2liver.naught.agent"))
+                || !xml.contains(QStringLiteral("--agent"))
+                || !xml.contains(QStringLiteral("RunAtLoad"))
+                || !xml.contains(QStringLiteral("KeepAlive"))
+                || !xml.contains(QStringLiteral("/tmp/naught.app/Contents/MacOS/naught"))) {
+                qWarning("selftest FAIL: agent plist content wrong");
+                return false;
+            }
+        }
         // CRT 管线冒烟（C64 三色栅 + 行扫描激励）：渲两机各一帧落盘，
         // 供人工/取证核对（shader 编译失败 = 黑帧 + 空图）
         {
@@ -3209,7 +3229,10 @@ protected:
                 mo();
                 return;
             case Qt::Key_N:
-                if (event->modifiers() & Qt::ShiftModifier)
+                if ((event->modifiers() & Qt::ControlModifier)
+                    && (event->modifiers() & Qt::MetaModifier))
+                    commitSuicide(); // 自杀（M6）：Ctrl+Cmd+N = 立即退出
+                else if (event->modifiers() & Qt::ShiftModifier)
                     clearInk(); // 消：N=消除=naught（对应 Cmd+N 清文字）
                 else
                     kong();

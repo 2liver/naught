@@ -6,18 +6,149 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QCoreApplication>
+#include <QDir>
 #include <QElapsedTimer>
+#include <QFile>
+#include <QFileInfo>
 #include <QIcon>
 #include <QImage>
 #include <QKeySequence>
+#include <QLockFile>
 #include <QMenu>
 #include <QMenuBar>
 #include <QMouseEvent>
+#include <QProcess>
 #include <QScrollBar>
 #include <QString>
 #include <QTextCursor>
+#include <QTimer>
+
+#include <sys/types.h>
+#include <unistd.h>
+
+#ifdef Q_OS_MACOS
+#include <Carbon/Carbon.h>        // RegisterEventHotKey（无需辅助功能授权）
+#include <CoreServices/CoreServices.h> // LSOpenCFURLRef
+#endif
 
 #include "editor.h"
+
+// ============ M6 自杀与重生 ============
+// 自杀：Ctrl+Cmd+N 立即退出（无保存提示，"关闭即无"的极致）。
+// 重生：安装程序布署极小登录项代理（LaunchAgent，持 Cmd+Ctrl+Shift+N
+// 全局快捷键）——应用死亡时代理 open naught.app（无中生有）。
+
+static QString naughtAgentLabel()
+{
+    return QStringLiteral("com.2liver.naught.agent");
+}
+
+QString naughtAgentPlistXml(const QString &binPath)
+{
+    const QString b = binPath.toHtmlEscaped();
+    return QStringLiteral(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
+        "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+        "<plist version=\"1.0\">\n<dict>\n"
+        "  <key>Label</key><string>%1</string>\n"
+        "  <key>ProgramArguments</key>\n"
+        "  <array>\n    <string>%2</string>\n    <string>--agent</string>\n  </array>\n"
+        "  <key>RunAtLoad</key><true/>\n"
+        "  <key>KeepAlive</key><true/>\n"
+        "  <key>ProcessType</key><string>Interactive</string>\n"
+        "</dict>\n</plist>\n")
+        .arg(naughtAgentLabel(), b);
+}
+
+#ifdef Q_OS_MACOS
+// 热键回调（Carbon 需 C 函数指针）：打开/激活主应用 = 重生
+static OSStatus naughtHotKeyHandler(EventHandlerCallRef, EventRef, void *user)
+{
+    const QString *path = static_cast<const QString *>(user);
+    CFURLRef url = CFURLCreateWithFileSystemPath(
+        nullptr, path->toCFString(), kCFURLPOSIXPathStyle, true);
+    if (url) {
+        LSOpenCFURLRef(url, nullptr);
+        CFRelease(url);
+    }
+    return noErr;
+}
+
+// 登录项代理：注册 Cmd+Ctrl+Shift+N 全局热键，触发时用 LaunchServices
+// 打开主应用（应用死亡 = 重生；应用在跑 = 激活）。无窗口、无 Dock。
+static int runNaughtAgent(int argc, char **argv)
+{
+    QCoreApplication app(argc, argv);
+    app.setApplicationName(QStringLiteral("無"));
+    const QString supportDir = QDir::homePath()
+        + QStringLiteral("/Library/Application Support/naught");
+    QDir().mkpath(supportDir);
+    QLockFile lock(supportDir + QStringLiteral("/agent.lock"));
+    lock.setStaleLockTime(0); // 常驻进程：锁陈旧即失效（崩溃后重启可抢）
+    if (!lock.tryLock(200)) {
+        qInfo("naught agent: another agent is alive, exiting");
+        return 0;
+    }
+    // 规范化：LSOpen/CFURL 不解析 ".." 段，未规范化的路径打不开主应用
+    const QString bundle = QFileInfo(QDir(QCoreApplication::applicationDirPath())
+                                         .absoluteFilePath(QStringLiteral("../..")))
+                               .canonicalFilePath();
+    QString *bundlePath = new QString(bundle); // 回调数据（进程存续期泄漏一次，无妨）
+
+    EventHotKeyRef hotKey = nullptr;
+    const EventHotKeyID hotKeyId = { 'nagt', 1 };
+    const OSStatus st = RegisterEventHotKey(kVK_ANSI_N, cmdKey | controlKey | shiftKey,
+                                            hotKeyId, GetApplicationEventTarget(),
+                                            0, &hotKey);
+    if (st != noErr) {
+        qWarning("naught agent: hotkey registration failed (%d)", int(st));
+        return 1;
+    }
+    EventHandlerUPP handler = NewEventHandlerUPP(naughtHotKeyHandler);
+    const EventTypeSpec spec = { kEventClassKeyboard, kEventHotKeyPressed };
+    InstallEventHandler(GetApplicationEventTarget(), handler, 1, &spec,
+                        bundlePath, nullptr);
+    qInfo("naught agent: holding Cmd+Ctrl+Shift+N for %s",
+          qPrintable(bundle));
+    return app.exec();
+}
+
+// 安装程序（替代 zip 解压安装）：写 LaunchAgent plist + 引导登录项 +
+// LaunchServices 注册主应用。幂等：重跑 = 重装。
+static int installNaught()
+{
+    const QString bundle = QFileInfo(QDir(QCoreApplication::applicationDirPath())
+                                         .absoluteFilePath(QStringLiteral("../..")))
+                               .canonicalFilePath();
+    const QString agentsDir = QDir::homePath() + QStringLiteral("/Library/LaunchAgents");
+    QDir().mkpath(agentsDir);
+    const QString plistPath = agentsDir + QLatin1Char('/') + naughtAgentLabel()
+                            + QStringLiteral(".plist");
+    QFile f(plistPath);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        qWarning("naught install: cannot write %s", qPrintable(plistPath));
+        return 1;
+    }
+    f.write(naughtAgentPlistXml(QCoreApplication::applicationFilePath()).toUtf8());
+    f.close();
+    const QString gui = QStringLiteral("gui/%1").arg(getuid());
+    QProcess::execute(QStringLiteral("launchctl"),
+                      { QStringLiteral("bootout"), gui + QLatin1Char('/') + naughtAgentLabel() });
+    const int rc = QProcess::execute(QStringLiteral("launchctl"),
+                                     { QStringLiteral("bootstrap"), gui, plistPath });
+    if (rc != 0) {
+        qWarning("naught install: launchctl bootstrap failed (%d)", rc);
+        return 1;
+    }
+    QProcess::execute(QStringLiteral("/System/Library/Frameworks/CoreServices.framework/"
+                                     "Frameworks/LaunchServices.framework/Support/lsregister"),
+                      { QStringLiteral("-f"), bundle });
+    qInfo("naught install: agent installed + app registered (%s)", qPrintable(bundle));
+    return 0;
+}
+#endif // Q_OS_MACOS
 
 // 性能基准（--bench）：大文档装载 / 行尾·行中打字 / 缩放 / 滚动 / 行号重绘 / 笔迹。
 // 离屏为软件光栅（真机走 GPU 合成），数值作回归基线，不直接代表真机帧时间。
@@ -168,12 +299,20 @@ static bool benchmark()
 
 int main(int argc, char **argv)
 {
+#ifdef Q_OS_MACOS
+    if (argc > 1 && QString::fromLocal8Bit(argv[1]) == QLatin1String("--agent"))
+        return runNaughtAgent(argc, argv); // 登录项代理：持全局重生热键
+#endif
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("無"));
     app.setApplicationDisplayName(QStringLiteral("無"));
     app.setWindowIcon(QIcon(QStringLiteral(":/icons/naught.png")));
     app.setCursorFlashTime(0); // 关闭原生闪烁器：闪烁与休眠由 Editor 自驱，保证完整对称无残拍
 
+#ifdef Q_OS_MACOS
+    if (argc > 1 && QString::fromLocal8Bit(argv[1]) == QLatin1String("--install"))
+        return installNaught(); // 安装程序：布署登录项 + 注册应用
+#endif
     if (argc > 1 && QString::fromLocal8Bit(argv[1]) == QLatin1String("--selftest"))
         return Editor::selftest() ? 0 : 1;
     if (argc > 1 && QString::fromLocal8Bit(argv[1]) == QLatin1String("--bench"))
@@ -210,6 +349,8 @@ int main(int argc, char **argv)
         bAscii->setEnabled(false); // 自释性提示：隐藏功能，README 不写
         QAction *bEsc = fa->addAction(QStringLiteral("Esc＝退出模式"));
         bEsc->setEnabled(false);
+        QAction *bSuicide = fa->addAction(QStringLiteral("自杀"));
+        bSuicide->setShortcut(QKeySequence(QStringLiteral("Ctrl+Meta+N")));
         fa->addSeparator();
         // ── 格式化区：言/隔/居中/格式库 ──
         QAction *bYan = fa->addAction(QStringLiteral("言"));
@@ -284,6 +425,7 @@ int main(int argc, char **argv)
         bUndo->setShortcut(QKeySequence(QStringLiteral("Ctrl+Z")));
         QAction *bRedo = fa->addAction(QStringLiteral("重做"));
         bRedo->setShortcut(QKeySequence(QStringLiteral("Ctrl+Y")));
+        QObject::connect(bSuicide, &QAction::triggered, &editor, [&editor] { editor.commitSuicide(); });
         QObject::connect(bMo, &QAction::triggered, &editor, [&editor] { editor.mo(); });
         QObject::connect(bKong, &QAction::triggered, &editor, [&editor] { editor.kong(); });
         QObject::connect(bYin, &QAction::triggered, &editor, [&editor] { editor.setDark(true); });
