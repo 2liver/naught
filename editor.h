@@ -154,6 +154,7 @@ public:
             if (m_asciiPrintIdx >= m_asciiPrintLines.size()) {
                 m_asciiPrintTimer.stop();
                 m_asciiPrinting = false;
+                endAsciiEditBlock(); // 整轮移除+重印 = 一步撤销（防逐行残步）
                 m_settingAscii = false;
                 return;
             }
@@ -206,6 +207,7 @@ public:
                 m_asciiActive = false;
                 m_asciiPrintTimer.stop(); // 打断逐行打印
                 m_asciiPrinting = false;
+                endAsciiEditBlock(); // 打印块收口：不得并入用户的编辑
                 setLineWrapMode(QPlainTextEdit::WidgetWidth);
             }
             // 磷粉激发（二期三件套·回接）：插入的新字符记下位置与时刻，
@@ -297,6 +299,7 @@ public:
     {
         if (document()->isEmpty())
             return;
+        endAsciiEditBlock(); // 全清自成一步撤销（不并入画布打印块）
         QTextCursor cursor(document());
         cursor.select(QTextCursor::Document);
         cursor.removeSelectedText();
@@ -816,6 +819,7 @@ public:
         m_lastArtStart = m_asciiStart;
         m_lastArtEnd = m_asciiStart;
         m_asciiActive = true;
+        beginAsciiEditBlock(); // 首次打印 = 一步撤销（防逐行残步污染撤销栈）
         printAscii(artText(), m_asciiStart);
         if (m_crtView)
             m_crtView->markDirty();
@@ -866,6 +870,26 @@ public:
         m_asciiPrinting = true;
         m_asciiPrintTimer.start();
     }
+    // 画布合并撤销策略：程序写入（移除+整轮重印）期间暂停撤销记录。
+    // Qt 的编辑块(block_part/block_end)撤销回走不可靠（实测：块内命令
+    // 交错合并后一次 undo 只退一行，undo/redo 来回还会丢字符——旧事故
+    // "字符都删了"的根源）。暂停记录后画布操作完全不进撤销历史：
+    // 画布成为新的撤销基线，Cmd+Z 永不蚕食画布、永不损坏文档；
+    // 之后的打字照常可撤销（空/撤销/重勾立为图一切如常）。
+    void beginAsciiEditBlock()
+    {
+        if (!document()->isUndoRedoEnabled())
+            return;
+        m_asciiUndoPaused = true;
+        document()->setUndoRedoEnabled(false);
+    }
+    void endAsciiEditBlock()
+    {
+        if (!m_asciiUndoPaused)
+            return;
+        m_asciiUndoPaused = false;
+        document()->setUndoRedoEnabled(true);
+    }
     // 「立为图」：把选区栅格化成字符画的源图——之后 Shift+缩放即可调
     // 画布（网格重渲染）。无选区时自动复选上次立为图的字符；没有上次
     // 则静默无效果。编辑过的字符画选中再立为图即可（编辑成果保留）。
@@ -876,13 +900,21 @@ public:
         if (c.hasSelection()) {
             start = c.selectionStart();
             end = c.selectionEnd();
-        } else if (m_lastArtStart >= 0 && m_lastArtEnd > m_lastArtStart
-                   && m_lastArtEnd <= document()->characterCount()) {
-            start = m_lastArtStart; // 自动复选上次立为图的字符
-            end = m_lastArtEnd;
+        } else if (m_lastArtStart >= 0 && m_lastArtEnd > m_lastArtStart) {
+            // 自动复选上次立为图的字符；范围因撤销/清空失效时退化为全文
+            // （撤销恢复后的画布字符仍然在文档里——复选它们即"记忆"）
+            const int last = qMax(0, document()->characterCount() - 1);
+            start = qBound(0, m_lastArtStart, last);
+            end = qMin(m_lastArtEnd, last);
+            if (end <= start) { // 上次范围已不复存在 → 复选全文
+                start = 0;
+                end = last;
+            }
         } else {
             return; // 无选区且无上次 → 无任何影响
         }
+        if (end <= start)
+            return; // 空文档：无事（不产生假勾选）
         QTextCursor t = textCursor();
         t.setPosition(start);
         t.setPosition(end, QTextCursor::KeepAnchor);
@@ -920,6 +952,8 @@ public:
         m_asciiPrintTimer.stop();
         m_asciiPrinting = false;
         m_asciiPrintPos = start;
+        endAsciiEditBlock(); // 收口被重勾打断的打印块
+        setLineWrapMode(QPlainTextEdit::NoWrap); // 立为图即入画布态：永不重排（防叠行）
         m_asciiActive = true;
     }
 
@@ -928,11 +962,19 @@ public:
     {
         if (!m_asciiActive || m_asciiImage.isNull())
             return;
+        endAsciiEditBlock(); // 上一轮打印块收口（中断时不留开块）
         m_asciiPrintTimer.stop();
         m_asciiPrinting = false;
+        // 边界钳位：任何历史残留都不能让移除范围越过画布自身区域
+        // （旧事故：m_asciiEnd 越过文档末尾 → 移除吞掉画布外文字）
+        const int last = qMax(0, document()->characterCount() - 1);
+        m_asciiStart = qBound(0, m_asciiStart, last);
+        m_asciiEnd = qBound(m_asciiStart, m_asciiEnd, last);
+        m_asciiPrintPos = qBound(m_asciiStart, m_asciiPrintPos, last);
         QTextCursor c = textCursor();
         c.setPosition(m_asciiStart);
         c.setPosition(qMax(m_asciiEnd, m_asciiPrintPos), QTextCursor::KeepAnchor);
+        beginAsciiEditBlock(); // 移除+重印 = 一步撤销
         m_settingAscii = true; // 程序替换不算手动编辑——否则画布态被自己杀掉
         c.removeSelectedText();
         m_settingAscii = false;
@@ -2011,6 +2053,100 @@ public:
                     return false;
                 }
                 e.setPlainText(QStringLiteral("無\n")); // 还原，防污染后续
+            }
+            // 回归：画布外文字共存 → 切编（Cmd+B）重印不得吞掉画布外文字
+            {
+                e.setPlainText(QStringLiteral("开头文字\n"));
+                e.moveCursor(QTextCursor::End);
+                e.loadAsciiImage(simg);
+                waitPrint();
+                e.toggleCodeMode(); // 切编（用户误报 Cmd+B 吞字符）
+                waitPrint();
+                if (!e.toPlainText().startsWith(QStringLiteral("开头文字\n"))) {
+                    qWarning("selftest FAIL: code toggle ate surrounding text");
+                    return false;
+                }
+                e.toggleCodeMode();
+                waitPrint();
+                if (!e.toPlainText().startsWith(QStringLiteral("开头文字\n"))) {
+                    qWarning("selftest FAIL: code exit ate surrounding text");
+                    return false;
+                }
+                e.setPlainText(QStringLiteral("無\n"));
+            }
+            // 回归（用户事故复现）：空(Cmd+N)清光 → 撤销复原 → 重勾立为图
+            // 必须真正复活画布态（NoWrap 不叠行 + 缩放可用）——不得假勾
+            {
+                e.setPlainText(QStringLiteral("开头文字\n"));
+                e.moveCursor(QTextCursor::End);
+                e.loadAsciiImage(simg);
+                waitPrint();
+                const QString before = e.toPlainText();
+                QKeyEvent kn(QEvent::KeyPress, Qt::Key_N, Qt::ControlModifier);
+                QApplication::sendEvent(&e, &kn); // 空：清空全部文字
+                QApplication::processEvents();
+                if (!e.toPlainText().isEmpty() || e.m_asciiActive) {
+                    qWarning("selftest FAIL: kong did not clear/end art");
+                    return false;
+                }
+                QKeyEvent kz(QEvent::KeyPress, Qt::Key_Z, Qt::ControlModifier);
+                QApplication::sendEvent(&e, &kz); // 撤销 → 复原
+                QApplication::processEvents();
+                if (e.toPlainText() != before) {
+                    qWarning("selftest FAIL: kong undo did not restore doc (%d vs %d)",
+                             int(e.toPlainText().size()), int(before.size()));
+                    return false;
+                }
+                QTextCursor nc = e.textCursor();
+                nc.clearSelection();
+                e.setTextCursor(nc);
+                e.declareArtFromSelection(); // 无选区 → 复选上次范围
+                if (!e.m_asciiActive
+                    || e.lineWrapMode() != QPlainTextEdit::NoWrap) {
+                    qWarning("selftest FAIL: re-declare after kong-undo not engaged");
+                    return false;
+                }
+                e.zoomAsciiCanvas(1.2); // 画布缩放仍应生效
+                waitPrint();
+                if (!e.m_asciiActive || e.toPlainText().isEmpty()) {
+                    qWarning("selftest FAIL: canvas zoom after re-declare failed");
+                    return false;
+                }
+                e.setPlainText(QStringLiteral("無\n"));
+            }
+            // 回归：画布操作不进撤销历史（撤销基线）——Cmd+Z 不得蚕食画布，
+            // 之后打字的撤销照常
+            {
+                e.setPlainText(QString());
+                e.loadAsciiImage(simg);
+                waitPrint();
+                const QString artOnce = e.toPlainText();
+                e.zoomAsciiCanvas(0.8); // 缩小：必产生重印（放大可能触原生上限）
+                waitPrint();
+                if (e.toPlainText() == artOnce) {
+                    qWarning("selftest FAIL: zoom did not reprint");
+                    return false;
+                }
+                QKeyEvent kz2(QEvent::KeyPress, Qt::Key_Z, Qt::ControlModifier);
+                QApplication::sendEvent(&e, &kz2); // Cmd+Z：不得触碰画布
+                QApplication::processEvents();
+                if (e.toPlainText().isEmpty() || !e.m_asciiActive) {
+                    qWarning("selftest FAIL: undo ate art after zoom");
+                    return false;
+                }
+                const QString afterZoom = e.toPlainText();
+                e.moveCursor(QTextCursor::End);
+                QKeyEvent kt(QEvent::KeyPress, Qt::Key_X, Qt::NoModifier);
+                QApplication::sendEvent(&e, &kt); // 画布后打字
+                QApplication::processEvents();
+                QKeyEvent kz3(QEvent::KeyPress, Qt::Key_Z, Qt::ControlModifier);
+                QApplication::sendEvent(&e, &kz3); // 撤销打字：照常可用
+                QApplication::processEvents();
+                if (e.toPlainText() != afterZoom) {
+                    qWarning("selftest FAIL: post-art typing not undoable");
+                    return false;
+                }
+                e.setPlainText(QStringLiteral("無\n"));
             }
             // 回归：打印期间切编（高亮器 rehighlight 曾误触发反激活）→
             // 画布态存活、退出编存活、无选区立为图可复选上次范围
@@ -3151,6 +3287,7 @@ private:
     QVector<QRgb> m_asciiColors; // C64 真彩：与字符一一对应的前景色
     int m_asciiPrintIdx = 0;
     int m_asciiPrintPos = 0;
+    bool m_asciiUndoPaused = false; // 画布程序写入期间撤销记录已暂停
     bool m_asciiPrinting = false;
     int m_lastArtStart = -1;     // 上次立为图/拖图的范围（无选区时复选）
     int m_lastArtEnd = -1;
