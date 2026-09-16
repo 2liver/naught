@@ -3,5 +3,7 @@
         <file>icons/naught.png</file>
         <file>fonts/fusion-pixel-12px-monospaced-zh_hans.ttf</file>
         <file>fonts/FusionPixel-OFL.txt</file>
+        <file>fonts/VT323-Regular.ttf</file>
+        <file>fonts/VT323-OFL.txt</file>
     </qresource>
 </RCC>

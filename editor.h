@@ -9,6 +9,9 @@
 #include <QColor>
 #include <QContextMenuEvent>
 #include <QCoreApplication>
+#include <QDesktopServices>
+#include <QDir>
+#include <QDirIterator>
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QEvent>
@@ -32,6 +35,7 @@
 #include <QPointF>
 #include <QResizeEvent>
 #include <QScrollBar>
+#include <QStandardPaths>
 #include <QStyleHints>
 #include <QTextBlock>
 #include <QTextCharFormat>
@@ -39,6 +43,7 @@
 #include <QTextDocument>
 #include <QTextLayout>
 #include <QTimer>
+#include <QUrl>
 #include <QWheelEvent>
 
 #ifdef NAUGHT_WITH_HIGHLIGHT
@@ -73,14 +78,21 @@ public:
             m_baseSize = 12;
         m_size = m_baseSize;
 
-        // 磷光像素字体：随 qrc 捆绑（OFL），一次加载终身可用
+        // 出厂磷光字体：随 qrc 捆绑（均 OFL），一次加载终身可用——用户
+        // 删光字体文件夹也不影响机器开机（出厂字体在应用包里，删不掉）
         if (s_crtFamily.isEmpty()) {
             const int id = QFontDatabase::addApplicationFont(
                 QStringLiteral(":/fonts/fusion-pixel-12px-monospaced-zh_hans.ttf"));
             if (id >= 0 && !QFontDatabase::applicationFontFamilies(id).isEmpty())
                 s_crtFamily = QFontDatabase::applicationFontFamilies(id).first();
         }
-        m_crtFont = QFont(s_crtFamily);
+        if (s_greenFamily.isEmpty()) {
+            const int id = QFontDatabase::addApplicationFont(
+                QStringLiteral(":/fonts/VT323-Regular.ttf"));
+            if (id >= 0 && !QFontDatabase::applicationFontFamilies(id).isEmpty())
+                s_greenFamily = QFontDatabase::applicationFontFamilies(id).first();
+        }
+        refreshFonts(); // 用户字体文件夹（可含嵌套子文件夹）
         // 抗锯齿打开：磷粉像素块边缘自然软化（锐利硬边不像玻璃后的光）
 
 #if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
@@ -103,13 +115,6 @@ public:
         connect(&m_crtSettleTimer, &QTimer::timeout, this, [this] {
             if (m_crt && m_crtView)
                 m_crtView->markDirty();
-        });
-
-        // M3：字符画随窗口缩放防抖重渲染
-        m_asciiSettleTimer.setSingleShot(true);
-        connect(&m_asciiSettleTimer, &QTimer::timeout, this, [this] {
-            if (m_asciiActive)
-                renderAsciiArt();
         });
 
         // 换成自绘滚动条：命中区恒 18px，把手闲置 10px / 悬停 18px
@@ -139,11 +144,6 @@ public:
         connect(document(), &QTextDocument::contentsChanged, this, [this] {
             wakeCaret();
             m_lastWasInk = false;
-            // M3：用户在字符画上动笔 = 画作回归普通文本（程序重渲染不受影响）
-            if (!m_settingAscii && m_asciiActive) {
-                m_asciiActive = false;
-                setLineWrapMode(QPlainTextEdit::WidgetWidth);
-            }
             // 磷粉激发（二期三件套·回接）：插入的新字符记下位置与时刻，
             // 快照在 ~900ms 内给它画三圈软边增亮（指数回落）
             const int cc = document()->characterCount();
@@ -483,6 +483,8 @@ public:
         const int y1 = qCeil((cell.y() + cell.height()) * dpr);
         // 双色反相：t = 像素亮度在 底→墨 间的归一位置；out = lerp(块, 底, t)
         const Crt::Palette &pp = crtPalette();
+        // 编模式（多彩语法高亮）下块光标用中性暖白：绿磷块在代码里太突兀
+        const QColor block = m_codeMode ? QColor(0xE8, 0xE8, 0xE0) : pp.cursorBlock;
         const int bgSum = pp.bg.red() + pp.bg.green() + pp.bg.blue();
         const int inkSum = pp.ink.red() + pp.ink.green() + pp.ink.blue();
         const int span = inkSum - bgSum;
@@ -494,9 +496,9 @@ public:
                 const int i = x * 4;
                 const int sum = line[i] + line[i + 1] + line[i + 2];
                 const qreal t = qBound(0.0, qreal(sum - bgSum) / qreal(span), 1.0);
-                line[i + 2] = uchar(pp.cursorBlock.red() + (pp.bg.red() - pp.cursorBlock.red()) * t);
-                line[i + 1] = uchar(pp.cursorBlock.green() + (pp.bg.green() - pp.cursorBlock.green()) * t);
-                line[i] = uchar(pp.cursorBlock.blue() + (pp.bg.blue() - pp.cursorBlock.blue()) * t);
+                line[i + 2] = uchar(block.red() + (pp.bg.red() - block.red()) * t);
+                line[i + 1] = uchar(block.green() + (pp.bg.green() - block.green()) * t);
+                line[i] = uchar(block.blue() + (pp.bg.blue() - block.blue()) * t);
             }
         }
     }
@@ -568,13 +570,15 @@ public:
     bool crtViewLocked() const { return m_viewLock; }
     void toggleViewLock() { m_viewLock = !m_viewLock; }
 
-    // 切换计算机（M2）：琥珀（Osborne Executive）↔ 绿磷（IBM 5100）
+    // 切换计算机（M2）：琥珀（Osborne Executive）↔ 绿磷（IBM 5100），
+    // 同时切换两台的出厂默认字体（Fusion Pixel ↔ VT323）
     const Crt::Palette &crtPalette() const { return m_machineGreen ? Crt::kGreen : Crt::kAmber; }
     bool machineGreen() const { return m_machineGreen; }
     void toggleMachine()
     {
         m_machineGreen = !m_machineGreen;
         applyScheme();
+        applyZoom(); // 字体随机器切换（Fusion Pixel ↔ VT323）
         viewport()->update();
         if (m_canvas)
             m_canvas->update();
@@ -584,32 +588,89 @@ public:
             m_crtView->markDirty(true);
     }
 
+    // ---- 字体管理（「项」·字体区）：用户字体文件夹 + 上/下一个 ----
+    static QString fontDir()
+    {
+        return QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)
+               + QStringLiteral("/naught/fonts");
+    }
+    // 递归扫描字体文件夹（含嵌套子文件夹），按文件顺序加载并返回可用族名；
+    // 损坏/被删的文件自动跳过——出厂字体始终在包里，机器永不断字。
+    static QStringList scanFontFamilies(const QString &dir)
+    {
+        QStringList families;
+        QDirIterator it(dir, { QStringLiteral("*.ttf"), QStringLiteral("*.otf") },
+                        QDir::Files, QDirIterator::Subdirectories);
+        while (it.hasNext()) {
+            const int id = QFontDatabase::addApplicationFont(it.next());
+            if (id >= 0) {
+                const QStringList fams = QFontDatabase::applicationFontFamilies(id);
+                if (!fams.isEmpty())
+                    families.append(fams.first());
+            }
+        }
+        return families;
+    }
+    void refreshFonts()
+    {
+        m_userFonts = scanFontFamilies(fontDir());
+    }
+    void openFontFolder()
+    {
+        QDir().mkpath(fontDir());
+        QDesktopServices::openUrl(QUrl::fromLocalFile(fontDir()));
+    }
+    // 上一个/下一个：按字体文件夹文件顺序循环当前机器的字体，实时生效。
+    // 循环列表 = [出厂默认] + 文件夹字体（可循环回出厂）；文件夹为空或
+    // 字体全被删 → 保持出厂字体（静默）。
+    void cycleCrtFont(int delta)
+    {
+        refreshFonts(); // 每次重扫：刚拖入的字体即时可用
+        if (m_userFonts.isEmpty())
+            return;
+        const QString factory = m_machineGreen ? s_greenFamily : s_crtFamily;
+        const QStringList all = QStringList() << factory << m_userFonts;
+        int idx = all.indexOf(crtFontFamily());
+        if (idx < 0)
+            idx = 0;
+        idx += delta;
+        if (idx < 0)
+            idx += all.size();
+        idx %= all.size();
+        QString &u = m_machineGreen ? m_greenUser : m_amberUser;
+        u = (idx == 0) ? QString() : all.at(idx); // 空 = 出厂
+        applyZoom();
+        viewport()->update();
+        if (m_lineNumberArea)
+            m_lineNumberArea->update();
+        if (m_crtView)
+            m_crtView->markDirty(true);
+    }
+    QString crtFontFamily() const
+    {
+        const QString &u = m_machineGreen ? m_greenUser : m_amberUser;
+        if (!u.isEmpty() && m_userFonts.contains(u))
+            return u;
+        return m_machineGreen ? s_greenFamily : s_crtFamily; // 出厂回退
+    }
+
     // ---- M3：拖图片 → 字符画（隐藏功能，README 不提及）----
+    // 在打字光标处插入（不覆盖现有文字）。网格在插入时刻由视口宽与
+    // 字号决定（外部缩放 = 先调窗口，内部缩放 = 先调字号）；插入后即
+    // 普通文本，可编辑可复制。
     void loadAsciiImage(const QImage &img)
     {
         if (img.isNull())
-            return;
-        m_asciiImage = img;
-        m_asciiActive = true;
-        renderAsciiArt();
-    }
-    // 字符画行列数随窗口/字号自适应：列 = 视口宽/字宽，行按图片
-    // 宽高比与字符格宽高比换算（保持原图比例）
-    void renderAsciiArt()
-    {
-        if (!m_asciiActive || m_asciiImage.isNull())
             return;
         const QFontMetricsF fm(activeFont());
         const qreal cw = qMax(1.0, fm.horizontalAdvance(QLatin1Char('M')));
         const qreal ch = qMax(1.0, fm.height());
         const int cols = qMax(2, int(viewport()->width() / cw));
-        const int rows = qMax(2, int(cols * (qreal(m_asciiImage.height()) / m_asciiImage.width())
-                                     * (cw / ch)));
-        const QString art = Ascii::imageToText(m_asciiImage, cols, rows);
-        m_settingAscii = true;
-        setLineWrapMode(QPlainTextEdit::NoWrap); // 字符画不重排
-        setPlainText(art);
-        m_settingAscii = false;
+        const int rows = qMax(2, int(cols * (qreal(img.height()) / img.width()) * (cw / ch)));
+        const QString art = Ascii::imageToText(img, cols, rows);
+        if (document()->isEmpty())
+            setLineWrapMode(QPlainTextEdit::NoWrap); // 纯画布：不重排
+        textCursor().insertText(art);
         if (m_crtView)
             m_crtView->markDirty();
     }
@@ -1394,16 +1455,19 @@ public:
                 qWarning("selftest FAIL: view lock re-toggle failed");
                 return false;
             }
-            // M2：切换计算机——默认琥珀，切绿磷（文字/底色随调色板），切回
+            // M2：切换计算机——默认琥珀，切绿磷（文字/底色/字体随调色板与
+            // 出厂字库），切回
             if (e.crtPalette().ink != Crt::kInk) {
                 qWarning("selftest FAIL: default machine not amber");
                 return false;
             }
+            const QString famAmber = e.document()->defaultFont().family();
             e.toggleMachine();
             if (e.crtPalette().ink != Crt::kGreen.ink
                 || e.palette().color(QPalette::Text) != Crt::kGreen.ink
-                || e.palette().color(QPalette::Base) != Crt::kGreen.bg) {
-                qWarning("selftest FAIL: green machine palette not applied");
+                || e.palette().color(QPalette::Base) != Crt::kGreen.bg
+                || e.document()->defaultFont().family() == famAmber) {
+                qWarning("selftest FAIL: green machine palette/font not applied");
                 return false;
             }
             e.toggleMachine();
@@ -1548,27 +1612,60 @@ public:
                          lines[0].at(0).toLatin1(), lines[0].at(7).toLatin1());
                 return false;
             }
-            // 编辑器路径冒烟：loadAsciiImage → 文档变为纯字符画 → 还原
+            // 编辑器路径冒烟：空文档插入 → 整页字符画；非空文档 → 光标处插入
+            e.setPlainText(QString());
             e.loadAsciiImage(simg);
-            const QString doc = e.toPlainText();
-            const QStringList dl = doc.split(QLatin1Char('\n'));
-            if (dl.size() < 3 || dl[0].isEmpty()) {
-                qWarning("selftest FAIL: ascii art editor path produced empty doc");
-                return false;
-            }
-            const QString rampChars = QStringLiteral(" .:*#@.,-~:;=!*#$@");
-            bool onlyRamp = true;
-            for (const QChar ch : doc) {
-                if (ch != QLatin1Char('\n') && !rampChars.contains(ch)) {
-                    onlyRamp = false;
-                    break;
+            {
+                const QString doc = e.toPlainText();
+                const QStringList dl = doc.split(QLatin1Char('\n'));
+                if (dl.size() < 3 || dl[0].isEmpty()) {
+                    qWarning("selftest FAIL: ascii art editor path produced empty doc");
+                    return false;
+                }
+                const QString rampChars = QStringLiteral(" .:*#@.,-~:;=!*#$@");
+                bool onlyRamp = true;
+                for (const QChar ch : doc) {
+                    if (ch != QLatin1Char('\n') && !rampChars.contains(ch)) {
+                        onlyRamp = false;
+                        break;
+                    }
+                }
+                if (!onlyRamp) {
+                    qWarning("selftest FAIL: ascii art editor path has non-ramp chars");
+                    return false;
                 }
             }
-            if (!onlyRamp) {
-                qWarning("selftest FAIL: ascii art editor path has non-ramp chars");
+            e.setPlainText(QStringLiteral("無\n"));
+            {
+                e.moveCursor(QTextCursor::End);
+                e.loadAsciiImage(simg);
+                const QString doc = e.toPlainText();
+                if (!doc.startsWith(QStringLiteral("無\n")) || doc.size() < 10) {
+                    qWarning("selftest FAIL: ascii art insert overwrote existing text");
+                    return false;
+                }
+                e.setPlainText(QStringLiteral("無\n")); // 还原，防污染后续
+            }
+        }
+        // 字体管理：空/不存在目录 → 扫描为空；循环后族名永不为空（出厂回退）
+        {
+            const QStringList none = Editor::scanFontFamilies(
+                QStringLiteral("/nonexistent-naught-fonts-dir"));
+            if (!none.isEmpty()) {
+                qWarning("selftest FAIL: font scan of missing dir not empty");
                 return false;
             }
-            e.setPlainText(QStringLiteral("無\n")); // 还原，防污染后续
+            const QString f0 = e.crtFontFamily();
+            e.cycleCrtFont(+1); // 用户文件夹无论有无字体，族名都必须可用
+            if (e.crtFontFamily().isEmpty()) {
+                qWarning("selftest FAIL: font family empty after cycle");
+                return false;
+            }
+            e.cycleCrtFont(-1);
+            if (e.crtFontFamily() != f0) {
+                qWarning("selftest FAIL: font cycle round-trip changed family");
+                return false;
+            }
         }
         // 真衍射的边差分：合成白块的左右竖直边界各产出一条彩边掩膜
         {
@@ -2076,8 +2173,6 @@ private:
         setFont(f);
         // 笔刷与字号脱钩：只由 Cmd/Ctrl+Shift+= / - / 0 控制
         updateGutterWidth(); // 行号区宽度随缩放重算（否则放大溢出、打字缩回）
-        if (m_asciiActive)
-            renderAsciiArt(); // M3：字符画随字号重渲染（内部缩放）
         if (m_crtView) {
             m_crtView->markDirty(true); // 缩放强制重拍（节流会让新旧帧交叠）
             m_crtSettleTimer.start(400);
@@ -2185,9 +2280,10 @@ private:
     QFont activeFont() const
     {
         if (m_crt) {
-            // 像素字：整数像素号（12px 为设计原大），无抗锯齿
-            QFont f = m_crtFont;
-            f.setPixelSize(qMax(6, qRound(m_size)));
+            // 机器字符 ROM：出厂/手选字体；整数像素号（12px 为设计原大），
+            // 绿磷 VT323 设计号偏大，放大 1.25×；无抗锯齿
+            QFont f = QFont(crtFontFamily());
+            f.setPixelSize(qMax(6, qRound(m_size * (m_machineGreen ? 1.25 : 1.0))));
             return f;
         }
         QFont f = m_codeMode ? m_codeFont : m_baseFont;
@@ -2224,8 +2320,6 @@ private:
         updateLineNumberArea();
         if (m_crtView)
             m_crtView->syncGeometry(); // 整面覆盖随窗口缩放
-        if (m_asciiActive)
-            m_asciiSettleTimer.start(200); // M3：防抖，拖拽窗口期间不重渲染
     }
 
     void updateLineNumberArea()
@@ -2552,10 +2646,9 @@ private:
     QPointF m_lastMouse = QPointF(-1, -1);
     bool m_viewLock = true; // 显·追随视角锁定（M1）：进显重置，Cmd+Shift+T 切换
     bool m_machineGreen = false; // 显·切换计算机（M2）：绿磷（IBM 5100）
-    QImage m_asciiImage;         // M3：字符画源图
-    bool m_asciiActive = false;  // 源图在场且未被手动编辑
-    bool m_settingAscii = false; // 程序重渲染期间置位（抑制 contentsChanged 反激活）
-    QTimer m_asciiSettleTimer;   // 窗口缩放防抖重渲染
+    QStringList m_userFonts;  // 字体文件夹族名（文件顺序）
+    QString m_amberUser;      // 琥珀机器的手选字体（会话内，空 = 出厂）
+    QString m_greenUser;      // 绿磷机器的手选字体（会话内，空 = 出厂）
     struct InkOp {
         QVector<Canvas::InkStroke> before;
         QVector<Canvas::InkStroke> after;
@@ -2573,8 +2666,8 @@ private:
     LineNumberArea *m_lineNumberArea = nullptr;
     bool m_crt = false;
     CrtView *m_crtView = nullptr;
-    QFont m_crtFont;
-    static inline QString s_crtFamily;
+    static inline QString s_crtFamily;   // 出厂琥珀：Fusion Pixel（qrc）
+    static inline QString s_greenFamily; // 出厂绿磷：VT323（qrc）
     QTimer m_crtSettleTimer;
 
 #ifdef NAUGHT_WITH_HIGHLIGHT

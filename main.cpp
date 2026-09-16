@@ -228,6 +228,12 @@ int main(int argc, char **argv)
         bGreen->setCheckable(true);
         QAction *bAscii = fa->addAction(QStringLiteral("拖入图片 → 字符画"));
         bAscii->setEnabled(false); // 自释性提示：隐藏功能，README 不写
+        fa->addSeparator(); // 字体区
+        QAction *bFontDir = fa->addAction(QStringLiteral("打开字体文件夹"));
+        QAction *bFontPrev = fa->addAction(QStringLiteral("上一字体"));
+        bFontPrev->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+,")));
+        QAction *bFontNext = fa->addAction(QStringLiteral("下一字体"));
+        bFontNext->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+.")));
         fa->addSeparator(); // 视图轴（编·显）与格式化（言·隔）分区
         QAction *bYan = fa->addAction(QStringLiteral("言"));
         bYan->setShortcut(QKeySequence(QStringLiteral("Ctrl+L")));
@@ -257,6 +263,9 @@ int main(int argc, char **argv)
         QObject::connect(bXian, &QAction::triggered, &editor, [&editor] { editor.toggleCrt(); });
         QObject::connect(bLock, &QAction::triggered, &editor, [&editor] { editor.toggleViewLock(); });
         QObject::connect(bGreen, &QAction::triggered, &editor, [&editor] { editor.toggleMachine(); });
+        QObject::connect(bFontDir, &QAction::triggered, &editor, [&editor] { editor.openFontFolder(); });
+        QObject::connect(bFontPrev, &QAction::triggered, &editor, [&editor] { editor.cycleCrtFont(-1); });
+        QObject::connect(bFontNext, &QAction::triggered, &editor, [&editor] { editor.cycleCrtFont(+1); });
         QObject::connect(bYan, &QAction::triggered, &editor, [&editor] { editor.yan(); });
         QObject::connect(bGe, &QAction::triggered, &editor, [&editor] { editor.ge(); });
         QObject::connect(bZoomIn, &QAction::triggered, &editor, [&editor] { editor.zoom(1); });
