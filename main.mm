@@ -20,6 +20,7 @@
 #include <QMenuBar>
 #include <QMouseEvent>
 #include <QProcess>
+#include <QRandomGenerator>
 #include <QScrollBar>
 #include <QString>
 #include <QTextCursor>
@@ -129,6 +130,119 @@ static bool naughtAgentLoginItemInstalled()
     return found;
 }
 #endif // Q_OS_MACOS
+
+// 暴力测试（--stress）：像用户一样交叉混合各功能、大量且快速地乱序操作，
+// 周期性校验不变量（画布态一致性 / 彩色泄漏 / 文档结构）——捉崩溃、
+// 卡死与状态腐坏。
+static bool stressTest()
+{
+    Editor e;
+    e.resize(960, 720);
+    e.show();
+    QApplication::processEvents();
+    QRandomGenerator rng(20260916); // 固定种子：可复现
+    const auto rnd = [&](int n) { return int(rng.bounded(n)); };
+
+    QImage simg(64, 48, QImage::Format_ARGB32);
+    for (int y = 0; y < 48; ++y)
+        for (int x = 0; x < 64; ++x)
+            simg.setPixel(x, y, qRgb((x * 7 + y * 3) & 255, (x * 3 + y * 11) & 255,
+                                     (x * 13 + y * 5) & 255));
+    const QString seed = QStringLiteral("無无 Wu\n甲 乙 丙\nA B C D E F\n");
+    e.setPlainText(seed);
+
+    const auto settle = [&](int ms = 20) {
+        for (int k = 0; k < ms / 10; ++k) {
+            QApplication::processEvents();
+            QEventLoop lp;
+            QTimer::singleShot(10, &lp, &QEventLoop::quit);
+            lp.exec();
+        }
+    };
+    const auto randSel = [&] {
+        QTextCursor c = e.textCursor();
+        const int total = qMax(1, e.document()->characterCount() - 1);
+        const int a = rnd(total);
+        const int b = rnd(total);
+        c.setPosition(qMin(a, b));
+        c.setPosition(qMax(a, b), QTextCursor::KeepAnchor);
+        e.setTextCursor(c);
+    };
+
+    int typed = 0, ops = 0;
+    for (int iter = 0; iter < 300; ++iter) {
+        const int op = rnd(21);
+        switch (op) {
+        case 0: { // 打字
+            e.insertPlainText(QString(QChar(0x7121 + (rnd(40)))));
+            ++typed;
+            break;
+        }
+        case 1: { // 删字
+            e.textCursor().deletePreviousChar();
+            break;
+        }
+        case 2: e.undoAll(); break;
+        case 3: e.redoAll(); break;
+        case 4: e.toggleMachine(); break;
+        case 5: e.toggleCodeMode(); break;
+        case 6: e.toggleCrt(); break;
+        case 7: randSel(); e.declareArtFromSelection(); break;
+        case 8: e.zoomAsciiCanvas(0.7 + rnd(100) / 100.0); break;
+        case 9: e.optimizeAsciiCanvas(); break;
+        case 10: e.kong(); break;
+        case 11: e.mo(); break;
+        case 12: e.setDark(rnd(2)); break;
+        case 13: randSel(); e.formatBox(rnd(4)); break;
+        case 14: randSel(); e.joinLinesTo(); break;
+        case 15: randSel(); e.restoreLines(); break;
+        case 16: randSel(); e.centerToWidth(); break;
+        case 17: e.cycleCrtFont(+1); break;
+        case 18: e.loadAsciiImage(simg); settle(60); break;
+        case 19: e.toggleViewLock(); break;
+        case 20: randSel(); e.pathsToTree(); break;
+        }
+        ++ops;
+        settle();
+        // 周期不变量校验
+        if (iter % 25 == 24) {
+            settle(200); // 让打印/重排沉淀
+            // 1) 画布态一致性：active → NoWrap
+            if (e.asciiArtActive()
+                && e.lineWrapMode() != QPlainTextEdit::NoWrap) {
+                qWarning("STRESS FAIL: active art not NoWrap (iter=%d)", iter);
+                return false;
+            }
+            // 2) 非 C64 机上不得有彩色前景（抽样前 300 块）
+            if (e.machine() != 2) {
+                QTextBlock b = e.document()->firstBlock();
+                for (int k = 0; k < 300 && b.isValid(); ++k, b = b.next()) {
+                    for (auto it = b.begin(); !it.atEnd(); ++it) {
+                        if (it.fragment().charFormat().foreground().style()
+                            != Qt::NoBrush) {
+                            qWarning("STRESS FAIL: colored text on machine %d (iter=%d)",
+                                     e.machine(), iter);
+                            return false;
+                        }
+                    }
+                }
+            }
+            // 3) 文档结构健全：块数 × 平均行长 与 字符数 量级相符
+            const int cc = e.document()->characterCount();
+            const int blocks = e.document()->blockCount();
+            if (cc > 2000000 || blocks > 200000) {
+                qWarning("STRESS FAIL: doc exploded (cc=%d blocks=%d iter=%d)",
+                         cc, blocks, iter);
+                return false;
+            }
+            qInfo("STRESS iter=%d ok: cc=%d blocks=%d machine=%d art=%d code=%d crt=%d",
+                  iter, cc, blocks, e.machine(), int(e.asciiArtActive()),
+                  int(e.codeMode()), int(e.crtOn()));
+        }
+    }
+    qInfo("STRESS PASS: %d ops, %d typed chars", ops, typed);
+    return true;
+}
 
 // 性能基准（--bench）：大文档装载 / 行尾·行中打字 / 缩放 / 滚动 / 行号重绘 / 笔迹。
 // 离屏为软件光栅（真机走 GPU 合成），数值作回归基线，不直接代表真机帧时间。
@@ -297,6 +411,8 @@ int main(int argc, char **argv)
 #endif
     if (argc > 1 && QString::fromLocal8Bit(argv[1]) == QLatin1String("--bench"))
         return benchmark() ? 0 : 1;
+    if (argc > 1 && QString::fromLocal8Bit(argv[1]) == QLatin1String("--stress"))
+        return stressTest() ? 0 : 1;
 
     Editor editor;
     editor.setWindowTitle(QString());

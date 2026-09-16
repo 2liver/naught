@@ -26,9 +26,13 @@ public:
     virtual bool crtViewLocked() const = 0;    // 追随视角锁定（M1）
     virtual bool screenEntityOn() const = 0;   // 屏幕实体（曲率/边框）
     virtual QPointF lastMouseViewport() const = 0; // 人眼代理（反光视差）
-    // 快照脏区（P3 增量）
-    virtual QRect consumeSnapshotDirty() = 0;
-    virtual bool snapshotFullDirty() const = 0;
+    // 快照脏区（P3 增量）——一次性消费，消除"先读全量标志再清脏区"
+    // 的跨接口时序约定（读反了 full 恒 false 的隐患）
+    struct SnapDirty {
+        bool full = false;
+        QRect rect;
+    };
+    virtual SnapDirty consumeSnapshotDirty() = 0;
     // 几何与挂载：CrtView 必须以编辑器为父窗口（alien 覆盖层）
     virtual QRect sourceRect() const = 0;
     virtual QSize sourceViewportSize() const = 0;

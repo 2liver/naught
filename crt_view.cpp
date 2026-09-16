@@ -250,15 +250,14 @@ void CrtView::renderFrame()
     if (m_forceNow || !throttled) {
         // P3：增量快照——打字只重画脏区（复用上一帧为底）；无脏区信息
         // （环境拍/首次）走全量兜底。滚动/缩放/换机已标全量
-        const bool fullDirty = m_source->snapshotFullDirty();
-        const QRect dirty = m_source->consumeSnapshotDirty();
-        if (fullDirty || m_pending.isNull() || m_pending.size() != m_texSize) {
+        const CrtSource::SnapDirty snap = m_source->consumeSnapshotDirty();
+        if (snap.full || m_pending.isNull() || m_pending.size() != m_texSize) {
             m_pending = QImage(m_texSize, QImage::Format_ARGB32);
             m_pending.setDevicePixelRatio(devicePixelRatioF());
             m_pending.fill(m_source->crtPalette().bg); // 随调色板（M2）
             m_source->paintTextSnapshot(m_pending);
-        } else if (!dirty.isEmpty()) {
-            m_source->paintTextSnapshotRegion(m_pending, dirty);
+        } else if (!snap.rect.isEmpty()) {
+            m_source->paintTextSnapshotRegion(m_pending, snap.rect);
         } else {
             m_pending = QImage(m_texSize, QImage::Format_ARGB32);
             m_pending.setDevicePixelRatio(devicePixelRatioF());

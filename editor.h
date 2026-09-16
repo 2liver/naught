@@ -561,6 +561,42 @@ public:
     }
 
     // ---- 格式化库（自 AsciiTools 移植：框/压行/路径树）+ 居中 ----
+    // 原子尾部：一步撤销替换 [start,end) → out，整段保持选中（链式）。
+    // 六个格式化操作共用——Q1 审查提取
+    void replaceAndReselect(int start, int end, const QString &out)
+    {
+        QTextCursor c = textCursor();
+        c.beginEditBlock();
+        c.setPosition(start);
+        c.setPosition(end, QTextCursor::KeepAnchor);
+        c.insertText(out);
+        c.endEditBlock();
+        c.setPosition(start);
+        c.setPosition(start + out.size(), QTextCursor::KeepAnchor);
+        setTextCursor(c);
+        wakeCaret();
+    }
+    // 范围解析（两变体）：选区或全文 / 选区或当前行
+    struct TextRange {
+        int start;
+        int end;
+    };
+    TextRange selectionOrDoc() const
+    {
+        QTextCursor c = textCursor();
+        if (c.hasSelection())
+            return { c.selectionStart(), c.selectionEnd() };
+        const QTextBlock lastBlk = document()->lastBlock();
+        return { 0, lastBlk.position() + qMax(0, lastBlk.length() - 1) };
+    }
+    void selectionOrLine(QTextBlock &first, QTextBlock &last) const
+    {
+        QTextCursor c = textCursor();
+        first = document()->findBlock(c.selectionStart());
+        last = document()->findBlock(c.selectionEnd());
+        if (last.position() == c.selectionEnd() && last != first)
+            last = last.previous(); // 选区恰在行首结束：上一行才是最后受影响行
+    }
     // CJK 等宽字符按 2 格计算（与 AsciiTools 同约定，保证对齐）
     static int displayWidth(const QString &s)
     {
@@ -578,11 +614,8 @@ public:
         QTextDocument *doc = document();
         if (doc->isEmpty())
             return;
-        QTextCursor c = textCursor();
-        QTextBlock first = doc->findBlock(c.selectionStart());
-        QTextBlock last = doc->findBlock(c.selectionEnd());
-        if (last.position() == c.selectionEnd() && last != first)
-            last = last.previous(); // 选区恰在行首结束：上一行才是最后受影响行
+        QTextBlock first, last;
+        selectionOrLine(first, last);
         QStringList lines;
         for (QTextBlock b = first;; b = b.next()) {
             lines.append(b.text());
@@ -698,17 +731,8 @@ public:
             out += lineTxt + QLatin1Char('\n');
         }
         out += s.bl + QString(topBar.size() - 2, s.h) + s.br;
-        const int repStart = first.position();
-        const int repEnd = last.position() + last.length() - 1;
-        c.beginEditBlock();
-        c.setPosition(repStart);
-        c.setPosition(repEnd, QTextCursor::KeepAnchor);
-        c.insertText(out);
-        c.endEditBlock();
-        c.setPosition(repStart);
-        c.setPosition(repStart + out.size(), QTextCursor::KeepAnchor);
-        setTextCursor(c);
-        wakeCaret();
+        replaceAndReselect(first.position(),
+                           last.position() + last.length() - 1, out);
     }
     // 压行：选区（或全文）每行去首尾空白、空行跳过、以空格连成一行
     void joinLinesTo()
@@ -716,17 +740,8 @@ public:
         QTextDocument *doc = document();
         if (doc->isEmpty())
             return;
-        QTextCursor c = textCursor();
-        const bool hadSel = c.hasSelection();
-        const int repStart = hadSel ? c.selectionStart() : 0;
-        int repEnd;
-        if (hadSel) {
-            repEnd = c.selectionEnd();
-        } else {
-            const QTextBlock lastBlk = doc->lastBlock();
-            repEnd = lastBlk.position() + qMax(0, lastBlk.length() - 1);
-        }
-        const QString sel = doc->toPlainText().mid(repStart, repEnd - repStart);
+        const TextRange rng = selectionOrDoc();
+        const QString sel = doc->toPlainText().mid(rng.start, rng.end - rng.start);
         QStringList kept;
         for (const QString &l : sel.split(QLatin1Char('\n'))) {
             const QString t = l.trimmed();
@@ -739,15 +754,7 @@ public:
         m_joinMemory = sel; // 记住原文：还原 = 原样恢复（可逆）
         m_joinJoined = joined;
         m_joinMemoryValid = true;
-        c.beginEditBlock();
-        c.setPosition(repStart);
-        c.setPosition(repEnd, QTextCursor::KeepAnchor);
-        c.insertText(joined);
-        c.endEditBlock();
-        c.setPosition(repStart);
-        c.setPosition(repStart + joined.size(), QTextCursor::KeepAnchor);
-        setTextCursor(c);
-        wakeCaret();
+        replaceAndReselect(rng.start, rng.end, joined);
     }
     // 还原：按 ; { } 语义切分回多行 + 2 空格缩进（括号内分号不切）；
     // 内容不含代码分隔符则静默无效果（刚压完想反悔直接 Cmd+Z）
@@ -756,29 +763,12 @@ public:
         QTextDocument *doc = document();
         if (doc->isEmpty())
             return;
-        QTextCursor c = textCursor();
-        const bool hadSel = c.hasSelection();
-        const int repStart = hadSel ? c.selectionStart() : 0;
-        int repEnd;
-        if (hadSel) {
-            repEnd = c.selectionEnd();
-        } else {
-            const QTextBlock lastBlk = doc->lastBlock();
-            repEnd = lastBlk.position() + qMax(0, lastBlk.length() - 1);
-        }
-        const QString text = doc->toPlainText().mid(repStart, repEnd - repStart);
+        const TextRange rng = selectionOrDoc();
+        const QString text = doc->toPlainText().mid(rng.start, rng.end - rng.start);
         // 1) 刚压完且内容未再编辑：原样恢复（压行/还原可逆）
         if (m_joinMemoryValid && text == m_joinJoined) {
             m_joinMemoryValid = false;
-            c.beginEditBlock();
-            c.setPosition(repStart);
-            c.setPosition(repEnd, QTextCursor::KeepAnchor);
-            c.insertText(m_joinMemory);
-            c.endEditBlock();
-            c.setPosition(repStart);
-            c.setPosition(repStart + m_joinMemory.size(), QTextCursor::KeepAnchor);
-            setTextCursor(c);
-            wakeCaret();
+            replaceAndReselect(rng.start, rng.end, m_joinMemory);
             return;
         }
         QString out;
@@ -850,15 +840,7 @@ public:
         }
         out.replace(QRegularExpression(QStringLiteral("\n{3,}")), QStringLiteral("\n\n"));
         out = out.trimmed();
-        c.beginEditBlock();
-        c.setPosition(repStart);
-        c.setPosition(repEnd, QTextCursor::KeepAnchor);
-        c.insertText(out);
-        c.endEditBlock();
-        c.setPosition(repStart);
-        c.setPosition(repStart + out.size(), QTextCursor::KeepAnchor);
-        setTextCursor(c);
-        wakeCaret();
+        replaceAndReselect(rng.start, rng.end, out);
     }
     // 路径→树：选区（或全文）每行一个路径（'/' 分层；行尾 '/' = 目录）
     // → ├──/└── ASCII 树（自 AsciiTools 移植）
@@ -872,18 +854,9 @@ public:
         QTextDocument *doc = document();
         if (doc->isEmpty())
             return;
-        QTextCursor c = textCursor();
-        const bool hadSel = c.hasSelection();
-        const int repStart = hadSel ? c.selectionStart() : 0;
-        int repEnd;
-        if (hadSel) {
-            repEnd = c.selectionEnd();
-        } else {
-            const QTextBlock lastBlk = doc->lastBlock();
-            repEnd = lastBlk.position() + qMax(0, lastBlk.length() - 1);
-        }
+        const TextRange rng = selectionOrDoc();
         const QStringList rawLines =
-            doc->toPlainText().mid(repStart, repEnd - repStart).split(QLatin1Char('\n'));
+            doc->toPlainText().mid(rng.start, rng.end - rng.start).split(QLatin1Char('\n'));
         Node root;
         root.isDir = true;
         for (const QString &raw : rawLines) {
@@ -929,15 +902,7 @@ public:
         if (out.isEmpty())
             return;
         const QString tree = out.join(QLatin1Char('\n'));
-        c.beginEditBlock();
-        c.setPosition(repStart);
-        c.setPosition(repEnd, QTextCursor::KeepAnchor);
-        c.insertText(tree);
-        c.endEditBlock();
-        c.setPosition(repStart);
-        c.setPosition(repStart + tree.size(), QTextCursor::KeepAnchor);
-        setTextCursor(c);
-        wakeCaret();
+        replaceAndReselect(rng.start, rng.end, tree);
     }
     // 树→路径：├──/└── 树解析回 '/' 路径列表（目录行尾带 '/'）——
     // 路径树的还原（自 AsciiTools 移植）
@@ -951,18 +916,9 @@ public:
         QTextDocument *doc = document();
         if (doc->isEmpty())
             return;
-        QTextCursor c = textCursor();
-        const bool hadSel = c.hasSelection();
-        const int repStart = hadSel ? c.selectionStart() : 0;
-        int repEnd;
-        if (hadSel) {
-            repEnd = c.selectionEnd();
-        } else {
-            const QTextBlock lastBlk = doc->lastBlock();
-            repEnd = lastBlk.position() + qMax(0, lastBlk.length() - 1);
-        }
+        const TextRange rng = selectionOrDoc();
         const QStringList rawLines =
-            doc->toPlainText().mid(repStart, repEnd - repStart).split(QLatin1Char('\n'));
+            doc->toPlainText().mid(rng.start, rng.end - rng.start).split(QLatin1Char('\n'));
         Node root;
         root.isDir = true;
         QVector<QPair<int, Node *>> stack; // (depth, node)
@@ -1027,15 +983,7 @@ public:
                 walk(ch, root.name);
         }
         const QString paths = out.join(QLatin1Char('\n'));
-        c.beginEditBlock();
-        c.setPosition(repStart);
-        c.setPosition(repEnd, QTextCursor::KeepAnchor);
-        c.insertText(paths);
-        c.endEditBlock();
-        c.setPosition(repStart);
-        c.setPosition(repStart + paths.size(), QTextCursor::KeepAnchor);
-        setTextCursor(c);
-        wakeCaret();
+        replaceAndReselect(rng.start, rng.end, paths);
     }
     // 居中：选区（或当前行）每一行按窗口宽度居中——左补半差空格
     // （CJK 双格）；超宽行不动（不毁字）
@@ -1044,7 +992,6 @@ public:
         QTextDocument *doc = document();
         if (doc->isEmpty())
             return;
-        QTextCursor c = textCursor();
         const QFontMetricsF fm(activeFont());
         const qreal spw = qMax(0.1, fm.horizontalAdvance(QLatin1Char(' ')));
         const qreal winW = qMax(1.0, qreal(viewport()->width()));
@@ -1054,10 +1001,8 @@ public:
                 w += fm.horizontalAdvance(ch);
             return w;
         };
-        QTextBlock first = doc->findBlock(c.selectionStart());
-        QTextBlock last = doc->findBlock(c.selectionEnd());
-        if (last.position() == c.selectionEnd() && last != first)
-            last = last.previous();
+        QTextBlock first, last;
+        selectionOrLine(first, last);
         QStringList out;
         bool changed = false;
         for (QTextBlock b = first;; b = b.next()) {
@@ -1074,18 +1019,9 @@ public:
         }
         if (!changed)
             return;
-        const int repStart = first.position();
-        const int repEnd = last.position() + last.length() - 1;
-        const QString joined = out.join(QLatin1Char('\n'));
-        c.beginEditBlock();
-        c.setPosition(repStart);
-        c.setPosition(repEnd, QTextCursor::KeepAnchor);
-        c.insertText(joined);
-        c.endEditBlock();
-        c.setPosition(repStart);
-        c.setPosition(repStart + joined.size(), QTextCursor::KeepAnchor);
-        setTextCursor(c);
-        wakeCaret();
+        replaceAndReselect(first.position(),
+                           last.position() + last.length() - 1,
+                           out.join(QLatin1Char('\n')));
     }
 
     // 自杀（M6）：立即退出，无保存提示——"关闭即无"的极致
@@ -1380,13 +1316,14 @@ public:
     // ——锁定时是干净"完美视角"，解锁后是沉浸的弯曲玻璃屏（不裁字）
     bool screenEntityOn() const { return m_crt && !m_viewLock; }
     // P3 快照增量：打字只重画脏区。consume 一次性取走脏区并复位
-    bool snapshotFullDirty() const { return m_snapFullDirty; }
-    QRect consumeSnapshotDirty()
+    CrtSource::SnapDirty consumeSnapshotDirty() override
     {
-        QRect r = m_snapDirty;
+        SnapDirty d;
+        d.full = m_snapFullDirty;
+        d.rect = m_snapDirty;
         m_snapDirty = QRect();
         m_snapFullDirty = false;
-        return r;
+        return d;
     }
     void markSnapshotFullDirty() { m_snapFullDirty = true; }
     bool isScrolling() const { return m_scrolling; } // CRT 快照降载信号
@@ -1468,9 +1405,7 @@ public:
         refreshFonts(); // 每次重扫：刚拖入的字体即时可用
         if (m_userFonts.isEmpty())
             return;
-        const QString factory = (m_machine == 0) ? s_crtFamily
-                               : (m_machine == 2) ? s_c64Family
-                               : (m_machine == 3) ? s_whiteFamily : s_greenFamily;
+        const QString factory = factoryFontFor(m_machine);
         const QStringList all = QStringList() << factory << m_userFonts;
         int idx = all.indexOf(crtFontFamily());
         if (idx < 0)
@@ -1479,7 +1414,7 @@ public:
         if (idx < 0)
             idx += all.size();
         idx %= all.size();
-        QString &u = m_machine == 1 ? m_greenUser : m_machine == 2 ? m_c64User : m_amberUser;
+        QString &u = machineUserFont();
         u = (idx == 0) ? QString() : all.at(idx); // 空 = 出厂
         saveFontChoice(); // 暂时默认：跨启动记忆
         applyZoom();
@@ -1492,7 +1427,7 @@ public:
     // 「恢复默认」：当前机器回到出厂默认字体（清掉暂时默认）
     void restoreDefaultFont()
     {
-        QString &u = m_machine == 1 ? m_greenUser : m_machine == 2 ? m_c64User : m_amberUser;
+        QString &u = machineUserFont();
         u.clear();
         saveFontChoice();
         applyZoom();
@@ -1508,20 +1443,35 @@ public:
         const QString key = m_machine == 1 ? QStringLiteral("fontGreen")
                              : m_machine == 2 ? QStringLiteral("fontC64")
                                               : QStringLiteral("fontAmber");
-        const QString &u = m_machine == 1 ? m_greenUser : m_machine == 2 ? m_c64User : m_amberUser;
+        const QString &u = machineUserFont();
         if (u.isEmpty())
             st.remove(key);
         else
             st.setValue(key, u);
     }
+    // 机器 → 用户手选字体槽 / 出厂字体（三元散落多处，收口）
+    QString &machineUserFont()
+    {
+        return m_machine == 1 ? m_greenUser
+             : m_machine == 2 ? m_c64User : m_amberUser;
+    }
+    const QString &machineUserFont() const
+    {
+        return m_machine == 1 ? m_greenUser
+             : m_machine == 2 ? m_c64User : m_amberUser;
+    }
+    static const QString &factoryFontFor(int machine)
+    {
+        return machine == 0 ? s_crtFamily
+             : machine == 2 ? s_c64Family
+             : machine == 3 ? s_whiteFamily : s_greenFamily;
+    }
     QString crtFontFamily() const
     {
-        const QString &u = m_machine == 1 ? m_greenUser : m_machine == 2 ? m_c64User : m_amberUser;
+        const QString &u = machineUserFont();
         if (!u.isEmpty() && m_userFonts.contains(u))
             return u;
-        return (m_machine == 0) ? s_crtFamily
-             : (m_machine == 2) ? s_c64Family
-             : (m_machine == 3) ? s_whiteFamily : s_greenFamily; // 出厂回退
+        return factoryFontFor(m_machine); // 出厂回退
     }
 
     // ---- M3：拖图片 → 字符画（隐藏功能，README 不提及）----
@@ -2806,7 +2756,8 @@ public:
             QImage base = full1.copy(); // 增量底 = 上一帧
             e.moveCursor(QTextCursor::End);
             e.insertPlainText(QStringLiteral("無")); // 触发 contentsChange → 脏区
-            const QRect dirty = e.consumeSnapshotDirty();
+            const auto snap = e.consumeSnapshotDirty();
+            const QRect dirty = snap.rect;
             { // 等激发衰减归零（900ms 上限）：时间敏感部分排除出比对
                 QEventLoop lp;
                 QTimer::singleShot(950, &lp, &QEventLoop::quit);
