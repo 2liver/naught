@@ -13,6 +13,7 @@ qt_add_executable(naught WIN32 MACOSX_BUNDLE
     crt_view.cpp
     line_number_area.cpp
     canvas.h
+    crt.cpp
     crt.h
     crt_view.h
     editor.h

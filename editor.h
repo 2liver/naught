@@ -436,9 +436,7 @@ public:
         if (m_dark == dark)
             return;
         m_dark = dark;
-        markSnapshotFullDirty(); // 配色全变：增量不适用
-        if (m_crtView)
-            m_crtView->markDirty(); // 同时唤醒渲染环（否则等环境拍）
+        invalidateFullSnapshot(); // 配色全变：全量 + 唤醒渲染环
         applyScheme();
     }
 
@@ -1326,6 +1324,13 @@ public:
         return d;
     }
     void markSnapshotFullDirty() { m_snapFullDirty = true; }
+    // 全量失效收口：标全量 + 唤醒渲染环（避免只标全量不唤醒 → 等环境拍）
+    void invalidateFullSnapshot()
+    {
+        markSnapshotFullDirty();
+        if (m_crtView)
+            m_crtView->markDirty(true);
+    }
     bool isScrolling() const { return m_scrolling; } // CRT 快照降载信号
     bool asciiArtActive() const { return m_asciiActive; } // 画布编辑态（立为图勾选）
     bool colorMachine() const { return m_machine == 2; }   // C64：字符画逐字符真彩
