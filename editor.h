@@ -733,10 +733,9 @@ public:
     }
 
     // ---- M3：拖图片 → 字符画（隐藏功能，README 不提及）----
-    // 在打字光标处插入（不覆盖现有文字）。字符画 = 画布（网格）+ 内容：
-    // 普通缩放/捏合 = 画布缩放（网格重渲染，画布越大越细腻）；
-    // Shift+捏合 = 内容缩放（画布不变、字号变化）。一旦手动编辑即回归
-    // 普通文本（不再联动）。
+    // 在打字光标处插入（不覆盖现有文字）。缩放语义：普通捏合/Cmd+=/滚轮
+    // 永远缩放字符（字号，与无图一致）；Shift+捏合 / Shift+Ctrl+滚轮 =
+    // 画布缩放（网格重渲染，画布越大越细腻）。手动编辑即回归普通文本。
     void loadAsciiImage(const QImage &img)
     {
         if (img.isNull())
@@ -860,19 +859,7 @@ public:
 
     void zoom(int delta)
     {
-        // M3：字符画在场时，普通缩放 = 画布缩放（网格重渲染）；
-        // 内容缩放（画布不变）走 zoomContent（Shift+捏合 / Shift+滚轮）
-        if (m_asciiActive) {
-            zoomAsciiCanvas(delta > 0 ? 1.1 : 1.0 / 1.1);
-            return;
-        }
-        applyAnchoredZoom(m_size + delta);
-    }
-
-    // 内容缩放：画布（字符网格）不变，只改字号
-    void zoomContent(int delta)
-    {
-        applyAnchoredZoom(m_size + delta);
+        applyAnchoredZoom(m_size + delta); // 缩放字符（字号）——与无图时一致
     }
 
     void zoomTo(qreal size)
@@ -884,8 +871,7 @@ public:
     {
         if (m_asciiActive) {
             m_asciiScale = 1.0;
-            replaceAsciiArt();
-            return;
+            replaceAsciiArt(); // 画布倍率复位
         }
         applyAnchoredZoom(m_baseSize);
     }
@@ -2104,21 +2090,20 @@ protected:
 
     void wheelEvent(QWheelEvent *event) override
     {
-        // Ctrl/Cmd + 滚轮：缩放（像素增量累积，触控板也顺滑）；
-        // 字符画在场：普通 = 画布缩放，Shift = 内容缩放
+        // Ctrl/Cmd + 滚轮：缩放字符；字符画在场：Shift = 画布缩放（网格）
         if (event->modifiers() & (Qt::ControlModifier | Qt::MetaModifier)) {
             m_wheelAccum += event->angleDelta().y();
-            const bool content = event->modifiers() & Qt::ShiftModifier;
+            const bool canvas = event->modifiers() & Qt::ShiftModifier;
             while (m_wheelAccum >= 120) {
-                if (content)
-                    zoomContent(+1);
+                if (canvas)
+                    zoomAsciiCanvas(1.1);
                 else
                     zoom(+1);
                 m_wheelAccum -= 120;
             }
             while (m_wheelAccum <= -120) {
-                if (content)
-                    zoomContent(-1);
+                if (canvas)
+                    zoomAsciiCanvas(1.0 / 1.1);
                 else
                     zoom(-1);
                 m_wheelAccum += 120;
@@ -2172,12 +2157,12 @@ protected:
                     m_pinchSmooth = PINCH_SMOOTH_A * v + (1.0 - PINCH_SMOOTH_A) * m_pinchSmooth;
                     const qreal factor = std::clamp<qreal>(1.0 + m_pinchSmooth * PINCH_GAIN, 0.75, 1.35);
                     // 换模式即换缩放项目：涂/擦模式捏合控制笔刷，其余控制字号；
-                    // 字符画在场时：普通捏合 = 画布缩放（网格重渲染），
-                    // Shift+捏合 = 内容缩放（画布不变）
+                    // 字符画在场时：Shift+捏合 = 画布缩放（网格重渲染），
+                    // 普通捏合永远缩放字符
                     if (m_mode == Mode::Draw || m_mode == Mode::Erase)
                         brushScale(factor);
                     else if (m_asciiActive
-                             && !(QGuiApplication::keyboardModifiers() & Qt::ShiftModifier))
+                             && (QGuiApplication::keyboardModifiers() & Qt::ShiftModifier))
                         zoomAsciiCanvas(factor);
                     else
                         zoomTo(m_size * factor);
