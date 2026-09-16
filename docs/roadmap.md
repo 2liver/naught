@@ -135,6 +135,7 @@
   7f16a78 路线图 → cdb2497 光标偏移修复 → 23eb0f5 光栅调制批次 → 2c8ac03 物理拟真批次）。
 - 已部署到 `~/Applications/naught.app`（启动台「無」，自包含 Qt+KF6）。
 - **下一步 = M7 重构与性能**（crt 管线出 editor.h → crt.{h,cpp}；bench 驱动优化）；M8 GitHub 仍最后。M6 已落地（06457a8）：自杀 ⌃⌘N（「项」菜单 + Control+Meta 双修饰键路由）、--agent 登录项代理（Carbon 全局热键 ⌃⇧⌘N → LSOpen 主应用，无授权要求）、--install 安装程序（plist + launchctl + lsregister，幂等）。**坑：QDir(applicationFilePath) 会把二进制名当目录导致 canonical 为空——用 applicationDirPath。**
+- **M8 进行中（GitHub 里程碑）**：已推送 origin/main（5c64236 M8 提交 + cdeafa6 CI 修复）。CI 红根因已定案：run 91（QRhiWidget 换 QOpenGLWidget 提交）引入 `find_package(Qt6 ShaderTools)`，而 install-qt-action 默认只装 qtbase——qsb/Qt6ShaderTools 在独立 qtshadertools 模块（本地能过是因为当时手动 aqt 装过）；修复 = 两个 workflow 加 `modules: qtshadertools` + build.yml 显式 CMAKE_PREFIX_PATH（该 action 只导出 QT_ROOT_DIR）+ Windows --config Release + macOS selftest offscreen + 失败日志尾转 ::error:: 注解（匿名可读）。待 CI 复绿验证；公证/Developer ID 仍需 Apple 账号（未做）。
 - 已额外落地：四机循环——琥珀/绿磷/**C64 真彩**（16 色逐字符前景色字符画，8f72154）/**IBM PC 5150 白磷**（Fixedsys Excelsior CC0 字库，d7764f1）；切机/切编即时重印（d7764f1）；苹果 II 白磷已归档（NTSC 伪影资料存档案区）。字符画逐行打印 + 画布三缩放语义 + 最佳化（950a565）；实验功能并入体系（字符网格→显模式 Cmd+0，屏幕实体→解锁追随视角）；全屏冻结修复（5734eb2）。
 - 拟真对齐批落地：4:3 默认画幅、C64 阴罩圆点三色组（替换竖条栅）、扫描慢放移入解锁态（日常无慢带）、余晖按机型实测标定（P1/P3/P4/P22）、C64 网格字号封顶。
 - 二轮审查必修项落地（视差/墨迹 markDirty、多块脏区、原生菜单 + ApplicationShortcut、setDark 唤醒、读回尺寸值捕获）；剩余低优项（crt.cpp 拆分、日志真滚动、bench 压力段）随 M8。

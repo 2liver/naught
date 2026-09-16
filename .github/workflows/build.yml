@@ -42,17 +42,18 @@ jobs:
         run: cmake --build build --parallel --config Release > build.log 2>&1
       - name: Build diagnostics (on failure)
         if: failure()
-        run: tail -60 build.log | awk '{print "::error::" $0}'
+        run: |
+          grep -iE "error:|fatal error|undefined reference|error C[0-9]|error MSB|LNK[0-9]" build.log | tail -10 | awk '{print "::error::" $0}'
+          tail -8 build.log | awk '{print "::error::" $0}'
       - name: Selftest (macOS)
         if: runner.os == 'macOS'
         env:
           QT_QPA_PLATFORM: offscreen
-        run: ./build/naught.app/Contents/MacOS/naught --selftest
+        run: ./build/naught.app/Contents/MacOS/naught --selftest > selftest.log 2>&1 || { tail -30 selftest.log | awk '{print "::error::" $0}'; exit 1; }
       - name: Selftest (Linux)
         if: runner.os == 'Linux'
-        run: QT_QPA_PLATFORM=offscreen ./build/naught --selftest
+        run: QT_QPA_PLATFORM=offscreen ./build/naught --selftest > selftest.log 2>&1 || { tail -30 selftest.log | awk '{print "::error::" $0}'; exit 1; }
       - name: Selftest (Windows)
         if: runner.os == 'Windows'
-        run: |
-          $env:QT_QPA_PLATFORM = "offscreen"
-          .\build\Release\naught.exe --selftest
+        shell: bash
+        run: QT_QPA_PLATFORM=offscreen ./build/Release/naught.exe --selftest > selftest.log 2>&1 || { tail -30 selftest.log | awk '{print "::error::" $0}'; exit 1; }

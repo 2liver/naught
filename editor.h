@@ -2708,9 +2708,9 @@ public:
             const QString art = Ascii::imageToText(simg, 8, 4);
             const QStringList lines = art.split(QLatin1Char('\n'));
             if (lines.size() != 4 || lines[0].size() != 8 || lines[3].size() != 8) {
-                qWarning("selftest FAIL: ascii art grid wrong (%d lines, sizes %d/%d)",
-                         int(lines.size()), lines.isEmpty() ? -1 : lines[0].size(),
-                         lines.size() < 4 ? -1 : lines[3].size());
+                qWarning("selftest FAIL: ascii art grid wrong (%lld lines, sizes %lld/%lld)",
+                         qint64(lines.size()), lines.isEmpty() ? -1 : qint64(lines[0].size()),
+                         lines.size() < 4 ? -1 : qint64(lines[3].size()));
                 return false;
             }
             if (lines[0].at(0) == QLatin1Char(' ') || lines[0].at(7) != QLatin1Char(' ')) {
