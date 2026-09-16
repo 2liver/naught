@@ -1357,9 +1357,16 @@ public:
         const qreal ch = qMax(1.0, fm.height());
         // 画布列数 = 倍率 × 基准；上限 = 源图原生分辨率（防爆炸）
         const int maxCols = qMax(m_asciiBaseCols, m_asciiImage.width());
-        const int cols = qBound(2, int(m_asciiBaseCols * m_asciiScale), maxCols);
-        const int rows = qMax(2, int(cols * (qreal(m_asciiImage.height()) / m_asciiImage.width())
-                                     * (cw / ch)));
+        int cols = qBound(2, int(m_asciiBaseCols * m_asciiScale), maxCols);
+        int rows = qMax(2, int(cols * (qreal(m_asciiImage.height()) / m_asciiImage.width())
+                                * (cw / ch)));
+        // 总量护栏：任何路径（拖图/缩放/立为图）画布 ≤ 20 万字符——
+        // 等比缩回（真机一屏 80×25 = 2000 字符，20 万已是百屏）
+        if (qint64(cols) * rows > 200000) {
+            const qreal k = qSqrt(200000.0 / (qint64(cols) * rows));
+            cols = qMax(2, int(cols * k));
+            rows = qMax(2, int(rows * k));
+        }
         if (colorMachine()) {
             // C64 真彩：每字符前景色 = 源图像素 16 色量化（chafa 式）
             return Ascii::imageToTextColors(m_asciiImage, cols, rows, m_asciiColors,
