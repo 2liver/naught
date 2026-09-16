@@ -323,6 +323,8 @@ public:
         m_fadeTimer.setInterval(16);
         connect(&m_fadeTimer, &QTimer::timeout, this, [this] {
             m_fadeOpacity = std::max(0.0, m_fadeOpacity - 0.1);
+            if (m_crtView)
+                m_crtView->markDirty(); // 滚动条淡出需逐拍重拍
             setScrollOpacity(m_fadeOpacity);
             if (m_fadeOpacity <= 0.0)
                 m_fadeTimer.stop();
@@ -413,6 +415,7 @@ public:
         if (m_dark == dark)
             return;
         m_dark = dark;
+        markSnapshotFullDirty(); // 配色全变：增量不适用
         applyScheme();
     }
 
