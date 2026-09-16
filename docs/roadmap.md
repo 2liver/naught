@@ -134,6 +134,7 @@
 - 已部署到 `~/Applications/naught.app`（启动台「無」，自包含 Qt+KF6）。
 - **下一步 = M6 自杀与重生**（Ctrl+Cmd+N 自杀 + Cmd+Ctrl+Shift+N OS 级重开 + 安装程序）；**GitHub 里程碑挪至最后（M5→M8）**。
 - 已额外落地：四机循环——琥珀/绿磷/**C64 真彩**（16 色逐字符前景色字符画，8f72154）/**IBM PC 5150 白磷**（Fixedsys Excelsior CC0 字库，d7764f1）；切机/切编即时重印（d7764f1）；苹果 II 白磷已归档（NTSC 伪影资料存档案区）。字符画逐行打印 + 画布三缩放语义 + 最佳化（950a565）；实验功能并入体系（字符网格→显模式 Cmd+0，屏幕实体→解锁追随视角）；全屏冻结修复（5734eb2）。
+- 已修复（fbae891）打印期间连按 Cmd+B 吞字符：高亮器异步上色的格式变化发出 contentsChange(0,0,0)，被当成手动编辑反激活画布（打印被杀、已移除的画布文字不再重印）。钩子改接 contentsChange(from,removed,added)，仅真实文字变化（added/removed>0）算手动编辑；回归 = 打印不等待连续 10 次切编。
 - 已修复（3020d7f）撤销基线事故（用户实测："空+撤销后立为图假勾/叠字"）：Qt 编辑块撤销回走不可靠（块内命令交错合并，一次 undo 只退一行，undo/redo 来回丢字符）。改为画布程序写入期间 `document()->setUndoRedoEnabled(false)`——画布成为撤销基线，Cmd+Z 永不蚕食画布；打字照常可撤销。另：重勾立为图补 NoWrap、上次范围失效退化为全文复选、replaceAsciiArt 移除范围钳位。**教训：不要依赖 QTextCursor 编辑块的撤销合并语义。**
 - 已额外落地：字体三级模型（出厂默认删不掉 / 经典库存可删可改名、整个文件夹删除后重播 / 暂时默认跨启动记忆 + 「恢复默认字体」），6 款经典库存（Press Start 2P、IBM 3270、Cozette、ProggyClean、Silkscreen、Fixedsys Excelsior，befadb2）；字符画双缩放（普通=画布/Shift=内容，a506fbf）；插入图片缩放闪退修复（光标越界 scanLine 段错误，a506fbf）；编模式中性白光标（a2ef62f）。
 - 已知环境坑（别再踩）：
