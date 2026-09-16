@@ -24,6 +24,7 @@
 #include <QFrame>
 #include <QGraphicsOpacityEffect>
 #include <QGuiApplication>
+#include <QHash>
 #include <QImage>
 #include <QKeyEvent>
 #include <QMenu>
@@ -1215,14 +1216,19 @@ public:
                         QDir::Files, QDirIterator::Subdirectories);
         while (it.hasNext()) {
             const QString path = QFileInfo(it.next()).canonicalFilePath();
-            // 去重：cycleCrtFont 每次重扫重复注册同一文件，字体库缓存增长
-            if (s_registeredFonts.contains(path))
+            // 去重：cycleCrtFont 每次重扫——已注册的直接从缓存取族名
+            // （不再重复注册，但**族名必须照常收集**——旧版跳过整个
+            // 文件导致重扫为空、换字体无反应）
+            const auto cached = s_registeredFonts.constFind(path);
+            if (cached != s_registeredFonts.constEnd()) {
+                families.append(cached.value());
                 continue;
+            }
             const int id = QFontDatabase::addApplicationFont(path);
             if (id >= 0) {
                 const QStringList fams = QFontDatabase::applicationFontFamilies(id);
                 if (!fams.isEmpty()) {
-                    s_registeredFonts.insert(path);
+                    s_registeredFonts.insert(path, fams.first());
                     families.append(fams.first());
                 }
             }
@@ -3054,7 +3060,9 @@ public:
                 e.setPlainText(QStringLiteral("無\n"));
             }
         }
-        // 字体管理：空/不存在目录 → 扫描为空；循环后族名永不为空（出厂回退）
+        // 字体管理：空/不存在目录 → 扫描为空；字体文件夹播种后重扫
+        // 必须照常收集族名（去重不得吞掉列表——"换字体无反应"的哨兵）
+        // 循环后族名永不为空（出厂回退）
         {
             const QStringList none = Editor::scanFontFamilies(
                 QStringLiteral("/nonexistent-naught-fonts-dir"));
@@ -3062,15 +3070,26 @@ public:
                 qWarning("selftest FAIL: font scan of missing dir not empty");
                 return false;
             }
+            e.restoreDefaultFont(); // 先复位：跨运行的持久化选择不污染本测试
             const QString f0 = e.crtFontFamily();
+            Editor::seedClassicFonts(); // 播种经典库存（去重缓存的哨兵前提）
             e.cycleCrtFont(+1); // 用户文件夹无论有无字体，族名都必须可用
             if (e.crtFontFamily().isEmpty()) {
                 qWarning("selftest FAIL: font family empty after cycle");
                 return false;
             }
-            e.cycleCrtFont(-1);
+            e.cycleCrtFont(+1); // 第二次循环：重扫必须照常收集（去重不得吞列表）
+            e.restoreDefaultFont();
             if (e.crtFontFamily() != f0) {
-                qWarning("selftest FAIL: font cycle round-trip changed family");
+                qWarning("selftest FAIL: restore default font wrong (%s vs %s)",
+                         qPrintable(e.crtFontFamily()), qPrintable(f0));
+                return false;
+            }
+            e.cycleCrtFont(+1); // 往返：+1 进入用户字体
+            e.cycleCrtFont(-1); // -1 必须回到出厂
+            if (e.crtFontFamily() != f0) {
+                qWarning("selftest FAIL: font cycle round-trip changed family (%s -> %s, want %s)",
+                         qPrintable(f0), qPrintable(e.crtFontFamily()), qPrintable(f0));
                 return false;
             }
         }
@@ -4149,7 +4168,7 @@ private:
     static inline QString s_greenFamily; // 出厂绿磷：VT323（qrc）
     static inline QString s_whiteFamily; // 出厂白磷：Fixedsys Excelsior（CC0，qrc）
     static inline QString s_c64Family;  // 出厂 C64：Press Start 2P（OFL，qrc）
-    static inline QSet<QString> s_registeredFonts; // 已注册字体文件（去重）
+    static inline QHash<QString, QString> s_registeredFonts; // 已注册字体文件 → 族名（去重缓存）
     QTimer m_crtSettleTimer;
     QTimer m_scrollSettle;  // 滚动停稳计时：结束后补全量快照
     bool m_scrolling = false;
