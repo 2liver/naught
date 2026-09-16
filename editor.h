@@ -2881,32 +2881,23 @@ public:
                 }
             };
             e.setPlainText(QStringLiteral("無無無 WuWu\nAABBCC 123456\n"));
-            while (e.machine() != 2)
-                e.toggleMachine(); // C64
-            e.toggleCrt();
-            waitFrames(1600);
-            const QImage f2 = e.crtSnapImage();
-            f2.save(QStringLiteral("/tmp/crt_c64_a.png"));
-            e.crtShownImage().save(QStringLiteral("/tmp/crt_c64_a_gpu.png"));
-            waitFrames(600);
-            e.crtShownImage().save(QStringLiteral("/tmp/crt_c64_b_gpu.png"));
-            e.toggleCrt();
-            if (f2.isNull() || f2.size().isEmpty()) {
-                qWarning("selftest FAIL: c64 crt frame empty");
-                return false;
+            for (int m = 0; m < 4; ++m) { // 四机各渲一帧：亮度横比
+                while (e.machine() != m)
+                    e.toggleMachine();
+                e.toggleCrt();
+                waitFrames(1600);
+                const QImage f = e.crtSnapImage();
+                const QString tag = QStringLiteral("crt_m%1").arg(m);
+                f.save(QStringLiteral("/tmp/") + tag + QStringLiteral(".png"));
+                e.crtShownImage().save(QStringLiteral("/tmp/") + tag + QStringLiteral("_gpu.png"));
+                e.toggleCrt();
+                if (f.isNull() || f.size().isEmpty()) {
+                    qWarning("selftest FAIL: machine %d crt frame empty", m);
+                    return false;
+                }
             }
             while (e.machine() != 0)
-                e.toggleMachine(); // 琥珀（单色栅对照）
-            e.toggleCrt();
-            waitFrames(1600);
-            const QImage f0 = e.crtSnapImage();
-            f0.save(QStringLiteral("/tmp/crt_amber.png"));
-            e.crtShownImage().save(QStringLiteral("/tmp/crt_amber_gpu.png"));
-            e.toggleCrt();
-            if (f0.isNull() || f0.size().isEmpty()) {
-                qWarning("selftest FAIL: amber crt frame empty");
-                return false;
-            }
+                e.toggleMachine(); // 还原琥珀
         }
         // M3：图片 → 字符画（纯函数验证：合成左白右黑图 → 粗梯度映射）
         {
