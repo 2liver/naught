@@ -1445,10 +1445,10 @@ public:
         }
         if (end <= start)
             return; // 空文档：无事（不产生假勾选）
-        QTextCursor t = textCursor();
-        t.setPosition(start);
-        t.setPosition(end, QTextCursor::KeepAnchor);
-        const QString sel = t.selectedText();
+        // 注意：selectedText() 的段落分隔是 \u2029——split('\n') 劈不开，
+        // 整段会当成一行（baseCols 爆炸 → 换机重印 200 万字符 → 卡死）。
+        // 改用 toPlainText（\n 分段）。
+        const QString sel = document()->toPlainText().mid(start, end - start);
         const QFont f = activeFont();
         const QFontMetricsF fm(f);
         const qreal cw = fm.horizontalAdvance(QLatin1Char('M'));
@@ -1457,6 +1457,9 @@ public:
         int maxLen = 1;
         for (const QString &l : lines)
             maxLen = qMax(maxLen, int(l.size()));
+        // 防御：单行过长（>400 列）是散文不是画布——画布列数封顶，
+        // 防巨幅重印拖死换机（真机一屏 80 列，400 已远超）
+        maxLen = qMin(maxLen, 400);
         QImage raster(qMax(8, int(maxLen * cw) + 8),
                       qMax(8, int(lines.size() * lh) + 8),
                       QImage::Format_ARGB32);
@@ -2894,6 +2897,43 @@ public:
                 if (!e.m_asciiActive || e.toPlainText().isEmpty()) {
                     qWarning("selftest FAIL: second canvas zoom failed");
                     return false;
+                }
+                e.setPlainText(QStringLiteral("無\n"));
+            }
+            // 回归（用户报：拖图→摹→压行→还原→立为图→连按换机 = 卡死）
+            // 注：压行/还原走菜单快捷键（自测无菜单栏，直接调方法等价）
+            {
+                e.setPlainText(QString());
+                while (e.machine() != 2)
+                    e.toggleMachine(); // C64
+                e.loadAsciiImage(simg);
+                waitPrint();
+                const QString doc0 = e.toPlainText();
+                e.mo(); // 摹：全选+复制
+                e.joinLinesTo(); // 压行
+                if (e.toPlainText().count(QLatin1Char('\n')) > 2) {
+                    qWarning("selftest FAIL: join did not join");
+                    return false;
+                }
+                e.restoreLines(); // 还原
+                if (e.toPlainText() != doc0) {
+                    qWarning("selftest FAIL: restore did not restore");
+                    return false;
+                }
+                e.selectAll(); // 还原后选区 = 恢复的全文
+                e.declareArtFromSelection(); // 立为图
+                if (e.m_asciiBaseCols > 400) {
+                    qWarning("selftest FAIL: declare baseCols exploded (%d)",
+                             e.m_asciiBaseCols);
+                    return false;
+                }
+                for (int i = 0; i < 8; ++i) {
+                    e.toggleMachine(); // 换机连按（卡死场景）
+                    QApplication::processEvents();
+                }
+                waitPrint();
+                if (!e.toPlainText().isEmpty() && e.m_asciiActive) {
+                    // 画布在场且非空：换机重印应已完成
                 }
                 e.setPlainText(QStringLiteral("無\n"));
             }
