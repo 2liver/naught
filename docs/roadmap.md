@@ -79,6 +79,23 @@
 - bench 驱动优化：crt-scroll ≤ 5ms/步、打字 ≤ 0.5ms/键。
 - 高尔夫化/语义统合最后做（模块边界清晰之后）。
 
+## 档案：机型与彩色的调研存量
+
+- 第三台机器已上线：**Apple II**（白磷 #F0ECDD，NTSC 橙/蓝伪影，
+  refl=#3E6FA8 载蓝、dust=#9A6E38 载橙，40 列网格）。
+- **第四台候选（备而不用）**：Commodore 64（1982，40×25，16 色逐字符
+  前景色，蓝屏）调色板：ink #6F7FDC / inkDim #4A5490 /
+  cursorBlock #7C8DFF / bg #2A1C6E / scanTint #1B1450 /
+  refl #4040E0 / dust #5A5A6E。若要"文字逐字符真彩色"应选它或
+  Atari 800（40×24，128 色）。
+- **AsciiTools 可复用逻辑**（~/Projects/AsciiTools/src/symbolrender.js）：
+  真彩半块渲染（▀ 上像素=前景/下像素=背景，L383-392）、样式串一次解析
+  （L434-451）、色相循环主题色（L466-470）、磷光光晕（shadowColor/
+  shadowBlur，L487-489）、chafa 式自动色阶+Floyd-Steinberg 抖动；
+  缺"按色相映射字符"与"CRT 固定调色板量化"（需新写）。
+- Apple II 5×7 ROM 无 OFL 复刻（hoard-of-bitfonts 为 ROM dump 有版权
+  风险）；自绘 96 字形是最稳路径（网格约束下形状必重合）。
+
 ## 开工流程（每步必做，写入提交信息）
 
 1. **实现**（遵循 `docs/crt-filter.md` 铁律：零 UI、单一模式、纯画面、不毁打字）。
