@@ -1889,7 +1889,7 @@ public:
         e.setPlainText(lines);
         e.resize(400, 300);
         e.show();
-        for (int s = 0; s < 5; ++s) { // 布局沉降：负载高时 resize 竞态
+        for (int s = 0; s < 10; ++s) { // 布局沉降：负载高时 resize 竞态（1/6 偶发，加厚）
             QApplication::processEvents();
             QEventLoop lp;
             QTimer::singleShot(10, &lp, &QEventLoop::quit);
