@@ -23,7 +23,7 @@ class QRhiRenderPassDescriptor;
 
 class CrtView : public QWidget {
 public:
-    explicit CrtView(CrtSource *source);
+    explicit CrtView(CrtSnapshotSource *source);
     ~CrtView() override;
     void markDirty(bool force = false);
     void syncGeometry();
@@ -49,7 +49,7 @@ private:
     void releaseGpu();
     void renderFrame();
 
-    CrtSource *m_source = nullptr;
+    CrtSnapshotSource *m_source = nullptr;
     QRhi *m_r = nullptr;
     QRhiTexture *m_colorTex = nullptr;
     QRhiTextureRenderTarget *m_rt = nullptr;

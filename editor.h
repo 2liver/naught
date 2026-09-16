@@ -62,17 +62,31 @@
 #include "crt.h"
 #include "crt_view.h"
 #include "line_number_area.h"
+#include "snapshot_compositor.h"
 #include "zen_scroll_bar.h"
 
-class Editor : public QPlainTextEdit, public CrtSource {
+class Editor : public QPlainTextEdit, public CrtSnapshotSource {
+    friend class SnapshotCompositor;
 public:
     // CrtSource 几何（窄接口）：
     QRect sourceRect() const override { return rect(); }
     QSize sourceViewportSize() const override { return viewport() ? viewport()->size() : QSize(); }
     QWidget *sourceWidget() const override { return const_cast<Editor *>(this); }
+    CrtConfig config() const override
+    {
+        CrtConfig c;
+        c.palette = &crtPalette();
+        c.machine = m_machine;
+        c.scrolling = m_scrolling;
+        c.viewLocked = m_viewLock;
+        c.screenEntity = m_crt && !m_viewLock;
+        c.lastMouse = m_lastMouse;
+        return c;
+    }
     Editor()
         : QPlainTextEdit()
         , m_holdTimer(this)
+        , m_compositor(*this)
     {
         setFrameShape(QFrame::NoFrame);
         setTabChangesFocus(true);
@@ -288,39 +302,13 @@ public:
                 m_exciteClock.start();
             }
             m_lastCharCount = cc;
-            // P3：增量脏区 = 变化块 + 其下方全部。任何编辑（尤其删除/换行）
-            // 都会让下方内容整体位移——只标变化块会让旧内容与新内容叠加
-            // 成亮斑（重印过曝、按住删字行下方亮得一塌糊涂的真凶）
-            {
-                QTextBlock blk = document()->findBlock(qMin(from, qMax(0, cc - 1)));
-                const QTextBlock endBlk = document()->findBlock(
-                    qMin(from + qMax(added, removed), qMax(0, cc - 1)));
-                QRect firstR;
-                for (;;) {
-                    QRect r = blockBoundingGeometryPub(blk)
-                                  .translated(contentOffsetPub()).toAlignedRect()
-                                  .translated(viewport()->pos());
-                    r = r.intersected(viewport()->rect().translated(viewport()->pos()));
-                    m_snapDirty |= r;
-                    if (firstR.isNull() && !r.isNull())
-                        firstR = r;
-                    if (blk == endBlk)
-                        break;
-                    blk = blk.next();
-                }
-                // 下方至视口底全宽纳入：位移区域
-                if (!firstR.isNull()) {
-                    QRect below = viewport()->rect().translated(viewport()->pos());
-                    below.setTop(firstR.top());
-                    m_snapDirty |= below;
-                }
-                m_snapDirty |= m_lastCursorRect;
-                // 激发辉光（cell ±6px 三圈）超出光标矩形——脏区扩展覆盖
-                const int halo = qCeil(fontMetrics().horizontalAdvance(QLatin1Char('M'))) + 12;
-                m_lastCursorRect = cursorRect().translated(viewport()->pos())
-                                       .adjusted(-halo, -halo, halo, halo);
-                m_snapDirty |= m_lastCursorRect;
-            }
+            m_snapDirty |= m_compositor.computeDirty(from, removed, added);
+            m_snapDirty |= m_lastCursorRect;
+            // 激发辉光（cell ±6px 三圈）超出光标矩形——脏区扩展覆盖
+            const int halo = qCeil(fontMetrics().horizontalAdvance(QLatin1Char('M'))) + 12;
+            m_lastCursorRect = cursorRect().translated(viewport()->pos())
+                                   .adjusted(-halo, -halo, halo, halo);
+            m_snapDirty |= m_lastCursorRect;
             // 行号区：文档一变立即重绘，否则清空/换行不会刷新（假行号）
             m_canvas->update();
             updateGutterWidth();
@@ -1078,177 +1066,25 @@ public:
     //   滚动条 = 最上层（与真实层级一致），按当前淡出透明度绘制
     // 全部 1:1 真实坐标：光栅里的文字与点击命中的文字严格同位，
     // 光栅不再有"看不全/点不到"的黑区。
-    void paintTextSnapshot(QImage &img) const
+    void paintTextSnapshot(QImage &img) const override
     {
-        // 块状反相光标：只在显模式、有焦点、眨眼"亮"拍时画（休眠 = 隐去，
-        // 与原生光标同一节拍；见 syncNativeCaretWidth）。
-        const bool cursorBlock = m_crt && hasFocus()
-            && m_blinkTimer.isActive() && m_blinkHalf % 2 == 0;
-        {
-            QPainter p(&img);
-            if (!p.isActive())
-                return;
-            p.fillRect(img.rect(), crtPalette().bg); // 磷光底：行号列条/滚动条槽也同色
-            // DPR：调用方把图像按物理像素建好并 setDevicePixelRatio(dpr)。
-            // Qt 6.8+ 的 QImage 画笔会在引擎层自动应用图像 DPR（经验证：
-            // 有效缩放 = 画笔变换 × 图像 DPR），所以这里绝不能手动再
-            // p.scale(dpr)——二次相乘会把内容放大推出画面（右侧滚动条把手
-            // 完全消失、文字只剩左上象限的根源），逻辑坐标交给引擎映射。
-            if (viewport())
-                viewport()->render(&p, viewport()->pos());
-            paintExcitation(p); // 磷粉激发：新字符在文字之上加色增亮（900ms 内）
-            if (m_canvas && m_canvas->isVisible())
-                m_canvas->render(&p, m_canvas->pos());
-            // 行号区：编模式下真实组件已隐藏（防双层），合成仍渲染它——
-            // 行号只存在于光栅内；非编模式不渲染（残留的隐藏组件会在
-            // 旧位置叠在字上）
-            if (m_codeMode && m_lineNumberArea)
-                m_lineNumberArea->render(&p, m_lineNumberArea->pos());
-            if (m_fadeOpacity > 0.02) {
-                p.save();
-                p.setOpacity(m_fadeOpacity);
-                // 滚动条直接画把手几何：不走 QWidget::render。Qt 6.9 起滚动条
-                // 住在 QAbstractScrollArea 的私有容器 QWidget 里，pos() 只是
-                // 容器内坐标（恒 (0,0)）——按 pos() 平移 = 把手画到窗口左缘
-                // （"左侧镜像滚动条"）。必须 mapTo 换算到编辑器坐标；
-                // 隐藏的滚动条不画（防隐藏条的把手残留在窗口左上角）。
-                if (auto *v = qobject_cast<ZenScrollBar *>(verticalScrollBar()))
-                    if (v->isVisible())
-                        v->paintOnto(p, v->mapTo(this, QPoint(0, 0)));
-                if (auto *h = qobject_cast<ZenScrollBar *>(horizontalScrollBar()))
-                    if (h->isVisible())
-                        h->paintOnto(p, h->mapTo(this, QPoint(0, 0)));
-                p.restore();
-            }
-        } // 画家析构后直接回写像素，避免与光栅引擎缓存交错
-
-        if (cursorBlock)
-            paintCrtCursor(img);
+        m_compositor.paint(img);
     }
     // P3：增量重拍——只重画脏区（复用上一帧图像为底）。与全量同构图，
     // 仅以 clip 限制绘制范围；脏区先清底再画（旧光标/旧字符被抹掉）
-    void paintTextSnapshotRegion(QImage &img, const QRect &dirty) const
+    void paintTextSnapshotRegion(QImage &img, const QRect &dirty) const override
     {
-        if (dirty.isEmpty())
-            return;
-        const bool cursorBlock = m_crt && hasFocus()
-            && m_blinkTimer.isActive() && m_blinkHalf % 2 == 0;
-        {
-            QPainter p(&img);
-            if (!p.isActive())
-                return;
-            p.setClipRect(dirty);
-            p.fillRect(dirty, crtPalette().bg); // 磷光底：先清脏区
-            // 渲染整个视口、由画家 clip 限范围：source-region 语义在
-            // DPR 引擎下与 clip 的坐标映射存在偏差（实测边缘像素漏画）
-            if (viewport())
-                viewport()->render(&p, viewport()->pos());
-            paintExcitation(p); // clip 限范围：只重画脏区内的激发
-            if (m_canvas && m_canvas->isVisible())
-                m_canvas->render(&p, m_canvas->pos());
-            if (m_codeMode && m_lineNumberArea)
-                m_lineNumberArea->render(&p, m_lineNumberArea->pos());
-            if (m_fadeOpacity > 0.02) {
-                p.save();
-                p.setOpacity(m_fadeOpacity);
-                if (auto *v = qobject_cast<ZenScrollBar *>(verticalScrollBar()))
-                    if (v->isVisible())
-                        v->paintOnto(p, v->mapTo(this, QPoint(0, 0)));
-                if (auto *h = qobject_cast<ZenScrollBar *>(horizontalScrollBar()))
-                    if (h->isVisible())
-                        h->paintOnto(p, h->mapTo(this, QPoint(0, 0)));
-                p.restore();
-            }
-        }
-        if (cursorBlock)
-            paintCrtCursor(img);
+        m_compositor.paintRegion(img, dirty);
     }
 
     // 块状反相光标（真机时代的整格闪烁块）：落点所在字格满格点亮成
     // 炽磷色，字符像素按亮度线性映射回底色（保 AA）——反相视频的
     // 双色精确版。原生 I 形在显模式恒不画（syncNativeCaretWidth）。
-    void paintCrtCursor(QImage &img) const
-    {
-        const QTextCursor c = textCursor();
-        QRect cell = cursorRect(c); // 插入位（宽度为 0 的落点矩形）
-        cell.translate(viewport()->pos()); // 视口坐标 → 编辑器坐标（编模式有行号槽偏移）
-        if (cell.isNull())          // 零宽合法（isValid 要求宽高>0，会误拒）
-            return;
-        const QChar ch = document()->characterAt(c.position());
-        const qreal adv = (ch.isNull() || ch == QChar::ParagraphSeparator)
-                              ? fontMetrics().horizontalAdvance(QLatin1Char('M'))
-                              : fontMetrics().horizontalAdvance(ch);
-        cell.setWidth(qMax(1, qCeil(adv)));
-        // 逻辑 → 物理像素（引擎层 DPR 映射：物理 = 逻辑 × dpr）
-        const qreal dpr = img.devicePixelRatio();
-        const int x0 = qFloor(cell.x() * dpr), y0 = qFloor(cell.y() * dpr);
-        const int x1 = qCeil((cell.x() + cell.width()) * dpr);
-        const int y1 = qCeil((cell.y() + cell.height()) * dpr);
-        // 双色反相：t = 像素亮度在 底→墨 间的归一位置；out = lerp(块, 底, t)
-        const Crt::Palette &pp = crtPalette();
-        // 编模式（多彩语法高亮）下块光标用中性暖白：绿磷块在代码里太突兀
-        const QColor block = m_codeMode ? QColor(0xE8, 0xE8, 0xE0) : pp.cursorBlock;
-        const int bgSum = pp.bg.red() + pp.bg.green() + pp.bg.blue();
-        const int inkSum = pp.ink.red() + pp.ink.green() + pp.ink.blue();
-        const int span = qMax(1, inkSum - bgSum); // 防御除零（底=墨时）
-        const int w = img.width(), h = img.height();
-        // 注意：ARGB32 内存布局为 BGRA，字节直接寻址（见 edgeDiff 同款注释）。
-        // 光标可能滚出视口（cursorRect 变负）——循环必须裁剪到图像内，
-        // 否则 scanLine(负y) 段错误（用户"插入图片后缩放闪退"的真凶）
-        for (int y = qMax(0, y0); y < y1 && y < h; ++y) {
-            uchar *line = img.scanLine(y);
-            for (int x = qMax(0, x0); x < x1 && x < w; ++x) {
-                const int i = x * 4;
-                const int sum = line[i] + line[i + 1] + line[i + 2];
-                const qreal t = qBound(0.0, qreal(sum - bgSum) / qreal(span), 1.0);
-                line[i + 2] = uchar(block.red() + (pp.bg.red() - block.red()) * t);
-                line[i + 1] = uchar(block.green() + (pp.bg.green() - block.green()) * t);
-                line[i] = uchar(block.blue() + (pp.bg.blue() - block.blue()) * t);
-            }
-        }
-    }
+
     // 磷粉激发：新字符三圈软边增亮，~500ms 指数回落（二期三件套·回接）。
     // 在文字之上做加色混合（CompositionMode_Plus）——真机上是磷粉
     // 刚被打中时的过量发光，随后按指数回落到常态。
-    void paintExcitation(QPainter &p) const
-    {
-        if (!m_exciteClock.isValid())
-            return;
-        const qint64 t = m_exciteClock.elapsed();
-        if (t < 0 || t >= 900)
-            return;
-        const qreal a = 0.6 * qExp(-qreal(t) / 500.0); // 激发峰值 0.6，500ms 指数回落
-        if (a < 0.02)
-            return;
-        const int pos = qBound(0, m_excitePos, document()->characterCount() - 1);
-        QTextCursor cc = textCursor();
-        cc.setPosition(pos);
-        QRect cell;
-        if (cc.atEnd()) {
-            cell = cursorRect(cc);
-            cell.setWidth(qCeil(fontMetrics().horizontalAdvance(QLatin1Char('M'))));
-        } else {
-            QTextCursor sel(cc);
-            sel.movePosition(QTextCursor::NextCharacter, QTextCursor::KeepAnchor);
-            cell = cursorRect(sel);
-        }
-        cell.translate(viewport()->pos()); // 视口坐标 → 编辑器坐标（编模式有行号槽偏移）
-        if (cell.isNull())
-            return;
-        p.save();
-        p.setCompositionMode(QPainter::CompositionMode_Plus);
-        p.setPen(Qt::NoPen);
-        const Crt::Palette &pp = crtPalette();
-        const qreal amps[3] = { a, a * 0.45, a * 0.2 };
-        const int grow[3] = { 1, 3, 6 };
-        for (int i = 0; i < 3; ++i) {
-            p.setBrush(QColor(pp.cursorBlock.red(), pp.cursorBlock.green(),
-                              pp.cursorBlock.blue(), qRound(255.0 * amps[i])));
-            const int g = grow[i];
-            p.drawRoundedRect(cell.adjusted(-g, -g, g, g), 4 + g, 4 + g);
-        }
-        p.restore();
-    }
+
 
     qreal brushSize() const { return m_brushSize; }
 
@@ -1314,7 +1150,7 @@ public:
     // ——锁定时是干净"完美视角"，解锁后是沉浸的弯曲玻璃屏（不裁字）
     bool screenEntityOn() const { return m_crt && !m_viewLock; }
     // P3 快照增量：打字只重画脏区。consume 一次性取走脏区并复位
-    CrtSource::SnapDirty consumeSnapshotDirty() override
+    CrtSnapshotSource::SnapDirty consumeSnapshotDirty() override
     {
         SnapDirty d;
         d.full = m_snapFullDirty;
@@ -4317,6 +4153,7 @@ private:
     QTimer m_crtSettleTimer;
     QTimer m_scrollSettle;  // 滚动停稳计时：结束后补全量快照
     bool m_scrolling = false;
+    SnapshotCompositor m_compositor; // 快照合成器（全量/增量/脏区）
     QRect m_snapDirty;          // P3：增量快照脏区（编辑器坐标）
     bool m_snapFullDirty = true; // 全量标志（滚动/缩放/换机/首次）
     QRect m_lastCursorRect;     // 上一光标矩形（光标移动也纳入脏区）

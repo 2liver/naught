@@ -29,7 +29,7 @@ static QShader loadShader(const QString &name)
     return QShader::fromSerialized(f.readAll());
 }
 
-CrtView::CrtView(CrtSource *source)
+CrtView::CrtView(CrtSnapshotSource *source)
     : QWidget(source ? source->sourceWidget() : nullptr)
     , m_source(source)
 {
@@ -233,6 +233,7 @@ void CrtView::renderFrame()
         return;
     m_renderDirty = false;
     m_ambientClock.restart();
+    const CrtConfig cfg = m_source->config(); // 每帧配置值快照
     const QSize want(qMax(1, int(width() * devicePixelRatioF())),
                      qMax(1, int(height() * devicePixelRatioF())));
     if (want != m_texSize) {
@@ -250,28 +251,28 @@ void CrtView::renderFrame()
     if (m_forceNow || !throttled) {
         // P3：增量快照——打字只重画脏区（复用上一帧为底）；无脏区信息
         // （环境拍/首次）走全量兜底。滚动/缩放/换机已标全量
-        const CrtSource::SnapDirty snap = m_source->consumeSnapshotDirty();
+        const CrtSnapshotSource::SnapDirty snap = m_source->consumeSnapshotDirty();
         if (snap.full || m_pending.isNull() || m_pending.size() != m_texSize) {
             m_pending = QImage(m_texSize, QImage::Format_ARGB32);
             m_pending.setDevicePixelRatio(devicePixelRatioF());
-            m_pending.fill(m_source->crtPalette().bg); // 随调色板（M2）
+            m_pending.fill(cfg.palette->bg); // 随调色板（M2）
             m_source->paintTextSnapshot(m_pending);
         } else if (!snap.rect.isEmpty()) {
             m_source->paintTextSnapshotRegion(m_pending, snap.rect);
         } else {
             m_pending = QImage(m_texSize, QImage::Format_ARGB32);
             m_pending.setDevicePixelRatio(devicePixelRatioF());
-            m_pending.fill(m_source->crtPalette().bg);
+            m_pending.fill(cfg.palette->bg);
             m_source->paintTextSnapshot(m_pending);
         }
         // 滚动期间跳过余晖+辉光重活（每 80ms 一帧的全屏逐像素 + 模糊
         // 是滚动卡顿大户）；停稳后 settle 标记全量重拍，痕迹自愈
-        if (!m_source->isScrolling()) {
+        if (!cfg.scrolling) {
             Crt::phosphorPersistence(m_pending, m_prev, m_prev2,
-                                     m_source->crtPalette()); // 余晖按机型实测标定
+                                     *cfg.palette); // 余晖按机型实测标定
             m_prev2 = m_prev; // 上上帧（浅拷贝链：写入时分离）
             m_prev = m_pending; // 上一帧（浅拷贝）
-            Crt::phosphorBloom(m_pending, m_source->crtPalette().glowAlpha); // 二期三件套：真高斯辉光（随调色板）
+            Crt::phosphorBloom(m_pending, cfg.palette->glowAlpha); // 二期三件套：真高斯辉光（随调色板）
         }
         // 入场暖机：因子由 shader 按 timeInfo.y 计算（CPU 逐像素循环
         // 曾引发帧循环冻结，已整体移入 GPU）
@@ -297,10 +298,10 @@ void CrtView::renderFrame()
     // 观察者 = 鼠标（视差每帧更新，不受快照节流）；锁定（M1）= 复现鼠标
     // 离开窗口后的"完美视角"（观察者站在屏幕正前方，内容完整不被裁剪）
     QPointF view;
-    if (m_source->crtViewLocked()) {
+    if (cfg.viewLocked) {
         view = QPointF(-0.25, -0.12); // 与无鼠标默认分支同值
     } else {
-        view = m_source->lastMouseViewport();
+        view = cfg.lastMouse;
         if (view.x() < 0) {
             view = QPointF(-0.25, -0.12);
         } else {
@@ -309,13 +310,13 @@ void CrtView::renderFrame()
                 (view.y() / qMax(1.0, qreal(m_source->sourceViewportSize().height())) - 0.5) * 2.0);
         }
     }
-    const Crt::Palette &pal = m_source->crtPalette();
+    const Crt::Palette &pal = *cfg.palette;
     const float ub[20] = { float(view.x()), float(view.y()),
                            float(m_texSize.width()), float(m_texSize.height()),
                            float(m_clock.elapsed() / 1000.0),
                            m_warmClock.isValid() ? float(m_warmClock.elapsed()) : -1.0f,
-                           m_source->screenEntityOn() ? 1.0f : 0.0f,
-                           float(m_source->machine()), // flags: x=屏幕实体, y=机型
+                           cfg.screenEntity ? 1.0f : 0.0f,
+                           float(cfg.machine), // flags: x=屏幕实体, y=机型
                            pal.scanTint.redF(), pal.scanTint.greenF(), pal.scanTint.blueF(), 1.0f,
                            pal.refl.redF(), pal.refl.greenF(), pal.refl.blueF(), 1.0f,
                            pal.dust.redF(), pal.dust.greenF(), pal.dust.blueF(), 1.0f };
