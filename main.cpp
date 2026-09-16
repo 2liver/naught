@@ -112,7 +112,18 @@ static int runNaughtAgent(int argc, char **argv)
                         bundlePath, nullptr);
     qInfo("naught agent: holding Cmd+Ctrl+Shift+N for %s",
           qPrintable(bundle));
-    return app.exec();
+    {
+        // 日志落盘：launchd 丢弃 stderr，出问题时看这里
+        QFile logf(supportDir + QStringLiteral("/agent.log"));
+        if (logf.open(QIODevice::WriteOnly | QIODevice::Append)) {
+            logf.write((QStringLiteral("agent up: %1\n").arg(bundle)).toUtf8());
+            logf.close();
+        }
+    }
+    // 关键：Carbon 热键事件由 CFRunLoop 派发——QCoreApplication 的
+    // UNIX 派发器不泵 Carbon 队列（此前 app.exec() 下按键永远无反应）
+    CFRunLoopRun();
+    return 0;
 }
 
 // 安装程序（替代 zip 解压安装）：写 LaunchAgent plist + 引导登录项 +
