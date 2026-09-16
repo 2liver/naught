@@ -564,16 +564,21 @@ public:
                     - fm.rightBearing(ch)) / 2.0;
         };
         // 选竖线字形：候选里挑笔画中心最接近两角平均的——左右竖线
-        // 与角的 stem 一致，四边才连得起来（不同机器 fallback 各异）
-        const QChar vCand[3] = { QChar(0x2502), QChar(0x2503), QChar(0x250B) };
-        QChar vBest = vCand[0];
+        // 与角的 stem 一致，四边才连得起来（不同机器 fallback 各异）。
+        // 本样式的原生竖线（双线框的 ║ 等）权重最高——只有 stem 偏差
+        // 超过半格才换字形（双线框的"双线"不可被单线替换）
+        const QChar vCand[4] = { s.v, QChar(0x2502), QChar(0x2503), QChar(0x250B) };
+        QChar vBest = s.v;
         const qreal cornerStem = (stemC(s.tl) + stemC(s.tr)) / 2.0;
-        qreal bestErr = 1e9;
-        for (QChar c : vCand) {
-            const qreal err = qAbs(stemC(c) - cornerStem);
-            if (err < bestErr) {
-                bestErr = err;
-                vBest = c;
+        const qreal nativeErr = qAbs(stemC(s.v) - cornerStem);
+        qreal bestErr = nativeErr;
+        if (nativeErr > 0.75) {
+            for (const QChar c : vCand) {
+                const qreal err = qAbs(stemC(c) - cornerStem);
+                if (err < bestErr) {
+                    bestErr = err;
+                    vBest = c;
+                }
             }
         }
         const qreal vw = fm.horizontalAdvance(vBest);
@@ -618,7 +623,18 @@ public:
                 ++nSp; // 渲染宽度为准：不足补一格
             else if (w0 > boxW + spw * 0.5 && nSp > 0)
                 --nSp;
-            out += body(nSp) + QLatin1Char('\n');
+            QString lineTxt = body(nSp);
+            // 细空格（U+2009）最后半步：空格网格的残余 > 半格时，
+            // 以细空格补到最近（残余从 ±半空格缩到 ±细空格）
+            const qreal wf = renderedW(lineTxt);
+            if (boxW - wf > spw * 0.5 && nSp > 0) {
+                lineTxt = vBest + QLatin1Char(' ') + l
+                        + QString(nSp - 1, QLatin1Char(' '))
+                        + QChar(0x2009) + vBest;
+                if (renderedW(lineTxt) > boxW)
+                    lineTxt = body(nSp); // 细空格不存在（豆腐块）→ 回退
+            }
+            out += lineTxt + QLatin1Char('\n');
         }
         out += s.bl + QString(topBar.size() - 2, s.h) + s.br;
         const int repStart = first.position();

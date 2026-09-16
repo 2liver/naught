@@ -8,7 +8,6 @@
 #include <QResizeEvent>
 #include <QtGui/rhi/qrhi.h>
 #include <QtGui/rhi/qshader.h>
-#include <QtGui/private/qrhimetal_p.h>
 
 static void shaderLog(const QString &s)
 {
@@ -119,12 +118,24 @@ void CrtView::ensureRhi()
     // 帧循环从此冻结（全屏后画面冻死的根因）。
     delete m_r;
     m_r = nullptr;
-    QRhiMetalInitParams params;
-    m_r = QRhi::create(QRhi::Metal, &params);
+    // 后端探测回退：Metal → Vulkan → OpenGL → Null（跨平台——
+    // 旧版硬编码 Metal 且依赖私有头 qrhimetal_p.h，Windows/Linux
+    // 直接编译不过）。默认参数即可（Metal 无参 = 系统默认设备）
+    // Qt 6.9 已移除桌面 OpenGL 后端；平台不适配的项 create 会快速失败
+    const QRhi::Implementation backends[] = {
+        QRhi::Metal, QRhi::Vulkan, QRhi::D3D11, QRhi::D3D12,
+        QRhi::OpenGLES2, QRhi::Null,
+    };
+    for (QRhi::Implementation impl : backends) {
+        m_r = QRhi::create(impl, nullptr);
+        if (m_r)
+            break;
+    }
     if (!m_r) {
         shaderLog(QStringLiteral("RHI CREATE FAIL"));
         return;
     }
+    shaderLog(QStringLiteral("RHI backend: %1").arg(QString::fromLatin1(m_r->backendName())));
 
     // 颜色目标（离屏，无交换链）；物理像素级：纹理/缓冲/快照全部按
     // devicePixelRatio 放大，纹路在视网膜上保持真正的 1 物理像素
