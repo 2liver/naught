@@ -66,14 +66,14 @@ inline const Palette kGreen{
 // （chrome 调色板按子代理调研：默认浅蓝字 #6F7FDC 于蓝屏 #2A1C6E）。
 // 字符画的颜色来自 kC64Colors 的 16 色量化。
 inline const Palette kC64{
-    QColor(0x8A, 0x9A, 0xE8), // ink（默认浅蓝字，提亮：真机蓝字更亮）
-    QColor(0x5E, 0x6A, 0xA6), // inkDim
-    QColor(0x96, 0xA6, 0xFF), // cursorBlock
-    QColor(0x32, 0x22, 0x7E), // bg（蓝屏，略提亮）
+    QColor(0xA2, 0xB2, 0xF8), // ink（浅蓝字——蓝磷本质暗于琥珀，提亮补偿）
+    QColor(0x74, 0x82, 0xB8), // inkDim
+    QColor(0xAE, 0xBE, 0xFF), // cursorBlock
+    QColor(0x3C, 0x2A, 0x8E), // bg（蓝屏，提亮）
     QColor(0x1B, 0x14, 0x50), // scanTint
     QColor(0x40, 0x40, 0xE0), // refl
     QColor(0x5A, 0x5A, 0x6E), // dust
-    0.38,                     // glowAlpha
+    0.50,                     // glowAlpha（蓝磷提亮：辉光也是亮度的一部分）
     { 0.08f, 0.08f, 0.07f },  // P22 彩管余晖：快分量 µs 级（帧级几乎不可见），慢分量短
     { 0.16f, 0.16f, 0.12f },  // 慢分量：P22 实有可见慢余晖（整体亮度的一部分）
 };
@@ -214,8 +214,10 @@ inline void phosphorPersistence(QImage &img, const QImage &prev1, const QImage &
         return;
     const bool have2 = !prev2.isNull() && prev2.size() == img.size();
     const int w = img.width(), h = img.height();
-    // BGRA 权重：按调色板的实测标定（各磷粉 P1/P3/P4/P22 的衰减时标
-    // 换算到快照帧率）——真机余晖一两帧内散尽
+    // lighten(max) 模型：磷光余晖只照亮"内容已离开"的像素——
+    // 仍亮着的像素保持激发亮度（物理：磷光的余晖不叠加在还在激发
+    // 的像素上）。旧版加法模型把静态文字稳态放大到 1/(1-α)≈1.5-2×
+    // （虚胖亮度），重印时新旧画叠加 = 过曝闪光。
     const qreal *p1 = pal.persist1;
     const qreal *p2 = pal.persist2;
     for (int y = 0; y < h; ++y) {
@@ -224,17 +226,14 @@ inline void phosphorPersistence(QImage &img, const QImage &prev1, const QImage &
         const uchar *s2 = have2 ? prev2.constScanLine(y) : nullptr;
         for (int x = 0; x < w; ++x) {
             const int i = x * 4;
-            int b = dst[i] + int(s1[i] * p1[0]);
-            int g = dst[i + 1] + int(s1[i + 1] * p1[1]);
-            int r = dst[i + 2] + int(s1[i + 2] * p1[2]);
+            dst[i] = qMax(dst[i], uchar(s1[i] * p1[0]));
+            dst[i + 1] = qMax(dst[i + 1], uchar(s1[i + 1] * p1[1]));
+            dst[i + 2] = qMax(dst[i + 2], uchar(s1[i + 2] * p1[2]));
             if (s2) {
-                b += int(s2[i] * p2[0]);
-                g += int(s2[i + 1] * p2[1]);
-                r += int(s2[i + 2] * p2[2]);
+                dst[i] = qMax(dst[i], uchar(s2[i] * p2[0]));
+                dst[i + 1] = qMax(dst[i + 1], uchar(s2[i + 1] * p2[1]));
+                dst[i + 2] = qMax(dst[i + 2], uchar(s2[i + 2] * p2[2]));
             }
-            dst[i] = qMin(255, b);
-            dst[i + 1] = qMin(255, g);
-            dst[i + 2] = qMin(255, r);
         }
     }
 }
