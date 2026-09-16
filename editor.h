@@ -230,8 +230,19 @@ public:
             if (m_crtView)
                 m_crtView->markDirty(); // 脏驱动下块光标闪烁需显式标脏
         });
+        // P3：光标移动也纳入脏区（旧位置的块光标必须被擦掉——
+        // 否则增量快照留下幽灵光标；箭头键移动不触发 contentsChange）
+        connect(this, &QPlainTextEdit::cursorPositionChanged, this, [this] {
+            if (!m_crt)
+                return;
+            const int halo = qCeil(fontMetrics().horizontalAdvance(QLatin1Char('M'))) + 12;
+            m_snapDirty |= m_lastCursorRect;
+            m_lastCursorRect = cursorRect().translated(viewport()->pos())
+                                   .adjusted(-halo, -halo, halo, halo);
+            m_snapDirty |= m_lastCursorRect;
+        });
         connect(document(), &QTextDocument::contentsChange, this,
-                [this](int, int removed, int added) {
+                [this](int from, int removed, int added) {
             // 只有真实文字变化（插入/删除）才算"手动编辑"；
             // 格式变化（高亮器 rehighlight 的同步/异步 chunk）不杀画布——
             // 否则打印期间连按 Cmd+B：高亮器在切编之后异步上色，
@@ -270,6 +281,21 @@ public:
                 m_exciteClock.start();
             }
             m_lastCharCount = cc;
+            // P3：增量脏区 = 变化块 + 光标旧/新位置（编辑器坐标）
+            {
+                const QTextBlock blk = document()->findBlock(qMin(from, qMax(0, cc - 1)));
+                QRect r = blockBoundingGeometryPub(blk)
+                              .translated(contentOffsetPub()).toAlignedRect()
+                              .translated(viewport()->pos());
+                r = r.intersected(viewport()->rect().translated(viewport()->pos()));
+                m_snapDirty |= r;
+                m_snapDirty |= m_lastCursorRect;
+                // 激发辉光（cell ±6px 三圈）超出光标矩形——脏区扩展覆盖
+                const int halo = qCeil(fontMetrics().horizontalAdvance(QLatin1Char('M'))) + 12;
+                m_lastCursorRect = cursorRect().translated(viewport()->pos())
+                                       .adjusted(-halo, -halo, halo, halo);
+                m_snapDirty |= m_lastCursorRect;
+            }
             // 行号区：文档一变立即重绘，否则清空/换行不会刷新（假行号）
             m_canvas->update();
             updateGutterWidth();
@@ -345,10 +371,12 @@ public:
         });
         connect(verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int) {
             m_scrolling = true;
+            markSnapshotFullDirty(); // 视口内容整体位移：增量不适用
             m_scrollSettle.start(180);
         });
         connect(horizontalScrollBar(), &QScrollBar::valueChanged, this, [this](int) {
             m_scrolling = true;
+            markSnapshotFullDirty();
             m_scrollSettle.start(180);
         });
 
@@ -1129,6 +1157,45 @@ public:
                 p.restore();
             }
         } // 画家析构后直接回写像素，避免与光栅引擎缓存交错
+
+        if (cursorBlock)
+            paintCrtCursor(img);
+    }
+    // P3：增量重拍——只重画脏区（复用上一帧图像为底）。与全量同构图，
+    // 仅以 clip 限制绘制范围；脏区先清底再画（旧光标/旧字符被抹掉）
+    void paintTextSnapshotRegion(QImage &img, const QRect &dirty) const
+    {
+        if (dirty.isEmpty())
+            return;
+        const bool cursorBlock = m_crt && hasFocus()
+            && m_blinkTimer.isActive() && m_blinkHalf % 2 == 0;
+        {
+            QPainter p(&img);
+            if (!p.isActive())
+                return;
+            p.setClipRect(dirty);
+            p.fillRect(dirty, crtPalette().bg); // 磷光底：先清脏区
+            // 渲染整个视口、由画家 clip 限范围：source-region 语义在
+            // DPR 引擎下与 clip 的坐标映射存在偏差（实测边缘像素漏画）
+            if (viewport())
+                viewport()->render(&p, viewport()->pos());
+            paintExcitation(p); // clip 限范围：只重画脏区内的激发
+            if (m_canvas && m_canvas->isVisible())
+                m_canvas->render(&p, m_canvas->pos());
+            if (m_codeMode && m_lineNumberArea)
+                m_lineNumberArea->render(&p, m_lineNumberArea->pos());
+            if (m_fadeOpacity > 0.02) {
+                p.save();
+                p.setOpacity(m_fadeOpacity);
+                if (auto *v = qobject_cast<ZenScrollBar *>(verticalScrollBar()))
+                    if (v->isVisible())
+                        v->paintOnto(p, v->mapTo(this, QPoint(0, 0)));
+                if (auto *h = qobject_cast<ZenScrollBar *>(horizontalScrollBar()))
+                    if (h->isVisible())
+                        h->paintOnto(p, h->mapTo(this, QPoint(0, 0)));
+                p.restore();
+            }
+        }
         if (cursorBlock)
             paintCrtCursor(img);
     }
@@ -1261,6 +1328,7 @@ public:
     bool machineGreen() const { return m_machine == 1; }
     void toggleMachine()
     {
+        markSnapshotFullDirty(); // 调色板/字体变化：全量
         m_machine = (m_machine + 1) % 4; // 琥珀 → 绿磷 → C64 → IBM PC → 琥珀
         const bool prev = m_settingAscii;
         m_settingAscii = true; // 高亮器 rehighlight 会发 contentsChanged——程序操作
@@ -1281,6 +1349,16 @@ public:
     // 屏幕实体（原实验功能，M4.5 并入）：追随视角解锁（非锁定）时生效
     // ——锁定时是干净"完美视角"，解锁后是沉浸的弯曲玻璃屏（不裁字）
     bool screenEntityOn() const { return m_crt && !m_viewLock; }
+    // P3 快照增量：打字只重画脏区。consume 一次性取走脏区并复位
+    bool snapshotFullDirty() const { return m_snapFullDirty; }
+    QRect consumeSnapshotDirty()
+    {
+        QRect r = m_snapDirty;
+        m_snapDirty = QRect();
+        m_snapFullDirty = false;
+        return r;
+    }
+    void markSnapshotFullDirty() { m_snapFullDirty = true; }
     bool isScrolling() const { return m_scrolling; } // CRT 快照降载信号
     bool asciiArtActive() const { return m_asciiActive; } // 画布编辑态（立为图勾选）
     bool colorMachine() const { return m_machine == 2; }   // C64：字符画逐字符真彩
@@ -1423,6 +1501,7 @@ public:
     // 原生分辨率上限（1 源像素 1 格——再大没有更多细节，也防爆炸）。
     void loadAsciiImage(const QImage &img)
     {
+        markSnapshotFullDirty(); // 换行模式/画布插入：全量起步
         if (img.isNull())
             return;
         m_asciiImage = img;
@@ -1529,6 +1608,7 @@ public:
     // 则静默无效果。编辑过的字符画选中再立为图即可（编辑成果保留）。
     void declareArtFromSelection()
     {
+        markSnapshotFullDirty(); // 画布态切换（NoWrap）：全量
         QTextCursor c = textCursor();
         int start = -1, end = -1;
         if (c.hasSelection()) {
@@ -1796,6 +1876,12 @@ public:
         }
 
         e.moveCursor(QTextCursor::Start);
+        for (int s = 0; s < 3; ++s) { // 滚动条轨道点击前再沉降（范围/几何竞态）
+            QApplication::processEvents();
+            QEventLoop lp;
+            QTimer::singleShot(10, &lp, &QEventLoop::quit);
+            lp.exec();
+        }
         ZenScrollBar *bar = qobject_cast<ZenScrollBar *>(e.verticalScrollBar());
         if (bar && bar->isVisible()) {
             const QPoint tp(5, 5);
@@ -2393,6 +2479,8 @@ public:
         }
         // 显：像素磷光模式——字体/配色/透明视口/画面，开关可逆
         {
+            while (e.machine() != 0)
+                e.toggleMachine(); // 测试前提：琥珀机（配色断言以 kInk 为准）
             e.setPlainText(QStringLiteral("無\n"));
             e.toggleCrt();
             QApplication::processEvents();
@@ -2404,7 +2492,8 @@ public:
                 return false;
             }
             if (e.palette().color(QPalette::Text) != Crt::kInk) {
-                qWarning("selftest FAIL: CRT text color not amber");
+                qWarning("selftest FAIL: CRT text color not amber (machine=%d)",
+                         e.machine());
                 return false;
             }
             if (e.palette().color(QPalette::Base) != Crt::kBg) {
@@ -2667,6 +2756,56 @@ public:
             e.centerToWidth(); // 居中：左补空格
             if (!e.toPlainText().startsWith(QLatin1Char(' '))) {
                 qWarning("selftest FAIL: centerToWidth no padding");
+                return false;
+            }
+            e.setPlainText(QStringLiteral("無\n"));
+        }
+        // P3 哨兵：增量重拍与全量重拍像素一致（打一个字 → 脏区重画
+        // → 与全量重画逐字节比对；不一致 = 增量漏画，必须查）
+        {
+            e.setPlainText(QStringLiteral("甲乙丙\n丁戊己\n"));
+            e.markSnapshotFullDirty();
+            const qreal dpr = e.devicePixelRatioF(); // 与真实管线同构：窗口 DPR
+            QImage full1(e.viewport()->size() * dpr, QImage::Format_ARGB32);
+            full1.setDevicePixelRatio(dpr);
+            full1.fill(Qt::black);
+            e.paintTextSnapshot(full1); // 全量基线
+            QImage base = full1.copy(); // 增量底 = 上一帧
+            e.moveCursor(QTextCursor::End);
+            e.insertPlainText(QStringLiteral("無")); // 触发 contentsChange → 脏区
+            const QRect dirty = e.consumeSnapshotDirty();
+            { // 等激发衰减归零（900ms 上限）：时间敏感部分排除出比对
+                QEventLoop lp;
+                QTimer::singleShot(950, &lp, &QEventLoop::quit);
+                lp.exec();
+            }
+            QImage full2(e.viewport()->size() * dpr, QImage::Format_ARGB32);
+            full2.setDevicePixelRatio(dpr);
+            full2.fill(Qt::black);
+            e.paintTextSnapshot(full2); // 全量对照
+            e.paintTextSnapshotRegion(base, dirty); // 增量
+            if (base != full2) {
+                // 定位首个差异像素
+                QString diff;
+                const int w = qMin(base.width(), full2.width());
+                const int h = qMin(base.height(), full2.height());
+                for (int y = 0; y < h && diff.isEmpty(); ++y) {
+                    const uchar *a = base.constScanLine(y);
+                    const uchar *b = full2.constScanLine(y);
+                    for (int x = 0; x < w; ++x) {
+                        if (qAbs(int(a[x*4]) - b[x*4]) > 0
+                            || qAbs(int(a[x*4+1]) - b[x*4+1]) > 0
+                            || qAbs(int(a[x*4+2]) - b[x*4+2]) > 0) {
+                            diff = QStringLiteral("(%1,%2) inc=%3,%4,%5 full=%6,%7,%8 dirty=%9,%10,%11,%12")
+                                .arg(x).arg(y).arg(a[x*4]).arg(a[x*4+1]).arg(a[x*4+2])
+                                .arg(b[x*4]).arg(b[x*4+1]).arg(b[x*4+2])
+                                .arg(dirty.x()).arg(dirty.y()).arg(dirty.width()).arg(dirty.height());
+                            break;
+                        }
+                    }
+                }
+                qWarning("selftest FAIL: incremental snapshot != full snapshot %s",
+                         qPrintable(diff));
                 return false;
             }
             e.setPlainText(QStringLiteral("無\n"));
@@ -3657,6 +3796,7 @@ private:
 
     void applyZoom()
     {
+        markSnapshotFullDirty(); // 字号变化：全文重排，增量不适用
         // O(1)：只改文档默认字号并标脏，重排由 Qt 惰性完成（仅可见区域）。
         QFont f = activeFont();
         document()->setDefaultFont(f);
@@ -3675,6 +3815,7 @@ private:
 
     void setCodeMode(bool on)
     {
+        markSnapshotFullDirty(); // 行号槽/换行变化：全量
         if (m_codeMode == on)
             return;
         m_codeMode = on;
@@ -4196,6 +4337,9 @@ private:
     QTimer m_crtSettleTimer;
     QTimer m_scrollSettle;  // 滚动停稳计时：结束后补全量快照
     bool m_scrolling = false;
+    QRect m_snapDirty;          // P3：增量快照脏区（编辑器坐标）
+    bool m_snapFullDirty = true; // 全量标志（滚动/缩放/换机/首次）
+    QRect m_lastCursorRect;     // 上一光标矩形（光标移动也纳入脏区）
 
 #ifdef NAUGHT_WITH_HIGHLIGHT
     KSyntaxHighlighting::Repository *m_repo = nullptr;

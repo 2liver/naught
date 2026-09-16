@@ -248,10 +248,23 @@ void CrtView::renderFrame()
     // 由节流决定真实上传节奏——光标闪烁/足迹圆点/滚动条淡出都在其中
     const bool throttled = m_sinceRefresh.isValid() && m_sinceRefresh.elapsed() < 80;
     if (m_forceNow || !throttled) {
-        m_pending = QImage(m_texSize, QImage::Format_ARGB32);
-        m_pending.setDevicePixelRatio(devicePixelRatioF());
-        m_pending.fill(m_editor->crtPalette().bg); // 随调色板（M2）
-        m_editor->paintTextSnapshot(m_pending);
+        // P3：增量快照——打字只重画脏区（复用上一帧为底）；无脏区信息
+        // （环境拍/首次）走全量兜底。滚动/缩放/换机已标全量
+        const bool fullDirty = m_editor->snapshotFullDirty();
+        const QRect dirty = m_editor->consumeSnapshotDirty();
+        if (fullDirty || m_pending.isNull() || m_pending.size() != m_texSize) {
+            m_pending = QImage(m_texSize, QImage::Format_ARGB32);
+            m_pending.setDevicePixelRatio(devicePixelRatioF());
+            m_pending.fill(m_editor->crtPalette().bg); // 随调色板（M2）
+            m_editor->paintTextSnapshot(m_pending);
+        } else if (!dirty.isEmpty()) {
+            m_editor->paintTextSnapshotRegion(m_pending, dirty);
+        } else {
+            m_pending = QImage(m_texSize, QImage::Format_ARGB32);
+            m_pending.setDevicePixelRatio(devicePixelRatioF());
+            m_pending.fill(m_editor->crtPalette().bg);
+            m_editor->paintTextSnapshot(m_pending);
+        }
         // 滚动期间跳过余晖+辉光重活（每 80ms 一帧的全屏逐像素 + 模糊
         // 是滚动卡顿大户）；停稳后 settle 标记全量重拍，痕迹自愈
         if (!m_editor->isScrolling()) {
