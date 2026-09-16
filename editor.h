@@ -169,6 +169,8 @@ public:
             m_settingAscii = false;
             m_asciiPrintPos = c.position();
             m_asciiEnd = m_asciiPrintPos;
+            m_lastArtStart = m_asciiStart; // 打印推进时同步"上次范围"
+            m_lastArtEnd = m_asciiEnd;
             ++m_asciiPrintIdx;
         });
 
@@ -648,6 +650,8 @@ public:
     void toggleMachine()
     {
         m_machine = (m_machine + 1) % 4; // 琥珀 → 绿磷 → C64 → IBM PC → 琥珀
+        const bool prev = m_settingAscii;
+        m_settingAscii = true; // 高亮器 rehighlight 会发 contentsChanged——程序操作
         applyScheme();
         applyZoom(); // 字体随机器切换（Fusion Pixel ↔ VT323）
         if (m_asciiActive)
@@ -659,6 +663,7 @@ public:
             m_lineNumberArea->update();
         if (m_crtView)
             m_crtView->markDirty(true);
+        m_settingAscii = prev;
     }
 
     // 屏幕实体（原实验功能，M4.5 并入）：追随视角解锁（非锁定）时生效
@@ -2007,6 +2012,33 @@ public:
                 }
                 e.setPlainText(QStringLiteral("無\n")); // 还原，防污染后续
             }
+            // 回归：打印期间切编（高亮器 rehighlight 曾误触发反激活）→
+            // 画布态存活、退出编存活、无选区立为图可复选上次范围
+            {
+                e.setPlainText(QString());
+                e.loadAsciiImage(simg); // 打印开始
+                e.toggleCodeMode();     // 打印期间切编
+                waitPrint();
+                if (!e.m_asciiActive) {
+                    qWarning("selftest FAIL: code-mode toggle deactivated art");
+                    return false;
+                }
+                e.toggleCodeMode();     // 退出编
+                waitPrint();
+                if (!e.m_asciiActive) {
+                    qWarning("selftest FAIL: code-mode exit deactivated art");
+                    return false;
+                }
+                QTextCursor nc = e.textCursor();
+                nc.clearSelection();
+                e.setTextCursor(nc);
+                e.declareArtFromSelection(); // 无选区 → 复选上次范围
+                if (!e.m_asciiActive) {
+                    qWarning("selftest FAIL: no-selection declare failed");
+                    return false;
+                }
+                e.setPlainText(QStringLiteral("無\n")); // 还原
+            }
             // C64 真彩路径：颜色与字符一一对应、含黑白两端色
             {
                 QVector<QRgb> cols;
@@ -2634,6 +2666,8 @@ private:
         if (m_codeMode == on)
             return;
         m_codeMode = on;
+        const bool prev = m_settingAscii;
+        m_settingAscii = true; // 高亮器 rehighlight 会发 contentsChanged——程序操作
         applyZoom(); // 等宽/比例字体 + 标脏
         if (on) {
             // 行号槽：容纳最大行号
@@ -2671,6 +2705,7 @@ private:
         if (m_asciiActive)
             replaceAsciiArt(); // 画布在场 → 按当前机器/字体重印（防"失去颜色"）
         viewport()->update();
+        m_settingAscii = prev;
     }
 
 #ifdef NAUGHT_WITH_HIGHLIGHT
