@@ -2761,14 +2761,17 @@ public:
                 }
                 const QString rampChars = QStringLiteral(" .:*#@.,-~:;=!*#$@");
                 bool onlyRamp = true;
+                QChar badChar;
                 for (const QChar ch : doc) {
                     if (ch != QLatin1Char('\n') && !rampChars.contains(ch)) {
+                        badChar = ch;
                         onlyRamp = false;
                         break;
                     }
                 }
                 if (!onlyRamp) {
-                    qWarning("selftest FAIL: ascii art editor path has non-ramp chars");
+                    qWarning("selftest FAIL: ascii art editor path has non-ramp chars (first=%04x len=%d)",
+                             badChar.unicode(), int(doc.size()));
                     return false;
                 }
             }

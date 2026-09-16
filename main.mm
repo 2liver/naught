@@ -306,7 +306,9 @@ int main(int argc, char **argv)
     // 系统菜单栏上的「法」：快捷键说明随原生 key equivalent 显示。
     // Windows/Linux 不设菜单栏（无），其右键菜单为 Qt 自绘、自带快捷键列。
     {
-        QMenuBar *menuBar = new QMenuBar(nullptr);
+        // 父窗口 = 编辑器：快捷键上下文立即绑定（旧版 nullptr 父——
+        // 无窗口可挂，⌘ 快捷键要等菜单被点开一次才生效）
+        QMenuBar *menuBar = new QMenuBar(&editor);
         QMenu *fa = menuBar->addMenu(QStringLiteral("项"));
         // ── 视图区（父级收纳）：编/显/图 ──
         QMenu *mBian = fa->addMenu(QStringLiteral("编"));
