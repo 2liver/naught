@@ -240,6 +240,11 @@ int main(int argc, char **argv)
         QAction *bFontNext = mFont->addAction(QStringLiteral("下一字体"));
         bFontNext->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+.")));
         QAction *bFontReset = mFont->addAction(QStringLiteral("恢复默认字体"));
+        QMenu *mExp = fa->addMenu(QStringLiteral("实验"));
+        QAction *bEntity = mExp->addAction(QStringLiteral("屏幕实体"));
+        bEntity->setCheckable(true);
+        QAction *bGrid = mExp->addAction(QStringLiteral("字符网格"));
+        bGrid->setCheckable(true);
         fa->addSeparator(); // 视图轴与格式化（言·隔）分区
         QAction *bYan = fa->addAction(QStringLiteral("言"));
         bYan->setShortcut(QKeySequence(QStringLiteral("Ctrl+L")));
@@ -274,6 +279,8 @@ int main(int argc, char **argv)
         QObject::connect(bFontPrev, &QAction::triggered, &editor, [&editor] { editor.cycleCrtFont(-1); });
         QObject::connect(bFontNext, &QAction::triggered, &editor, [&editor] { editor.cycleCrtFont(+1); });
         QObject::connect(bFontReset, &QAction::triggered, &editor, [&editor] { editor.restoreDefaultFont(); });
+        QObject::connect(bEntity, &QAction::triggered, &editor, [&editor] { editor.toggleScreenEntity(); });
+        QObject::connect(bGrid, &QAction::triggered, &editor, [&editor] { editor.toggleFixedGrid(); });
         QObject::connect(bYan, &QAction::triggered, &editor, [&editor] { editor.yan(); });
         QObject::connect(bGe, &QAction::triggered, &editor, [&editor] { editor.ge(); });
         QObject::connect(bZoomIn, &QAction::triggered, &editor, [&editor] { editor.zoom(1); });
@@ -284,7 +291,7 @@ int main(int argc, char **argv)
         QObject::connect(bBrush0, &QAction::triggered, &editor, [&editor] { editor.brushDefault(); });
         QObject::connect(bUndo, &QAction::triggered, &editor, [&editor] { editor.undoAll(); });
         QObject::connect(bRedo, &QAction::triggered, &editor, [&editor] { editor.redoAll(); });
-        QObject::connect(fa, &QMenu::aboutToShow, &editor, [&editor, bYin, bYang, bTu, bCa, bBian, bXian, bLock, bGreen] {
+        QObject::connect(fa, &QMenu::aboutToShow, &editor, [&editor, bYin, bYang, bTu, bCa, bBian, bXian, bLock, bGreen, bEntity, bGrid] {
             bYin->setChecked(editor.isDark());
             bYang->setChecked(!editor.isDark());
             bTu->setChecked(editor.mode() == Editor::Mode::Draw);
@@ -295,6 +302,10 @@ int main(int argc, char **argv)
             bLock->setEnabled(editor.crtOn()); // 锁定只在显会话内有意义
             bGreen->setChecked(editor.machineGreen());
             bGreen->setEnabled(editor.crtOn());
+            bEntity->setChecked(editor.screenEntityOn());
+            bEntity->setEnabled(editor.crtOn());
+            bGrid->setChecked(editor.fixedGridOn());
+            bGrid->setEnabled(editor.crtOn());
         });
     }
 #endif

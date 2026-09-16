@@ -615,6 +615,25 @@ public:
             m_crtView->markDirty(true);
     }
 
+    // 实验（M4.5）：两个可叠加开关——屏幕实体（shader 侧边框/曲率/玻璃）
+    // 与字符网格（真机列数：琥珀 80 列 / 绿磷 64 列）
+    bool screenEntityOn() const { return m_screenEntity; }
+    bool fixedGridOn() const { return m_fixedGrid; }
+    void toggleScreenEntity()
+    {
+        m_screenEntity = !m_screenEntity;
+        if (m_crtView)
+            m_crtView->markDirty(true);
+    }
+    void toggleFixedGrid()
+    {
+        m_fixedGrid = !m_fixedGrid;
+        applyZoom();
+        viewport()->update();
+        if (m_crtView)
+            m_crtView->markDirty(true);
+    }
+
     // ---- 字体管理（「项」·字体区）：用户字体文件夹 + 上/下一个 ----
     static QString fontDir()
     {
@@ -905,11 +924,13 @@ public:
 
     void zoom(int delta)
     {
+        m_fixedGrid = false; // 实验·字符网格：手动缩放即退出网格模式
         applyAnchoredZoom(m_size + delta); // 缩放字符（字号）——与无图时一致
     }
 
     void zoomTo(qreal size)
     {
+        m_fixedGrid = false; // 实验·字符网格：手动缩放即退出网格模式
         applyAnchoredZoom(size);
     }
 
@@ -1623,6 +1644,28 @@ public:
                 qWarning("selftest FAIL: view lock re-toggle failed");
                 return false;
             }
+            // M4.5 实验：字符网格（真机列数）+ 屏幕实体（可叠加、缩放退格）
+            e.toggleFixedGrid();
+            {
+                const QFont gf = e.document()->defaultFont();
+                const int wantPx = qMax(6, e.viewport()->width() / 80);
+                if (qAbs(gf.pixelSize() - wantPx) > 1) {
+                    qWarning("selftest FAIL: fixed grid font size %d want %d",
+                             gf.pixelSize(), wantPx);
+                    return false;
+                }
+            }
+            e.zoom(1); // 手动缩放退出网格模式
+            if (e.fixedGridOn()) {
+                qWarning("selftest FAIL: zoom did not exit fixed grid");
+                return false;
+            }
+            e.toggleScreenEntity();
+            if (!e.screenEntityOn()) {
+                qWarning("selftest FAIL: screen entity toggle failed");
+                return false;
+            }
+            e.toggleScreenEntity();
             // M2：切换计算机——默认琥珀，切绿磷（文字/底色/字体随调色板与
             // 出厂字库），切回
             if (e.crtPalette().ink != Crt::kInk) {
@@ -2495,9 +2538,15 @@ private:
     {
         if (m_crt) {
             // 机器字符 ROM：出厂/手选字体；整数像素号（12px 为设计原大），
-            // 绿磷 VT323 设计号偏大，放大 1.25×；无抗锯齿
+            // 绿磷 VT323 设计号偏大，放大 1.25×；无抗锯齿。
+            // 实验·字符网格：像素号锁定为真机列数（琥珀 80 列 / 绿磷 64 列）
             QFont f = QFont(crtFontFamily());
-            f.setPixelSize(qMax(6, qRound(m_size * (m_machineGreen ? 1.25 : 1.0))));
+            int px = qMax(6, qRound(m_size * (m_machineGreen ? 1.25 : 1.0)));
+            if (m_fixedGrid) {
+                const int cols = m_machineGreen ? 64 : 80;
+                px = qMax(6, viewport()->width() / cols);
+            }
+            f.setPixelSize(px);
             return f;
         }
         QFont f = m_codeMode ? m_codeFont : m_baseFont;
@@ -2872,6 +2921,8 @@ private:
     int m_asciiEnd = 0;
     QTimer m_asciiSettleTimer;   // 画布缩放尾拍兜底
     QElapsedTimer m_asciiRenderClock; // 画布缩放 80ms 节流
+    bool m_screenEntity = false; // 实验·屏幕实体（M4.5）
+    bool m_fixedGrid = false;    // 实验·字符网格（M4.5）
     struct InkOp {
         QVector<Canvas::InkStroke> before;
         QVector<Canvas::InkStroke> after;

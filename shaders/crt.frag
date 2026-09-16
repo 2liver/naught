@@ -5,7 +5,7 @@ layout(std140, binding = 0) uniform buf {
     vec2 view;
     vec2 texSize;
     vec2 timeInfo;   // x = 运行秒数，y = 暖机毫秒（-1 = 非暖机期）
-    vec2 _pad;
+    vec2 flags;      // x = 实验·屏幕实体，y = 保留
     vec4 scanTint;   // 扫描线暗行掺色（调色板）
     vec4 refl;       // 玻璃反光色（调色板）
     vec4 dustCol;    // 灰尘点色（调色板）
@@ -32,7 +32,8 @@ vec2 curve(vec2 uv) {
     c.x += ubuf.view.x * 0.032;
     c.y -= ubuf.view.y * 0.032;
     float r2 = dot(c, c);
-    return c * (1.0 + 0.05 * r2) + 0.5;
+    float k = mix(0.05, 0.10, step(0.5, ubuf.flags.x)); // 实验·屏幕实体：曲率加倍
+    return c * (1.0 + k * r2) + 0.5;
 }
 
 float hash21(vec2 p)
@@ -44,7 +45,10 @@ void main()
 {
     // ---- 内容空间：弯曲的电子图像（含视差）。栅网/扫描线/玻璃都在
     // 屏幕空间——真机上它们是固定在玻璃上的，不随视差移动 ----
-    vec2 cuv = clamp(curve(v_uv * 0.965 + 0.0175), 0.0, 1.0);
+    // 实验·屏幕实体：曲率加倍时输入内缩同步加大——内容永不越界（不裁字）
+    float ent = step(0.5, ubuf.flags.x);
+    vec2 inuv = v_uv * mix(0.965, 0.93, ent) + mix(0.0175, 0.035, ent);
+    vec2 cuv = clamp(curve(inuv), 0.0, 1.0);
     vec3 col = sampleAt(cuv);
 
     // 真衍射：内容空间亮边 ±1px R/B 彩边（bright(x)−bright(x±1) 差分，
@@ -142,9 +146,17 @@ void main()
         col *= wk;
     }
 
-    // 暗角（克制，屏幕空间——玻璃固定）
+    // 暗角（屏幕空间——玻璃固定）；实验·屏幕实体：暗角略强 + 边框
+    // 阴影带（压暗但不裁字——文字仍可见）+ 一道固定对角玻璃反光
     float d = length(v_uv - 0.5) * 1.5;
-    col *= 1.0 - 0.22 * smoothstep(0.4, 1.0, d);
+    col *= 1.0 - mix(0.22, 0.30, ent) * smoothstep(0.4, 1.0, d);
+    if (ent > 0.5) {
+        vec2 ed = abs(v_uv - 0.5) * 2.0; // 0 中心 → 1 边缘
+        float bezel = smoothstep(0.86, 1.0, max(ed.x, ed.y));
+        col *= 1.0 - 0.55 * bezel;
+        float gl = pow(max(0.0, 1.0 - abs(v_uv.x * 0.6 + v_uv.y * 0.8 - 0.55) * 3.0), 2.0);
+        col += ubuf.refl.rgb * gl * 0.03;
+    }
 
     frag = vec4(clamp(col, 0.0, 1.0), 1.0);
 }
