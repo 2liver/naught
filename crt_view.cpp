@@ -200,6 +200,7 @@ void CrtView::renderFrame()
     if (m_readbackInFlight && m_readbackClock.isValid()
         && m_readbackClock.elapsed() > 800) {
         m_readbackInFlight = false;
+        ++m_readbackGen; // 在途回读作废：迟到回调不覆盖新帧
         releaseGpu();
         ensureRhi();
         m_forceNow = true;
@@ -298,8 +299,13 @@ void CrtView::renderFrame()
     QRhiReadbackResult *rb = new QRhiReadbackResult;
     m_readbackInFlight = true;
     m_readbackClock.start();
-    rb->completed = [this, rb] {
-        QMetaObject::invokeMethod(this, [this, rb] {
+    const int gen = ++m_readbackGen;
+    rb->completed = [this, rb, gen] {
+        QMetaObject::invokeMethod(this, [this, rb, gen] {
+            if (gen != m_readbackGen) { // 看门狗已复位管线：陈旧回读作废
+                delete rb;
+                return;
+            }
             QImage img(m_texSize, QImage::Format_RGBA8888);
             if (!img.isNull() && !rb->data.isEmpty())
                 memcpy(img.bits(), rb->data.constData(),

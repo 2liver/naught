@@ -101,6 +101,14 @@ public:
             if (id >= 0 && !QFontDatabase::applicationFontFamilies(id).isEmpty())
                 s_whiteFamily = QFontDatabase::applicationFontFamilies(id).first();
         }
+        if (s_c64Family.isEmpty()) {
+            // C64 出厂字体：Press Start 2P（OFL）——8 位像素观感，
+            // 独立于绿磷机的 VT323（旧版回退到绿磷字体，两台同脸）
+            const int id = QFontDatabase::addApplicationFont(
+                QStringLiteral(":/fonts/classic/PressStart2P-Regular.ttf"));
+            if (id >= 0 && !QFontDatabase::applicationFontFamilies(id).isEmpty())
+                s_c64Family = QFontDatabase::applicationFontFamilies(id).first();
+        }
         seedClassicFonts(); // 出厂经典库存（首次启动播种，可删可改名）
         refreshFonts(); // 用户字体文件夹（可含嵌套子文件夹）
         // 暂时默认：跨启动记忆上次选用的字体（按机器；字体被删则回出厂）
@@ -112,9 +120,9 @@ public:
             const QString famG = st.value(QStringLiteral("fontGreen")).toString();
             if (!famG.isEmpty() && m_userFonts.contains(famG))
                 m_greenUser = famG;
-            const QString famA2 = st.value(QStringLiteral("fontApple")).toString();
+            const QString famA2 = st.value(QStringLiteral("fontC64")).toString();
             if (!famA2.isEmpty() && m_userFonts.contains(famA2))
-                m_appleUser = famA2;
+                m_c64User = famA2;
         }
         // 抗锯齿打开：磷粉像素块边缘自然软化（锐利硬边不像玻璃后的光）
 
@@ -548,13 +556,16 @@ public:
         };
         const auto &s = st[style];
         const qreal vw = fm.horizontalAdvance(s.v);
-        // 内容区宽按空格网格取整：等宽字体下每行补齐的空格数为整数，
-        // 右封口线逐行严丝合缝（旧版 qCeil 逐行进位 → 右缘成弧线）
-        const qreal contentW = spw * qCeil(qMax(1.0, maxW / spw));
-        const qreal boxW = contentW + spw + vw * 2.0;
+        const qreal tlW = fm.horizontalAdvance(s.tl);
+        const qreal trW = fm.horizontalAdvance(s.tr);
         const qreal hw = qMax(0.1, fm.horizontalAdvance(s.h));
-        const int hN = qMax(1, int(qRound((boxW - fm.horizontalAdvance(s.tl)
-                                           - fm.horizontalAdvance(s.tr)) / hw)));
+        // 关键：总宽落在横线栅格上——hN 条 ─ 恰好填满两角之间
+        // （boxW = tlW + trW + hN×hw，无取整残余）。旧版对 boxW 取整
+        // 横线，横线与角之间差 ±半格 → "左右中间填充线没对齐"
+        const qreal need = maxW + spw * 2.0 + vw * 2.0;
+        const int hN = qMax(1, int(qCeil((need - tlW - trW) / hw)));
+        const qreal boxW = tlW + trW + hN * hw;
+        const qreal contentW = boxW - spw - vw * 2.0;
         QString out = s.tl + QString(hN, s.h) + s.tr + QLatin1Char('\n');
         for (const QString &l : lines) {
             const int nSp = qMax(0, int(qRound((contentW - lineW(l)) / spw)));
@@ -1277,6 +1288,7 @@ public:
         if (m_userFonts.isEmpty())
             return;
         const QString factory = (m_machine == 0) ? s_crtFamily
+                               : (m_machine == 2) ? s_c64Family
                                : (m_machine == 3) ? s_whiteFamily : s_greenFamily;
         const QStringList all = QStringList() << factory << m_userFonts;
         int idx = all.indexOf(crtFontFamily());
@@ -1286,7 +1298,7 @@ public:
         if (idx < 0)
             idx += all.size();
         idx %= all.size();
-        QString &u = m_machine == 1 ? m_greenUser : m_machine == 2 ? m_appleUser : m_amberUser;
+        QString &u = m_machine == 1 ? m_greenUser : m_machine == 2 ? m_c64User : m_amberUser;
         u = (idx == 0) ? QString() : all.at(idx); // 空 = 出厂
         saveFontChoice(); // 暂时默认：跨启动记忆
         applyZoom();
@@ -1299,7 +1311,7 @@ public:
     // 「恢复默认」：当前机器回到出厂默认字体（清掉暂时默认）
     void restoreDefaultFont()
     {
-        QString &u = m_machine == 1 ? m_greenUser : m_machine == 2 ? m_appleUser : m_amberUser;
+        QString &u = m_machine == 1 ? m_greenUser : m_machine == 2 ? m_c64User : m_amberUser;
         u.clear();
         saveFontChoice();
         applyZoom();
@@ -1313,9 +1325,9 @@ public:
     {
         QSettings st;
         const QString key = m_machine == 1 ? QStringLiteral("fontGreen")
-                             : m_machine == 2 ? QStringLiteral("fontApple")
+                             : m_machine == 2 ? QStringLiteral("fontC64")
                                               : QStringLiteral("fontAmber");
-        const QString &u = m_machine == 1 ? m_greenUser : m_machine == 2 ? m_appleUser : m_amberUser;
+        const QString &u = m_machine == 1 ? m_greenUser : m_machine == 2 ? m_c64User : m_amberUser;
         if (u.isEmpty())
             st.remove(key);
         else
@@ -1323,10 +1335,11 @@ public:
     }
     QString crtFontFamily() const
     {
-        const QString &u = m_machine == 1 ? m_greenUser : m_machine == 2 ? m_appleUser : m_amberUser;
+        const QString &u = m_machine == 1 ? m_greenUser : m_machine == 2 ? m_c64User : m_amberUser;
         if (!u.isEmpty() && m_userFonts.contains(u))
             return u;
         return (m_machine == 0) ? s_crtFamily
+             : (m_machine == 2) ? s_c64Family
              : (m_machine == 3) ? s_whiteFamily : s_greenFamily; // 出厂回退
     }
 
@@ -4046,7 +4059,7 @@ private:
     QStringList m_userFonts;  // 字体文件夹族名（文件顺序）
     QString m_amberUser;      // 琥珀机器的手选字体（会话内，空 = 出厂）
     QString m_greenUser;      // 绿磷机器的手选字体（会话内，空 = 出厂）
-    QString m_appleUser;      // 苹果 II 的手选字体（会话内，空 = 出厂）
+    QString m_c64User;      // C64 的手选字体（会话内，空 = 出厂）
     QImage m_asciiImage;         // M3：字符画源图
     bool m_asciiActive = false;  // 字符画在场且未被手动编辑
     bool m_settingAscii = false; // 程序替换期间置位（抑制反激活）
@@ -4089,6 +4102,7 @@ private:
     static inline QString s_crtFamily;   // 出厂琥珀：Fusion Pixel（qrc）
     static inline QString s_greenFamily; // 出厂绿磷：VT323（qrc）
     static inline QString s_whiteFamily; // 出厂白磷：Fixedsys Excelsior（CC0，qrc）
+    static inline QString s_c64Family;  // 出厂 C64：Press Start 2P（OFL，qrc）
     QTimer m_crtSettleTimer;
     QTimer m_scrollSettle;  // 滚动停稳计时：结束后补全量快照
     bool m_scrolling = false;

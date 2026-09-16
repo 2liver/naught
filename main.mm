@@ -57,31 +57,13 @@ static int installNaught()
                         QStringLiteral("gui/%1/com.2liver.naught.agent").arg(getuid()) });
     QFile::remove(QDir::homePath()
                   + QStringLiteral("/Library/LaunchAgents/com.2liver.naught.agent.plist"));
-    // 2) 布署代理应用（与主应用并排）
-    const QString agentSrc = bundle + QStringLiteral("/Contents/Resources/naught-agent.app");
-    const QString agentDst = QFileInfo(bundle).dir().filePath(QStringLiteral("naught-agent.app"));
-    QDir(agentDst).removeRecursively();
-    if (!QDir().mkpath(agentDst + QStringLiteral("/Contents/MacOS"))) {
-        qWarning("naught install: cannot create %s", qPrintable(agentDst));
-        return 1;
-    }
-    const QStringList parts = {
-        QStringLiteral("/Contents/Info.plist"),
-        QStringLiteral("/Contents/MacOS/naught-agent"),
-    };
-    bool copied = true;
-    for (const QString &p : parts)
-        copied = copied && QFile::copy(agentSrc + p, agentDst + p);
-    if (!copied) {
-        qWarning("naught install: agent bundle copy failed (src %s)", qPrintable(agentSrc));
-        return 1;
-    }
-    QProcess::execute(QStringLiteral("codesign"),
-                      { QStringLiteral("--force"), QStringLiteral("--sign"),
-                        QStringLiteral("-"), agentDst });
-    // 3) 注册登录项（系统登录项列表；LSUIElement = 无 Dock 图标）
+    // 2) 清理旧版"并排"代理（迁移）
+    const QString agentOld = QFileInfo(bundle).dir().filePath(QStringLiteral("naught-agent.app"));
+    QDir(agentOld).removeRecursively();
+    // 3) 代理 = 嵌套在 Resources 内（不进启动台）；直接注册登录项
+    const QString agentPath = bundle + QStringLiteral("/Contents/Resources/naught-agent.app");
     CFURLRef agentUrl = CFURLCreateWithFileSystemPath(
-        nullptr, agentDst.toCFString(), kCFURLPOSIXPathStyle, true);
+        nullptr, agentPath.toCFString(), kCFURLPOSIXPathStyle, true);
     bool loginItemOk = false;
     if (agentUrl) {
         LSSharedFileListRef list = LSSharedFileListCreate(
@@ -105,10 +87,45 @@ static int installNaught()
     QProcess::execute(QStringLiteral("/System/Library/Frameworks/CoreServices.framework/"
                                      "Frameworks/LaunchServices.framework/Support/lsregister"),
                       { QStringLiteral("-f"), bundle });
-    LSOpenCFURLRef(CFURLCreateWithFileSystemPath(
-        nullptr, agentDst.toCFString(), kCFURLPOSIXPathStyle, true), nullptr);
+    CFURLRef launchUrl = CFURLCreateWithFileSystemPath(
+        nullptr, agentPath.toCFString(), kCFURLPOSIXPathStyle, true);
+    if (launchUrl) {
+        LSOpenCFURLRef(launchUrl, nullptr);
+        CFRelease(launchUrl);
+    }
     qInfo("naught install: login-item agent installed + app registered");
     return 0;
+}
+
+// 登录项是否已指向本代理（启动自检：缺失则静默补装——打包分发
+// 后首启即具备重生能力，无需手工跑安装程序）
+static bool naughtAgentLoginItemInstalled()
+{
+    const QString agentPath = QFileInfo(QDir(QCoreApplication::applicationDirPath())
+                                            .absoluteFilePath(QStringLiteral("../Resources/naught-agent.app")))
+                                   .canonicalFilePath();
+    bool found = false;
+    LSSharedFileListRef list = LSSharedFileListCreate(
+        nullptr, kLSSharedFileListSessionLoginItems, nullptr);
+    if (!list)
+        return false;
+    CFArrayRef snapshot = LSSharedFileListCopySnapshot(list, nullptr);
+    if (snapshot) {
+        for (CFIndex i = 0; i < CFArrayGetCount(snapshot) && !found; ++i) {
+            LSSharedFileListItemRef item =
+                (LSSharedFileListItemRef)CFArrayGetValueAtIndex(snapshot, i);
+            CFURLRef url = nullptr;
+            if (LSSharedFileListItemResolve(item, kLSSharedFileListNoUserInteraction,
+                                            &url, nullptr) == noErr && url) {
+                if (QUrl::fromCFURL(url).toLocalFile() == agentPath)
+                    found = true;
+                CFRelease(url);
+            }
+        }
+        CFRelease(snapshot);
+    }
+    CFRelease(list);
+    return found;
 }
 #endif // Q_OS_MACOS
 
@@ -273,6 +290,10 @@ int main(int argc, char **argv)
 #endif
     if (argc > 1 && QString::fromLocal8Bit(argv[1]) == QLatin1String("--selftest"))
         return Editor::selftest() ? 0 : 1;
+#ifdef Q_OS_MACOS
+    if (!naughtAgentLoginItemInstalled()) // 首启/代理丢失：静默补装（重生能力随包装分发）
+        installNaught();
+#endif
     if (argc > 1 && QString::fromLocal8Bit(argv[1]) == QLatin1String("--bench"))
         return benchmark() ? 0 : 1;
 
@@ -287,46 +308,44 @@ int main(int argc, char **argv)
     {
         QMenuBar *menuBar = new QMenuBar(nullptr);
         QMenu *fa = menuBar->addMenu(QStringLiteral("项"));
-        // ── 视图区：编/显/机器/画布 ──
-        QAction *bBian = fa->addAction(QStringLiteral("编"));
+        // ── 视图区（父级收纳）：编/显/图 ──
+        QMenu *mBian = fa->addMenu(QStringLiteral("编"));
+        QAction *bBian = mBian->addAction(QStringLiteral("编"));
         bBian->setShortcut(QKeySequence(QStringLiteral("Ctrl+B")));
         bBian->setCheckable(true);
-        QAction *bXian = fa->addAction(QStringLiteral("显"));
+        QAction *bEsc = mBian->addAction(QStringLiteral("Esc＝退出模式"));
+        bEsc->setEnabled(false);
+        QMenu *mXian = fa->addMenu(QStringLiteral("显"));
+        QAction *bXian = mXian->addAction(QStringLiteral("显"));
         bXian->setShortcut(QKeySequence(QStringLiteral("Ctrl+T")));
         bXian->setCheckable(true);
-        QAction *bGreen = fa->addAction(QStringLiteral("换机"));
+        QAction *bGreen = mXian->addAction(QStringLiteral("换机"));
         bGreen->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+M")));
-        QAction *bLock = fa->addAction(QStringLiteral("追随视角锁定"));
+        QAction *bLock = mXian->addAction(QStringLiteral("追随视角锁定"));
         bLock->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+T")));
         bLock->setCheckable(true);
         bLock->setChecked(true);
-        QAction *bDeclare = fa->addAction(QStringLiteral("立为图"));
+        QMenu *mTu = fa->addMenu(QStringLiteral("图"));
+        QAction *bDeclare = mTu->addAction(QStringLiteral("立为图"));
         bDeclare->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+A")));
         bDeclare->setCheckable(true);
-        QAction *bAscii = fa->addAction(QStringLiteral("拖入图片 → 字符画"));
+        QAction *bAscii = mTu->addAction(QStringLiteral("拖入图片 → 字符画"));
         bAscii->setEnabled(false); // 自释性提示：隐藏功能，README 不写
-        QAction *bEsc = fa->addAction(QStringLiteral("Esc＝退出模式"));
-        bEsc->setEnabled(false);
-        QAction *bSuicide = fa->addAction(QStringLiteral("自杀"));
-        bSuicide->setShortcut(QKeySequence(QStringLiteral("Ctrl+Meta+N")));
         fa->addSeparator();
-        // ── 格式化区：言/隔/居中/格式库 ──
+        // ── 格式化区：言/隔/文本处理 ──
         QAction *bYan = fa->addAction(QStringLiteral("言"));
         bYan->setShortcut(QKeySequence(QStringLiteral("Ctrl+L")));
         QAction *bGe = fa->addAction(QStringLiteral("隔"));
         bGe->setShortcut(QKeySequence(QStringLiteral("Ctrl+F")));
-        QAction *bCenter = fa->addAction(QStringLiteral("居中"));
-        bCenter->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+C")));
-        // 格式库（自 AsciiTools 移植）：按功能分区——框/压行/路径树
-        QMenu *mFmt = fa->addMenu(QStringLiteral("格式"));
+        QMenu *mFmt = fa->addMenu(QStringLiteral("文本处理"));
         QAction *bBoxSingle = mFmt->addAction(QStringLiteral("单线框"));
-        bBoxSingle->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+1")));
+        bBoxSingle->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+G")));
         QAction *bBoxDouble = mFmt->addAction(QStringLiteral("双线框"));
-        bBoxDouble->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+2")));
+        bBoxDouble->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+H")));
         QAction *bBoxRound = mFmt->addAction(QStringLiteral("圆角框"));
-        bBoxRound->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+3")));
+        bBoxRound->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+U")));
         QAction *bBoxBold = mFmt->addAction(QStringLiteral("粗线框"));
-        bBoxBold->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+4")));
+        bBoxBold->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+V")));
         mFmt->addSeparator();
         QAction *bJoin = mFmt->addAction(QStringLiteral("压成一行"));
         bJoin->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+J")));
@@ -337,6 +356,9 @@ int main(int argc, char **argv)
         bPathsToTree->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+P")));
         QAction *bTreeToPaths = mFmt->addAction(QStringLiteral("树 → 路径列表"));
         bTreeToPaths->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+R")));
+        mFmt->addSeparator();
+        QAction *bCenter = mFmt->addAction(QStringLiteral("居中"));
+        bCenter->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+C")));
         fa->addSeparator();
         // ── 工具区：摹/空、阴/阳、涂/擦/消 ──
         QAction *bMo = fa->addAction(QStringLiteral("摹"));
@@ -362,13 +384,15 @@ int main(int argc, char **argv)
         QAction *bHold = fa->addAction(QStringLiteral("按住 Shift 拖动＝按住笔刷"));
         bHold->setEnabled(false);
         fa->addSeparator();
-        // ── 字号/笔刷区：不做成真键等效（系统接管会毁掉按住加速），提示内嵌标签 ──
-        QAction *bZoomIn = fa->addAction(QStringLiteral("字号放大 ⌘="));
-        QAction *bZoomOut = fa->addAction(QStringLiteral("字号缩小 ⌘-"));
-        QAction *bZoom0 = fa->addAction(QStringLiteral("字号复位 ⌘0"));
-        QAction *bBrushIn = fa->addAction(QStringLiteral("笔刷加粗 ⇧⌘="));
-        QAction *bBrushOut = fa->addAction(QStringLiteral("笔刷变细 ⇧⌘-"));
-        QAction *bBrush0 = fa->addAction(QStringLiteral("笔刷复位 ⇧⌘0"));
+        // ── 字符缩放/笔刷缩放（不做成真键等效：系统接管会毁掉按住加速）──
+        QMenu *mCharZoom = fa->addMenu(QStringLiteral("字符缩放"));
+        QAction *bZoomIn = mCharZoom->addAction(QStringLiteral("字号放大 ⌘="));
+        QAction *bZoomOut = mCharZoom->addAction(QStringLiteral("字号缩小 ⌘-"));
+        QAction *bZoom0 = mCharZoom->addAction(QStringLiteral("字号复位 ⌘0"));
+        QMenu *mBrushZoom = fa->addMenu(QStringLiteral("笔刷缩放"));
+        QAction *bBrushIn = mBrushZoom->addAction(QStringLiteral("笔刷加粗 ⇧⌘="));
+        QAction *bBrushOut = mBrushZoom->addAction(QStringLiteral("笔刷变细 ⇧⌘-"));
+        QAction *bBrush0 = mBrushZoom->addAction(QStringLiteral("笔刷复位 ⇧⌘0"));
         fa->addSeparator();
         // ── 字体区（子菜单）──
         QMenu *mFont = fa->addMenu(QStringLiteral("字体"));
@@ -383,6 +407,12 @@ int main(int argc, char **argv)
         bUndo->setShortcut(QKeySequence(QStringLiteral("Ctrl+Z")));
         QAction *bRedo = fa->addAction(QStringLiteral("重做"));
         bRedo->setShortcut(QKeySequence(QStringLiteral("Ctrl+Y")));
+        fa->addSeparator();
+        // ── 生死区：自杀 = 动作；重生 = 登录项代理的全局键（提示）──
+        QAction *bSuicide = fa->addAction(QStringLiteral("自杀"));
+        bSuicide->setShortcut(QKeySequence(QStringLiteral("Ctrl+Meta+N")));
+        QAction *bRebirth = fa->addAction(QStringLiteral("重生 ⌃⇧⌘N"));
+        bRebirth->setEnabled(false); // 全局热键由 naught-agent 登录项持有
         QObject::connect(bSuicide, &QAction::triggered, &editor, [&editor] { editor.commitSuicide(); });
         QObject::connect(bMo, &QAction::triggered, &editor, [&editor] { editor.mo(); });
         QObject::connect(bKong, &QAction::triggered, &editor, [&editor] { editor.kong(); });

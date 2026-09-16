@@ -19,8 +19,11 @@ uint texel(uint x, uint y)
 
 vec3 sampleAt(vec2 uv)
 {
+    uv = clamp(uv, 0.0, 1.0);
     uint x = uint(uv.x * ubuf.texSize.x);
     uint y = uint((1.0 - uv.y) * ubuf.texSize.y); // Metal 的 Y 翻转：屏幕顶=缓冲顶
+    x = min(x, uint(ubuf.texSize.x) - 1u); // 边缘钳位：uv=1.0 会越界一行
+    y = min(y, uint(ubuf.texSize.y) - 1u);
     uint v = texel(x, y);
     // RGBA8888 在 GPU 上按小端解释：R 在低字节
     return vec3(float(v & 255u), float((v >> 8) & 255u), float((v >> 16) & 255u)) / 255.0;

@@ -60,10 +60,12 @@ int main(int argc, char **argv)
             return 0;
         }
 
-        // 主应用 = 并排的 naught.app
+        // 主应用 = 上溯三级（代理嵌套于 naught.app/Contents/Resources/
+        // naught-agent.app——嵌套即不进启动台，分发的"幽灵"代理）
         NSString *agentBundle = [[NSBundle mainBundle] bundlePath];
-        NSString *appDir = [agentBundle stringByDeletingLastPathComponent];
-        NSString *mainApp = [appDir stringByAppendingPathComponent:@"naught.app"];
+        NSString *mainApp = [[[agentBundle stringByDeletingLastPathComponent]
+                              stringByDeletingLastPathComponent]
+                             stringByDeletingLastPathComponent];
         NSString *keep = mainApp; // 回调数据（进程存续期持有）
 
         // ⌃⇧⌘N
