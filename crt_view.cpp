@@ -3,6 +3,7 @@
 
 #include "crt_source.h"
 
+#include <QDir>
 #include <QFile>
 #include <QPainter>
 #include <QResizeEvent>
@@ -13,13 +14,15 @@
 static void shaderLog(const QString &s)
 {
     // 轮转：日志超 64KB 截断重来（防无限增长）
-    QFile f(QStringLiteral("/tmp/naught-crt-shader.log"));
+    QFile f(QDir::tempPath() + QStringLiteral("/naught-crt-shader.log"));
     if (f.size() > 65536)
         f.open(QIODevice::WriteOnly | QIODevice::Truncate);
     else
         f.open(QIODevice::Append);
-    f.write(s.toUtf8() + "\n");
-    f.close();
+    if (f.isOpen()) {
+        f.write(s.toUtf8() + "\n");
+        f.close();
+    }
 }
 
 static QShader loadShader(const QString &name)
