@@ -93,6 +93,7 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
           NAUGHT_RHI_SKIP: vulkan
+          QT_LOGGING_TO_CONSOLE: "1"
         run: ./build/Release/naught.exe --selftest > selftest.log 2>&1 || { rc=$?; echo "::error::SELFTEST FAILED rc=$rc"; grep -iE "selftest FAIL" selftest.log | tail -2 | awk '{print "::error::" $0}'; tail -6 selftest.log | awk '{print "::warning::" $0}'; tail -3 /tmp/naught-crt-shader.log 2>/dev/null | awk '{print "::error::shader-log:" $0}'; exit $rc; }
 
       - name: Package macOS (zip + dmg)

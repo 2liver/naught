@@ -58,4 +58,4 @@ jobs:
       - name: Selftest (Windows)
         if: runner.os == 'Windows'
         shell: bash
-        run: QT_QPA_PLATFORM=offscreen NAUGHT_RHI_SKIP=vulkan ./build/Release/naught.exe --selftest > selftest.log 2>&1 || { rc=$?; echo "::error::SELFTEST FAILED rc=$rc"; grep -iE "selftest FAIL" selftest.log | tail -2 | awk '{print "::error::" $0}'; tail -3 /tmp/naught-crt-shader.log 2>/dev/null | awk '{print "::error::shader-log:" $0}'; tail -6 selftest.log | awk '{print "::warning::" $0}'; exit $rc; }
+        run: QT_QPA_PLATFORM=offscreen NAUGHT_RHI_SKIP=vulkan QT_LOGGING_TO_CONSOLE=1 ./build/Release/naught.exe --selftest > selftest.log 2>&1 || { rc=$?; echo "::error::SELFTEST FAILED rc=$rc"; grep -iE "selftest FAIL" selftest.log | tail -2 | awk '{print "::error::" $0}'; tail -3 /tmp/naught-crt-shader.log 2>/dev/null | awk '{print "::error::shader-log:" $0}'; tail -6 selftest.log | awk '{print "::warning::" $0}'; exit $rc; }

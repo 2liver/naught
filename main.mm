@@ -395,6 +395,10 @@ static bool benchmark()
 
 int main(int argc, char **argv)
 {
+    // 崩溃定位标记（仅自检模式）：MAIN-ENTER 与 MAIN-SELFTEST 之间 =
+    // QApplication 初始化段；缺 MAIN-ENTER = 进入 main 前已崩
+    if (argc > 1 && QString::fromLocal8Bit(argv[1]) == QLatin1String("--selftest"))
+        qInfo("NAUGHT-MAIN-ENTER");
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("無"));
     app.setApplicationDisplayName(QStringLiteral("無"));
