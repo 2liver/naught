@@ -93,6 +93,7 @@ void CrtView::resizeEvent(QResizeEvent *)
 void CrtView::paintEvent(QPaintEvent *)
 {
     QPainter p(this);
+    p.setRenderHint(QPainter::SmoothPixmapTransform); // 滚动期半分辨率回读 → 平滑放大
     p.fillRect(rect(), QColor(12, 9, 3));
     if (!m_shown.isNull()) {
         p.drawImage(rect(), m_shown);
@@ -236,7 +237,7 @@ void CrtView::ensureRhi()
     m_texSize = QSize(qMax(1, int(width() * dpr)), qMax(1, int(height() * dpr)));
     m_forceNow = true;
     m_pending = QImage(m_texSize, QImage::Format_ARGB32);
-    m_pending.setDevicePixelRatio(dpr);
+    m_pending.setDevicePixelRatio(dpr * m_renderScale);
     m_pending.fill(qRgb(12, 9, 3));
 }
 
@@ -270,8 +271,12 @@ void CrtView::renderFrame()
     m_renderDirty = false;
     m_ambientClock.restart();
     const CrtConfig cfg = m_source->config(); // 每帧配置值快照
-    const QSize want(qMax(1, int(width() * devicePixelRatioF())),
-                     qMax(1, int(height() * devicePixelRatioF())));
+    // 滚动期半分辨率：运动掩蔽下 2×2 下采样不可感知，回读数据量 ÷4、
+    // GPU 填充 ÷4；掩膜/扫描线锚定的屏幕栅格随目标减半（滚动中不可见），
+    // 停稳后 settle 标全量、回全分辨率重拍自愈
+    m_renderScale = cfg.scrolling ? 0.5 : 1.0;
+    const QSize want(qMax(1, int(width() * devicePixelRatioF() * m_renderScale)),
+                     qMax(1, int(height() * devicePixelRatioF() * m_renderScale)));
     if (want != m_texSize) {
         releaseGpu(); // 帧边界安全重建（此刻无在途回读）
         ensureRhi();
@@ -285,21 +290,28 @@ void CrtView::renderFrame()
     // 由节流决定真实上传节奏——光标闪烁/足迹圆点/滚动条淡出都在其中
     const bool throttled = m_sinceRefresh.isValid() && m_sinceRefresh.elapsed() < 80;
     if (m_forceNow || !throttled) {
-        // P3：增量快照——打字只重画脏区（复用上一帧为底）；无脏区信息
-        // （环境拍/首次）走全量兜底。滚动/缩放/换机已标全量
-        const CrtSnapshotSource::SnapDirty snap = m_source->consumeSnapshotDirty();
-        if (snap.full || m_pending.isNull() || m_pending.size() != m_texSize) {
-            m_pending = QImage(m_texSize, QImage::Format_ARGB32);
-            m_pending.setDevicePixelRatio(devicePixelRatioF());
-            m_pending.fill(cfg.palette->bg); // 随调色板（M2）
-            m_source->paintTextSnapshot(m_pending);
-        } else if (!snap.rect.isEmpty()) {
-            m_source->paintTextSnapshotRegion(m_pending, snap.rect);
-        } else {
-            m_pending = QImage(m_texSize, QImage::Format_ARGB32);
-            m_pending.setDevicePixelRatio(devicePixelRatioF());
-            m_pending.fill(cfg.palette->bg);
-            m_source->paintTextSnapshot(m_pending);
+        // 环境拍（无脏）复用上一拍快照：文本不重拍——像素不变的全量
+        // 重拍纯属浪费（QWidget::render 全屏是最贵的 CPU 段）；余晖/
+        // 辉光照常推进（幽灵衰减不冻结），上传/GPU/回读照跑
+        const bool needRepaint = dirty || m_pending.isNull()
+            || m_pending.size() != m_texSize;
+        if (needRepaint) {
+            // P3：增量快照——打字只重画脏区（复用上一帧为底）；无脏区信息
+            // （首次）走全量兜底。滚动/缩放/换机已标全量
+            const CrtSnapshotSource::SnapDirty snap = m_source->consumeSnapshotDirty();
+            if (snap.full || m_pending.isNull() || m_pending.size() != m_texSize) {
+                m_pending = QImage(m_texSize, QImage::Format_ARGB32);
+                m_pending.setDevicePixelRatio(devicePixelRatioF() * m_renderScale);
+                m_pending.fill(cfg.palette->bg); // 随调色板（M2）
+                m_source->paintTextSnapshot(m_pending);
+            } else if (!snap.rect.isEmpty()) {
+                m_source->paintTextSnapshotRegion(m_pending, snap.rect);
+            } else {
+                m_pending = QImage(m_texSize, QImage::Format_ARGB32);
+                m_pending.setDevicePixelRatio(devicePixelRatioF() * m_renderScale);
+                m_pending.fill(cfg.palette->bg);
+                m_source->paintTextSnapshot(m_pending);
+            }
         }
         // 滚动期间跳过余晖+辉光重活（每 80ms 一帧的全屏逐像素 + 模糊
         // 是滚动卡顿大户）；停稳后 settle 标记全量重拍，痕迹自愈
@@ -308,7 +320,10 @@ void CrtView::renderFrame()
                                      *cfg.palette); // 余晖按机型实测标定
             m_prev2 = m_prev; // 上上帧（浅拷贝链：写入时分离）
             m_prev = m_pending; // 上一帧（浅拷贝）
-            Crt::phosphorBloom(m_pending, cfg.palette->glowAlpha); // 二期三件套：真高斯辉光（随调色板）
+            // 辉光降频：环境拍输入除幽灵衰减外不变，每 4 拍（480ms）
+            // 重烘一次即可——幽灵衰减极慢，视觉不可分辨；脏帧照烘
+            if (dirty || (m_ambientCount++ % 4) == 0)
+                Crt::phosphorBloom(m_pending, cfg.palette->glowAlpha); // 二期三件套：真高斯辉光（随调色板）
         }
         // 入场暖机：因子由 shader 按 timeInfo.y 计算（CPU 逐像素循环
         // 曾引发帧循环冻结，已整体移入 GPU）

@@ -77,5 +77,7 @@ private:
     QElapsedTimer m_warmClock; // 入场暖机（showEvent 起拍）
     QElapsedTimer m_readbackClock; // 回读看门狗（超时强制复位）
     QSize m_texSize;
+    qreal m_renderScale = 1.0; // 滚动期半分辨率（运动掩蔽），停稳回全
+    int m_ambientCount = 0;    // 环境拍计数：辉光降频（每 4 拍重烘）
     QTimer m_frameTimer;
 };
