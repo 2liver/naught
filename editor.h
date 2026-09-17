@@ -1633,7 +1633,9 @@ public:
     // 自检（CI/本地验证）：确认 O(1) 缩放、光标最右缘落点、轨道点击转落点均正常。
     static bool selftest()
     {
+        qInfo("SELFTEST-ENTER");
         Editor e;
+        qInfo("SELFTEST-EDITOR-CONSTRUCTED");
         e.setPlainText(QStringLiteral("無"));
         const QTextBlock block = e.document()->firstBlock();
         const qreal h1 = e.document()->documentLayout()->blockBoundingRect(block).height();

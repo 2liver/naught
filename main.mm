@@ -405,8 +405,10 @@ int main(int argc, char **argv)
     if (argc > 1 && QString::fromLocal8Bit(argv[1]) == QLatin1String("--install"))
         return installNaught(); // 安装程序：布署登录项 + 注册应用
 #endif
-    if (argc > 1 && QString::fromLocal8Bit(argv[1]) == QLatin1String("--selftest"))
+    if (argc > 1 && QString::fromLocal8Bit(argv[1]) == QLatin1String("--selftest")) {
+        qInfo("NAUGHT-MAIN-SELFTEST");
         return Editor::selftest() ? 0 : 1;
+    }
 #ifdef Q_OS_MACOS
     if (!naughtAgentLoginItemInstalled()) // 首启/代理丢失：静默补装（重生能力随包装分发）
         installNaught();
