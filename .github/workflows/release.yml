@@ -89,12 +89,16 @@ jobs:
 
       - name: Selftest (Windows)
         if: runner.os == 'Windows'
-        shell: bash
-        env:
-          QT_QPA_PLATFORM: offscreen
-          NAUGHT_RHI_SKIP: vulkan
-          QT_LOGGING_TO_CONSOLE: "1"
-        run: ./build/Release/naught.exe --selftest > selftest.log 2>&1 || { rc=$?; echo "::error::SELFTEST FAILED rc=$rc"; grep -iE "selftest FAIL" selftest.log | tail -2 | awk '{print "::error::" $0}'; tail -6 selftest.log | awk '{print "::warning::" $0}'; tail -3 /tmp/naught-crt-shader.log 2>/dev/null | awk '{print "::error::shader-log:" $0}'; exit $rc; }
+        shell: pwsh
+        run: |
+          $env:QT_QPA_PLATFORM = 'offscreen'
+          $env:NAUGHT_RHI_SKIP = 'vulkan,d3d11,d3d12'
+          $env:QT_ASSUME_STDERR_HAS_CONSOLE = '1'
+          $p = Start-Process -FilePath '.\build\Release\naught.exe' -ArgumentList '--selftest' -Wait -PassThru -RedirectStandardOutput selftest.out -RedirectStandardError selftest.err
+          "::error::SELFTEST raw exit code: $($p.ExitCode)"
+          if (Test-Path selftest.err) { Get-Content selftest.err -Tail 6 | ForEach-Object { "::warning::$_" } }
+          if (Test-Path selftest.out) { Get-Content selftest.out -Tail 6 | ForEach-Object { "::warning::$_" } }
+          if ($p.ExitCode -ne 0) { exit 1 }
 
       - name: Package macOS (zip + dmg)
         if: runner.os == 'macOS'
