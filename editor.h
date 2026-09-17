@@ -2410,6 +2410,10 @@ public:
                 QTimer::singleShot(700, &loop, &QEventLoop::quit);
                 loop.exec();
             }
+            // 滚动归零 + 消化排队的锚定缩放回调：断言只测画面几何，
+            // 不测测试序列的滚动残留（此前 topLit 在 32/8/0 间漂移）
+            e.verticalScrollBar()->setValue(0);
+            QApplication::processEvents();
             // 无可用 RHI 后端（无 GPU 的无头机器 / 所有后端被环境跳过）：
             // GPU 相关断言整体豁免——渲染层优雅降级为无画面，CPU 检查照跑
             const bool gpuOk = e.m_crtView && e.m_crtView->pipelineUsable();
