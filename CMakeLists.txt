@@ -18,6 +18,7 @@ qt_add_executable(naught WIN32 MACOSX_BUNDLE
     crt_view.h
     editor.h
     snapshot_compositor.cpp
+    selftest.cpp
     snapshot_compositor.h
     line_number_area.h
     zen_scroll_bar.h
