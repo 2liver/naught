@@ -17,6 +17,7 @@ struct CrtConfig {
     const Crt::Palette *palette = nullptr; // 调色板（静态预设，指针稳定）
     int machine = 0;                      // 0 琥珀 / 1 绿磷 / 2 C64 / 3 白磷
     bool scrolling = false;               // 滚动中：快照降载信号
+    bool viewMoving = false;              // 鼠标移动中：余晖幽灵加速衰减
     bool viewLocked = true;               // 追随视角锁定（M1）
     bool screenEntity = false;            // 屏幕实体（曲率/边框；= 解锁态）
     QPointF lastMouse;                    // 人眼代理（反光视差）

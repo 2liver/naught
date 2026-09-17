@@ -494,6 +494,9 @@ void CrtView::renderFrame()
                           histPrimed ? float(pal.persist2[0]) : 0.0f, 1.0f };
     // 滚动期跳辉光（运动掩蔽下不可感知；旧 CPU 版滚动亦跳过 bloom）
     const bool skipGlow = cfg.scrolling;
+    // 视图移动期：余晖幽灵 4 倍速衰减——视差把整段文字位移时，
+    // 旧位置的幽灵快速退场，不留下用户报的"倒影"双影
+    const float ghostDt = cfg.viewMoving ? m_dtMs * 4.0f : m_dtMs;
     const float ub[48] = { float(view.x()), float(view.y()),
                            float(m_texSize.width()), float(m_texSize.height()),
                            float(m_clock.elapsed() / 1000.0),
@@ -507,7 +510,7 @@ void CrtView::renderFrame()
                            k2[0], k2[1], k2[2], 1.0f,
                            skipGlow ? 0.0f : float(pal.glowAlpha),
                            1.0f / float(m_glowSize.width()), 1.0f / float(m_glowSize.height()),
-                           m_dtMs };
+                           ghostDt };
     u->updateDynamicBuffer(m_ubuf, 0, sizeof(ub), ub);
 
     const int cur = m_histFrame % 3;

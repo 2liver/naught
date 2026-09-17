@@ -82,6 +82,7 @@ public:
         c.viewLocked = m_viewLock;
         c.screenEntity = m_crt && !m_viewLock;
         c.lastMouse = m_lastMouse;
+        c.viewMoving = m_crt && m_mouseMoveClock.isValid() && m_mouseMoveClock.elapsed() < 150;
         return c;
     }
     Editor()
@@ -1601,6 +1602,7 @@ public:
 
     void zoom(int delta)
     {
+        m_crtGridActive = false; // 手动缩放退出网格态
         applyAnchoredZoom(m_size + delta); // 缩放字符（字号）——与无图时一致
     }
 
@@ -1617,7 +1619,8 @@ public:
         }
         if (m_crt) {
             // 显·Cmd+0 = 机器原生网格（原实验·字符网格并入）：琥珀 80 列 /
-            // 绿磷 64 列——真机的"原生分辨率"
+            // 绿磷 64 列——真机的"原生分辨率"。网格态跟随窗口宽度
+            // （resize 重拟合）
             const int cols = (m_machine == 0) ? 80 : (m_machine == 1) ? 64 : 40;
             qreal sz = qreal(viewport()->width()) / cols
                        / (m_machine == 0 ? 1.0 : 1.25);
@@ -1625,6 +1628,7 @@ public:
                 sz = qMin(sz, 16.0); // C64：真机字符 ≈ 物理 4mm——大窗口不无限放大
             m_size = qMax(6.0, sz);
             applyAnchoredZoom(m_size);
+            m_crtGridActive = true;
             return;
         }
         applyAnchoredZoom(m_baseSize);
@@ -2359,6 +2363,24 @@ public:
                     return false;
                 }
             }
+            // 网格态跟随窗口：resize 后字号按新宽度重拟合（窗口化/全屏
+            // 同一公式，不再取决于按键瞬间的旧宽度——用户报窗口化字号
+            // 反超全屏的根修）
+            {
+                const int w0 = e.width();
+                e.zoomReset();
+                const QFont gf0 = e.document()->defaultFont();
+                e.resize(w0 + 160, e.height());
+                QApplication::processEvents();
+                const QFont gf1 = e.document()->defaultFont();
+                const int want0 = qMax(6, w0 / 80);
+                const int want1 = qMax(6, (w0 + 160) / 80);
+                if (qAbs(gf0.pixelSize() - want0) > 1 || qAbs(gf1.pixelSize() - want1) > 1) {
+                    qWarning("selftest FAIL: crt grid not following window (%d->%d, want %d->%d)",
+                             gf0.pixelSize(), gf1.pixelSize(), want0, want1);
+                    return false;
+                }
+            }
             e.toggleViewLock(); // 解锁 → 屏幕实体生效
             if (!e.screenEntityOn()) {
                 qWarning("selftest FAIL: screen entity not tied to unlocked view");
@@ -2474,6 +2496,63 @@ public:
                 }
             } else {
                 qWarning("selftest SKIP: no usable RHI backend — CRT GPU render checks skipped");
+            }
+            // 鼠标移动复现（用户报：动鼠标出倒影）——解锁追随视角后
+            // 注入两段鼠标位移，各捕一帧落盘对比
+            {
+                auto waitReadback = [&] {
+                    for (int guard = 0; guard < 200 && e.m_crtView && !e.m_crtView->readbackIdle(); ++guard) {
+                        QEventLoop settle;
+                        QTimer::singleShot(20, &settle, &QEventLoop::quit);
+                        settle.exec();
+                    }
+                };
+
+                e.toggleViewLock(); // 解锁：观察者跟随鼠标
+                e.m_lastMouse = QPointF(10, 10);
+                e.m_crtView->markDirty(true);
+                QApplication::processEvents();
+
+                // 连续 20 步鼠标位移（真实鼠标的连续路径）
+                const QPointF endP(qMax(10.0, e.width() * 0.8), qMax(10.0, e.height() * 0.7));
+                for (int step = 1; step <= 20; ++step) {
+                    const qreal f = qreal(step) / 20.0;
+                    e.m_lastMouse = QPointF(10 + (endP.x() - 10) * f, 10 + (endP.y() - 10) * f);
+                    e.m_mouseMoveClock.start(); // 合成路径：与真实 mouseMoveEvent 同效
+                    e.m_crtView->markDirty(true);
+                    QApplication::processEvents();
+
+                }
+                waitReadback();
+                // 回归断言：停稳后不得残留旧位置的亮幽灵带（倒影）
+                {
+                    QImage chk(e.size(), QImage::Format_ARGB32);
+                    chk.fill(Qt::white);
+                    e.render(&chk);
+                    int bands = 0;
+                    int inBand = 0;
+                    for (int y = 0; y < chk.height(); ++y) {
+                        int rowLit = 0;
+                        for (int x = 2; x < chk.width() - 30; ++x) {
+                            const QRgb px = chk.pixel(x, y);
+                            if (qRed(px) + qGreen(px) > 200 && qBlue(px) < 100)
+                                ++rowLit;
+                        }
+                        if (rowLit > 5) {
+                            if (inBand == 0)
+                                ++bands;
+                            inBand = rowLit;
+                        } else {
+                            inBand = 0;
+                        }
+                    }
+                    if (bands > 1) {
+                        qWarning("selftest FAIL: ghost band after mouse move (bands=%d) — 倒影回归",
+                                 bands);
+                        return false;
+                    }
+                }
+                e.toggleViewLock(); // 恢复锁定
             }
             // 快照几何：文字在顶部第一行；此前的涂擦测试留下两个墨水圆点，
             // 必须同样出现在合成快照里（墨水进光栅 = 显模式下涂/擦可用的回归闸）
@@ -3560,7 +3639,11 @@ protected:
             }
             if (event->type() == QEvent::MouseMove) {
                 const auto *me = static_cast<QMouseEvent *>(event);
+                const QPointF prev = m_lastMouse;
                 m_lastMouse = posOf(me);
+                // 视图移动追踪：位移 > 3px 视为移动（幽灵加速衰减的触发）
+                if ((m_lastMouse - prev).manhattanLength() > 3.0)
+                    m_mouseMoveClock.start();
                 if (m_mode == Mode::Draw || m_mode == Mode::Erase) {
                     m_canvas->setFootprint(true, m_lastMouse, m_mode == Mode::Erase);
                     const bool held = (me->buttons() & Qt::LeftButton)
@@ -3844,6 +3927,12 @@ private:
         updateLineNumberArea();
         if (m_crtView)
             m_crtView->syncGeometry(); // 整面覆盖随窗口缩放
+        // 显·机器原生网格态：字号跟随窗口宽度（窗口化/全屏同一公式，
+        // 不再取决于按键瞬间的旧宽度）
+        if (m_crt && m_crtGridActive) {
+            m_crtGridActive = false; // 防递归（zoomReset 触发的 resize）
+            zoomReset();
+        }
     }
 
     void updateLineNumberArea()
@@ -4221,6 +4310,8 @@ private:
     QTimer m_crtSettleTimer;
     QTimer m_scrollSettle;  // 滚动停稳计时：结束后补全量快照
     bool m_scrolling = false;
+    bool m_crtGridActive = false; // 显·机器原生网格态：resize 重拟合
+    QElapsedTimer m_mouseMoveClock; // 鼠标移动时钟：视图移动期幽灵加速衰减
     SnapshotCompositor m_compositor; // 快照合成器（全量/增量/脏区）
     QRect m_snapDirty;          // P3：增量快照脏区（编辑器坐标）
     bool m_snapFullDirty = true; // 全量标志（滚动/缩放/换机/首次）
