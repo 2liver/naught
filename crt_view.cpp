@@ -579,7 +579,7 @@ void CrtView::renderFrame()
             if (!img.isNull() && !rb->data.isEmpty())
                 memcpy(img.bits(), rb->data.constData(),
                        qMin(size_t(img.sizeInBytes()), size_t(rb->data.size())));
-            img = img.mirrored(false, true); // 回读行序自底向上：垂直镜像归位
+
 
             img.setDevicePixelRatio(devicePixelRatioF()); // 物理像素：1:1 落屏
             m_shown = std::move(img);
