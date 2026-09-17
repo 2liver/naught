@@ -9,8 +9,28 @@ permissions:
   contents: write
 
 jobs:
+  # 门禁：只有指向 main 尖端的 tag 才走全量发布管线。历史补打的 tag
+  # （版本考古）触发即跳过——不浪费三平台构建，也不刷旧版 Release。
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.check.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch main tip
+        run: git fetch origin main --depth 1
+      - id: check
+        run: |
+          if [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
     name: ${{ matrix.os }}
+    needs: gate
+    if: needs.gate.outputs.publish == 'true'
     strategy:
       fail-fast: false
       matrix:
