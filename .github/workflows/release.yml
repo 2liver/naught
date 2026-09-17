@@ -94,6 +94,8 @@ jobs:
           $env:QT_QPA_PLATFORM = 'offscreen'
           $env:NAUGHT_RHI_SKIP = 'vulkan,d3d11,d3d12,gles2'
           $env:QT_ASSUME_STDERR_HAS_CONSOLE = '1'
+          # KF6 从源码构建安装在 RUNNER_TEMP——selftest 加载 KF6SyntaxHighlighting.dll 需上 PATH
+          $env:PATH = "$env:RUNNER_TEMP\kf6\bin;$env:PATH"
           $p = Start-Process -FilePath '.\build\Release\naught.exe' -ArgumentList '--selftest' -Wait -PassThru -RedirectStandardOutput selftest.out -RedirectStandardError selftest.err
           "::error::SELFTEST raw exit code: $($p.ExitCode)"
           if (Test-Path selftest.err) { Get-Content selftest.err -Tail 6 | ForEach-Object { "::warning::$_" } }
