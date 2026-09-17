@@ -1644,6 +1644,21 @@ public:
         applyAnchoredZoom(size);
     }
 
+    // CRT 原生网格的单一公式来源：列数（琥珀 80 / 绿磷 64 / C64·IBM 40）
+    // 与窗口宽度 → m_size（activeFont 再乘 1.25 → 像素）。自检断言
+    // 同源调用，不再各自推演（旧版三处重复公式曾各自漂移）。
+    qreal crtGridSize() const
+    {
+        const int cols = (m_machine == 0) ? 80 : (m_machine == 1) ? 64 : 40;
+        return qMax(6.0, qreal(viewport()->width()) / cols
+                         / (m_machine == 0 ? 1.0 : 1.25));
+    }
+    // 网格像素字号（activeFont 之后）——自检断言口径
+    int crtGridPixelSize() const
+    {
+        return qMax(6, qRound(crtGridSize() * (m_machine == 0 ? 1.0 : 1.25)));
+    }
+
     void zoomReset()
     {
         if (m_asciiActive) {
@@ -1652,16 +1667,13 @@ public:
         }
         if (m_crt) {
             // 显·Cmd+0 = 机器原生网格（原实验·字符网格并入）：琥珀 80 列 /
-            // 绿磷 64 列——真机的"原生分辨率"。网格态跟随窗口宽度
-            // （resize 重拟合）
-            const int cols = (m_machine == 0) ? 80 : (m_machine == 1) ? 64 : 40;
-            qreal sz = qreal(viewport()->width()) / cols
-                       / (m_machine == 0 ? 1.0 : 1.25);
-            // 无封顶（旧版 C64 封顶 16 → 像素 20px）：封顶让窗口 ≥800px 时
-            // 与全屏字号相等，违反"窗口化永远小于全屏"（用户明令：窗口
-            // 模式按全屏比例缩小对齐，最起码永远更小）。纯 40 列网格，
-            // 字号严格 ∝ 宽度——窗口永远小于更宽的全屏。
-            m_size = qMax(6.0, sz);
+            // 绿磷 64 列 / C64·IBM 40 列——真机的"原生分辨率"。网格态
+            // 跟随窗口宽度（resize 重拟合）。无封顶（旧版 C64 封顶 16 →
+            // 像素 20px）：封顶让窗口 ≥800px 时与全屏字号相等，违反
+            // "窗口化永远小于全屏"（用户明令：窗口模式按全屏比例缩小
+            // 对齐，最起码永远更小）。纯列数网格，字号严格 ∝ 宽度。
+            // 公式单一来源：crtGridPixelSize()（自检同源，不再重复推演）
+            m_size = crtGridSize();
             applyAnchoredZoom(m_size);
             m_crtGridActive = true;
             return;

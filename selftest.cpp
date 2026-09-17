@@ -522,6 +522,55 @@ bool Editor::selftest()
             e.clearInk();
             QApplication::processEvents();
         }
+        // 擦除自交笔迹后空心保留（用户报"笔刷把颜色填充到空心区域"
+        // 的确凿复现：擦 ∞ 交叉点 → 减法的外环碎片单独填充会把两瓣
+        // 填实。根修 = 洞环并回容器（canvas.h splitSubpaths），本闸锁定）
+        {
+            e.toggleMode(Editor::Mode::Draw);
+            QWidget *vp = e.viewport();
+            const QPointF xc(vp->width() / 2.0, vp->height() / 2.0);
+            const QPointF seq[9] = {
+                xc, xc + QPointF(-30, -30), xc + QPointF(0, -60), xc + QPointF(30, -30),
+                xc, xc + QPointF(-30, 30), xc + QPointF(0, 60), xc + QPointF(30, 30), xc
+            };
+            QMouseEvent pr(QEvent::MouseButtonPress, seq[0], vp->mapToGlobal(seq[0].toPoint()),
+                           Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(vp, &pr);
+            for (int i = 1; i < 9; ++i) {
+                QMouseEvent mv(QEvent::MouseMove, seq[i], vp->mapToGlobal(seq[i].toPoint()),
+                               Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                QApplication::sendEvent(vp, &mv);
+            }
+            QMouseEvent re(QEvent::MouseButtonRelease, seq[8], vp->mapToGlobal(seq[8].toPoint()),
+                           Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(vp, &re);
+            // 切擦除模式，擦掉交叉点
+            e.toggleMode(Editor::Mode::Erase);
+            QMouseEvent ep(QEvent::MouseButtonPress, xc, vp->mapToGlobal(xc.toPoint()),
+                           Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(vp, &ep);
+            QMouseEvent er(QEvent::MouseButtonRelease, xc, vp->mapToGlobal(xc.toPoint()),
+                           Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(vp, &er);
+            e.toggleMode(Editor::Mode::Normal);
+            QApplication::processEvents();
+            QImage exImg(vp->size() * 2, QImage::Format_ARGB32);
+            exImg.fill(Qt::transparent);
+            exImg.setDevicePixelRatio(2.0);
+            QPainter ip(&exImg);
+            ip.translate(e.viewport()->pos() * 2);
+            e.m_canvas->render(&ip);
+            ip.end();
+            const QPoint lobeTop(int(xc.x() * 2), int((xc.y() - 38) * 2));
+            const QPoint lobeBot(int(xc.x() * 2), int((xc.y() + 38) * 2));
+            if (qAlpha(exImg.pixel(lobeTop)) > 8 || qAlpha(exImg.pixel(lobeBot)) > 8) {
+                qWarning("selftest FAIL: erase of self-crossing stroke filled hollow lobes (top=%d bot=%d)",
+                         qAlpha(exImg.pixel(lobeTop)), qAlpha(exImg.pixel(lobeBot)));
+                return false;
+            }
+            e.clearInk();
+            QApplication::processEvents();
+        }
         // 涂模式开着打字（用户报：笔刷期间打字光标行为/换行不准）：
         // 涂/擦模式必须完全不干扰文本编辑——插入位置、换行、光标
         // 落点与普通模式一致
@@ -938,8 +987,12 @@ bool Editor::selftest()
                 QApplication::sendEvent(&e, &kzWin2);     // 真实 ⌘0（窗口化）
                 QApplication::processEvents();
                 const int pxWin = e.document()->defaultFont().pixelSize();
-                // 公式：m_size = w/40/1.25，像素 = m_size×1.25 = w/40
-                const auto c64Want = [](int w) { return qMax(6, qRound(w / 40.0)); };
+                // 同源公式：crtGridPixelSize()（与 zoomReset 单一来源）
+                const auto c64Want = [&e](int w) {
+                    e.resize(w, e.height());
+                    QApplication::processEvents();
+                    return e.crtGridPixelSize();
+                };
                 if (qAbs(pxWin - c64Want(wWin)) > 1
                     || qAbs(pxFull - c64Want(wWin * 3 / 2)) > 1
                     || pxWin >= pxFull) {
