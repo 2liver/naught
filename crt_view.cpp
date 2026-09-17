@@ -6,6 +6,7 @@
 #include <QFile>
 #include <QPainter>
 #include <QResizeEvent>
+#include <QSet>
 #include <rhi/qrhi.h>
 #include <rhi/qshader.h>
 
@@ -129,14 +130,29 @@ void CrtView::ensureRhi()
     // 旧版硬编码 Metal 且依赖私有头 qrhimetal_p.h，Windows/Linux
     // 直接编译不过）。默认参数即可（Metal 无参 = 系统默认设备）
     // Qt 6.9 已移除桌面 OpenGL 后端；平台不适配的项 create 会快速失败
-    const QRhi::Implementation backends[] = {
-        QRhi::Metal, QRhi::Vulkan, QRhi::D3D11, QRhi::D3D12,
-        QRhi::OpenGLES2, QRhi::Null,
+    // NAUGHT_RHI_SKIP=metal,vulkan：环境逃生阀（无 GPU CI 上软件
+    // Vulkan/lavapipe 可能崩在 Qt 内部，探测期无法防御——跳过即可）
+    const QSet<QString> skipSet = [] {
+        QSet<QString> s;
+        const QStringList parts = qEnvironmentVariable("NAUGHT_RHI_SKIP")
+                                      .split(QLatin1Char(','), Qt::SkipEmptyParts);
+        for (const QString &p : parts)
+            s.insert(p.trimmed().toLower());
+        return s;
+    }();
+    const struct { QRhi::Implementation impl; const char *name; } backends[] = {
+        { QRhi::Metal, "metal" }, { QRhi::Vulkan, "vulkan" },
+        { QRhi::D3D11, "d3d11" }, { QRhi::D3D12, "d3d12" },
+        { QRhi::OpenGLES2, "gles2" }, { QRhi::Null, "null" },
     };
-    for (QRhi::Implementation impl : backends) {
-        m_r = QRhi::create(impl, nullptr);
-        if (m_r)
+    for (const auto &b : backends) {
+        if (skipSet.contains(QLatin1String(b.name)))
+            continue;
+        m_r = QRhi::create(b.impl, nullptr);
+        if (m_r) {
+            qWarning("CRT-RHI backend: %s", b.name);
             break;
+        }
     }
     if (!m_r) {
         shaderLog(QStringLiteral("RHI CREATE FAIL"));
@@ -199,6 +215,7 @@ void CrtView::ensureRhi()
         // 不受支持）——整条管线作废，渲染层整体跳过（优雅降级），
         // 而不是带着半残管线继续跑帧导致崩溃
         shaderLog(QStringLiteral("PS CREATE FAIL — pipeline disabled"));
+        qWarning("CRT-RHI pipeline create FAIL — render layer disabled");
         delete m_ps;
         m_ps = nullptr;
         delete m_srb;

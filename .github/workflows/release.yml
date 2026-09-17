@@ -77,7 +77,7 @@ jobs:
         if: runner.os == 'macOS'
         env:
           QT_QPA_PLATFORM: offscreen
-        run: ./build/naught.app/Contents/MacOS/naught --selftest > selftest.log 2>&1 || { rc=$?; echo "::error::SELFTEST FAILED rc=$rc"; grep -iE "selftest FAIL" selftest.log | tail -2 | awk '{print "::error::" $0}'; tail -3 selftest.log | awk '{print "::warning::" $0}'; tail -3 /tmp/naught-crt-shader.log 2>/dev/null | awk '{print "::warning::" $0}'; exit $rc; }
+        run: ./build/naught.app/Contents/MacOS/naught --selftest > selftest.log 2>&1 || { rc=$?; echo "::error::SELFTEST FAILED rc=$rc"; grep -iE "selftest FAIL" selftest.log | tail -2 | awk '{print "::error::" $0}'; tail -3 /tmp/naught-crt-shader.log 2>/dev/null | awk '{print "::error::shader-log:" $0}'; grep -vE "grabbing|Sans Serif" selftest.log | tail -4 | awk '{print "::warning::" $0}'; exit $rc; }
 
       - name: Selftest (Linux)
         if: runner.os == 'Linux'
