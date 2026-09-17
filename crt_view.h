@@ -40,6 +40,8 @@ public:
     bool pipelineReady() const { return m_ps != nullptr; }
     // 同上，但 Null 后端不算可用（Null 对一切说"成功"却不产出真实帧）
     bool pipelineUsable() const;
+    // 自检同步点：在途回读是否已落地（false = 可安全捕获当前帧）
+    bool readbackIdle() const { return !m_readbackInFlight; }
     // 全屏/窗口过渡后 Metal 回读可能失联：强制重置管线（下一帧全量重建）
     void resetPipeline()
     {

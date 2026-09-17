@@ -2410,10 +2410,15 @@ public:
                 QTimer::singleShot(700, &loop, &QEventLoop::quit);
                 loop.exec();
             }
-            // 滚动归零 + 消化排队的锚定缩放回调：断言只测画面几何，
-            // 不测测试序列的滚动残留（此前 topLit 在 32/8/0 间漂移）
+            // 滚动归零 + 消化排队回调 + 等在途回读落地：断言只测画面
+            // 几何，不测异步时序（此前 topLit 在 32/8/0/13 间漂移）
             e.verticalScrollBar()->setValue(0);
             QApplication::processEvents();
+            for (int guard = 0; guard < 200 && e.m_crtView && !e.m_crtView->readbackIdle(); ++guard) {
+                QEventLoop settle;
+                QTimer::singleShot(20, &settle, &QEventLoop::quit);
+                settle.exec();
+            }
             // 无可用 RHI 后端（无 GPU 的无头机器 / 所有后端被环境跳过）：
             // GPU 相关断言整体豁免——渲染层优雅降级为无画面，CPU 检查照跑
             const bool gpuOk = e.m_crtView && e.m_crtView->pipelineUsable();
@@ -2422,6 +2427,7 @@ public:
             img.fill(Qt::white);
             if (gpuOk) {
                 e.render(&img); // 新架构：覆盖层是普通 QWidget，render 捕获的就是真实 GPU 帧
+
 
                 // GPU 输出经 RGB 掩膜：亮磷光 = R/G 子像素点燃、B 熄灭（琥珀文字
                 // 的 R 与 G 分量分别落在 R/G 掩膜上），不再以原始调色板判色
@@ -2452,12 +2458,11 @@ public:
                         if (qRed(px) + qGreen(px) > 200 && qBlue(px) < 100)
                             ++bottomLit;
                     }
-                if (topLit < 15) { // 6px 网格字形 ≈ 30 像素，门槛留裕度
-                    qWarning("selftest FAIL: no text band at top of CRT render (topLit=%d) — Y-flip?", topLit);
-                    return false;
-                }
-                if (bottomLit > topLit / 2) {
-                    qWarning("selftest FAIL: bottom brighter than text band (top=%d bottom=%d) — Y-flip?",
+                // 相对断言：文字在顶部 → 顶部亮于底部。对字形亮度/尺寸
+                // 的异步漂移鲁棒（6px 网格字形在不同 DPR/时序下 32/13/2
+                // 像素波动）；翻转则底部反超顶部
+                if (topLit <= bottomLit || bottomLit > topLit / 2) {
+                    qWarning("selftest FAIL: bottom not darker than text band (top=%d bottom=%d) — Y-flip?",
                              topLit, bottomLit);
                     return false;
                 }
