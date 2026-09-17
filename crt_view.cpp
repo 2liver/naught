@@ -456,7 +456,9 @@ void CrtView::renderFrame()
                 m_pending.fill(cfg.palette->bg);
                 m_source->paintTextSnapshot(m_pending);
             }
-            const QImage up = m_pending.convertToFormat(QImage::Format_RGBA8888);
+            QImage up = m_pending.convertToFormat(QImage::Format_RGBA8888);
+            up.setDevicePixelRatio(1.0); // 上传按原始像素：QRhi 尊重图像 DPR
+
             u->uploadTexture(m_snapTex, up);
         }
         m_forceNow = false;

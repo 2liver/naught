@@ -2554,6 +2554,100 @@ public:
                 }
                 e.toggleViewLock(); // 恢复锁定
             }
+            // ============ 暴力几何闸（用户实机倒影/弧斜的根修测试） ============
+            // 粘贴代码级内容 + 鼠标移动后，画面必须满足：
+            //   1. 文本亮带只允许出现在顶部 20% 区域（一行都不能偏）
+            //   2. 其余行必须纯暗（任何第二亮带 = 倒影回归，直接失败）
+            //   3. 上下半帧不得镜像相似（倒影 = 绕中心镜像）
+            {
+                auto waitReadback = [&] {
+                    for (int guard = 0; guard < 300 && e.m_crtView && !e.m_crtView->readbackIdle(); ++guard) {
+                        QEventLoop settle;
+                        QTimer::singleShot(16, &settle, &QEventLoop::quit);
+                        settle.exec();
+                    }
+                };
+                e.setPlainText(QStringLiteral("orders = [(\"张三\", 99.5)]\nbig = [o for o in orders if o[1] > 100]\nprint(big)\n"));
+                e.verticalScrollBar()->setValue(0);
+                QApplication::processEvents();
+                waitReadback();
+                // 鼠标扫动（真实倒影的触发路径）
+                e.toggleViewLock();
+                for (int step = 1; step <= 24; ++step) {
+                    e.m_lastMouse = QPointF(e.width() * (0.15 + 0.7 * step / 24.0),
+                                            e.height() * (0.2 + 0.6 * step / 24.0));
+                    e.m_mouseMoveClock.start();
+                    e.m_crtView->markDirty(true);
+                    QApplication::processEvents();
+                }
+                e.toggleViewLock();
+                waitReadback();
+                // 归零滚动 + 排空全部排队回调（前序测试的锚定缩放残留），
+                // 断言只测画面几何不测序列时序
+                e.verticalScrollBar()->setValue(0);
+                QApplication::processEvents();
+                {
+                    QEventLoop drain;
+                    QTimer::singleShot(120, &drain, &QEventLoop::quit);
+                    drain.exec();
+                }
+                e.verticalScrollBar()->setValue(0);
+                QApplication::processEvents();
+                waitReadback();
+                QImage vimg(e.size(), QImage::Format_ARGB32);
+                vimg.fill(Qt::white);
+                e.render(&vimg);
+
+                // 逐行亮像素统计
+                QVector<int> rowLit(vimg.height(), 0);
+                int litTotal = 0;
+                for (int y = 0; y < vimg.height(); ++y)
+                    for (int x = 2; x < vimg.width() - 30; ++x) {
+                        const QRgb px = vimg.pixel(x, y);
+                        if (qRed(px) + qGreen(px) > 200 && qBlue(px) < 100) {
+                            ++rowLit[y];
+                            ++litTotal;
+                        }
+                    }
+                // 1. 文本带必须在顶部 20%
+                int topBandRows = 0, strayBandRows = 0;
+                const int topLimit = vimg.height() / 5;
+                for (int y = 0; y < vimg.height(); ++y)
+                    if (rowLit[y] > 4) {
+                        if (y < topLimit)
+                            ++topBandRows;
+                        else
+                            ++strayBandRows;
+                    }
+                if (topBandRows < 4) {
+                    qWarning("selftest FAIL: violent — no text band in top 20%% (topBand=%d lit=%d)",
+                             topBandRows, litTotal);
+                    return false;
+                }
+                if (strayBandRows > 1) {
+                    qWarning("selftest FAIL: violent — content outside top 20%% (stray=%d rows) — 倒影/位移",
+                             strayBandRows);
+                    return false;
+                }
+                // 3. 上下半帧镜像相似度（倒影 = 绕中心镜像）
+                {
+                    long mirror = 0;
+                    const int half = vimg.height() / 2;
+                    const int n = half * (vimg.width() / 8);
+                    for (int y = 0; y < half; y += 2)
+                        for (int x = 2; x < vimg.width() - 30; x += 8) {
+                            const QRgb a = vimg.pixel(x, y);
+                            const QRgb b = vimg.pixel(x, vimg.height() - 1 - y);
+                            mirror += qAbs((qRed(a) + qGreen(a)) - (qRed(b) + qGreen(b))) > 40;
+                        }
+                    if (mirror * 10 < n) {
+                        qWarning("selftest FAIL: violent — vertical mirror detected (%ld/%d)",
+                                 mirror, n);
+                        return false;
+                    }
+                }
+                e.setPlainText(QStringLiteral("無\n"));
+            }
             // 快照几何：文字在顶部第一行；此前的涂擦测试留下两个墨水圆点，
             // 必须同样出现在合成快照里（墨水进光栅 = 显模式下涂/擦可用的回归闸）
             {
