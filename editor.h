@@ -2104,6 +2104,48 @@ public:
             e.toggleCodeMode();
             QApplication::processEvents();
         }
+        // 环形笔迹中空回归（用户报：笔刷有时把颜色填充到空心区域）：
+        // 画一圈 → 圈心必须保持空心（描边轮廓的填充规则必须保洞）
+        {
+            e.setPlainText(QString());
+            e.clearInk();
+            e.toggleMode(Editor::Mode::Draw);
+            QWidget *vp = e.viewport();
+            const QPointF c(vp->width() / 2.0, vp->height() / 2.0);
+            const QPointF s0(c.x() + 40, c.y());
+            QMouseEvent pr(QEvent::MouseButtonPress, s0, vp->mapToGlobal(s0.toPoint()),
+                           Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(vp, &pr);
+            for (int a = 30; a <= 360; a += 30) {
+                const qreal rad = a * 3.14159265 / 180.0;
+                const QPointF p(c.x() + 40.0 * qCos(rad), c.y() + 40.0 * qSin(rad));
+                QMouseEvent mv(QEvent::MouseMove, p, vp->mapToGlobal(p.toPoint()),
+                               Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                QApplication::sendEvent(vp, &mv);
+            }
+            QMouseEvent re(QEvent::MouseButtonRelease, s0, vp->mapToGlobal(s0.toPoint()),
+                           Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(vp, &re);
+            e.toggleMode(Editor::Mode::Normal);
+            QApplication::processEvents();
+            // 画布渲染到图像 → 圈心像素必须透明（空心）
+            QImage inkImg(vp->size() * 2, QImage::Format_ARGB32);
+            inkImg.fill(Qt::transparent);
+            inkImg.setDevicePixelRatio(2.0);
+            QPainter ip(&inkImg);
+            ip.translate(e.viewport()->pos() * 2);
+            e.m_canvas->render(&ip);
+            ip.end();
+            const QPoint centerPix(int(c.x() * 2), int(c.y() * 2));
+            const QRgb px = inkImg.pixel(centerPix);
+            if (qAlpha(px) > 8) {
+                qWarning("selftest FAIL: ring stroke filled its hollow center (alpha=%d)",
+                         qAlpha(px));
+                return false;
+            }
+            e.clearInk();
+            QApplication::processEvents();
+        }
         // 笔迹统一撤销：画一笔 → Cmd+Z 撤销 → Cmd+Y 复原
         e.setPlainText(QStringLiteral("文字\n"));
         {
