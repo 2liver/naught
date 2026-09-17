@@ -1,32 +1,28 @@
 #version 450
+// crt.frag —— 「显」主着色器：内容（余晖合成结果纹理，最近邻采样=
+// 与旧存储缓冲逐纹素同值）→ 衍射/束斑/聚焦 → 辉光叠加（小图线性
+// 采样，与 Crt::phosphorBloom 的 max 叠加同模型）→ 屏幕空间栅网/
+// 扫描线/灰尘/玻璃/扫描时序/暖机/暗角。
 layout(location = 0) in vec2 v_uv;
 layout(location = 0) out vec4 frag;
 layout(std140, binding = 0) uniform buf {
     vec2 view;
     vec2 texSize;
     vec2 timeInfo;   // x = 运行秒数，y = 暖机毫秒（-1 = 非暖机期）
-    vec2 flags;      // x = 实验·屏幕实体，y = 保留
+    vec2 flags;      // x = 实验·屏幕实体，y = 机型
     vec4 scanTint;   // 扫描线暗行掺色（调色板）
     vec4 refl;       // 玻璃反光色（调色板）
     vec4 dustCol;    // 灰尘点色（调色板）
+    vec4 persist1;   // 余晖快分量（主着色器不用，块布局一致）
+    vec4 persist2;   // 余晖慢分量
+    vec4 glowInfo;   // x = 辉光 alpha，y/z = 1/小图宽高，w = 帧时差 ms
 } ubuf;
-layout(std430, binding = 1) buffer Pixels { uint p[]; } px;
-
-uint texel(uint x, uint y)
-{
-    return px.p[y * uint(ubuf.texSize.x) + x];
-}
+layout(binding = 1) uniform sampler2D content; // 余晖合成结果（最近邻）
+layout(binding = 2) uniform sampler2D glow;    // 辉光小图（线性）
 
 vec3 sampleAt(vec2 uv)
 {
-    uv = clamp(uv, 0.0, 1.0);
-    uint x = uint(uv.x * ubuf.texSize.x);
-    uint y = uint((1.0 - uv.y) * ubuf.texSize.y); // Metal 的 Y 翻转：屏幕顶=缓冲顶
-    x = min(x, uint(ubuf.texSize.x) - 1u); // 边缘钳位：uv=1.0 会越界一行
-    y = min(y, uint(ubuf.texSize.y) - 1u);
-    uint v = texel(x, y);
-    // RGBA8888 在 GPU 上按小端解释：R 在低字节
-    return vec3(float(v & 255u), float((v >> 8) & 255u), float((v >> 16) & 255u)) / 255.0;
+    return texture(content, clamp(uv, 0.0, 1.0)).rgb;
 }
 
 vec2 curve(vec2 uv) {
@@ -82,15 +78,15 @@ void main()
     // 亮度（能量）随距离衰减（二阶更弱）
     {
         const float px = 1.0 / ubuf.texSize.x;
-        vec3 lm = sampleAt(clamp(cuv - vec2(px, 0.0), 0.0, 1.0));
-        vec3 rp = sampleAt(clamp(cuv + vec2(px, 0.0), 0.0, 1.0));
+        vec3 lm = sampleAt(cuv - vec2(px, 0.0));
+        vec3 rp = sampleAt(cuv + vec2(px, 0.0));
         const vec3 w = vec3(0.333);
         bool c64disp = ubuf.flags.y > 1.5 && ubuf.flags.y < 2.5;
         if (c64disp) {
-            vec3 lm2 = sampleAt(clamp(cuv - vec2(px * 2.0, 0.0), 0.0, 1.0));
-            vec3 rp2 = sampleAt(clamp(cuv + vec2(px * 2.0, 0.0), 0.0, 1.0));
-            vec3 lmh = sampleAt(clamp(cuv - vec2(px * 0.5, 0.0), 0.0, 1.0));
-            vec3 rph = sampleAt(clamp(cuv + vec2(px * 0.5, 0.0), 0.0, 1.0));
+            vec3 lm2 = sampleAt(cuv - vec2(px * 2.0, 0.0));
+            vec3 rp2 = sampleAt(cuv + vec2(px * 2.0, 0.0));
+            vec3 lmh = sampleAt(cuv - vec2(px * 0.5, 0.0));
+            vec3 rph = sampleAt(cuv + vec2(px * 0.5, 0.0));
             float eR2 = max(0.0, dot(col, w) - dot(rp2, w));
             float eL2 = max(0.0, dot(col, w) - dot(lm2, w));
             float eR1 = max(0.0, dot(col, w) - dot(rp, w));
@@ -120,12 +116,12 @@ void main()
     // 饱和、四周变软变晕，暗处不动
     {
         const vec2 off = 1.0 / ubuf.texSize;
-        vec3 blur = (sampleAt(clamp(cuv + vec2( off.x, 0.0), 0.0, 1.0))
-                   + sampleAt(clamp(cuv - vec2( off.x, 0.0), 0.0, 1.0))) * 0.24
-                  + (sampleAt(clamp(cuv + vec2( off.x * 2.0, 0.0), 0.0, 1.0))
-                   + sampleAt(clamp(cuv - vec2( off.x * 2.0, 0.0), 0.0, 1.0))) * 0.14
-                  + (sampleAt(clamp(cuv + vec2(0.0,  off.y), 0.0, 1.0))
-                   + sampleAt(clamp(cuv + vec2(0.0, -off.y), 0.0, 1.0))) * 0.12;
+        vec3 blur = (sampleAt(cuv + vec2( off.x, 0.0))
+                   + sampleAt(cuv - vec2( off.x, 0.0))) * 0.24
+                  + (sampleAt(cuv + vec2( off.x * 2.0, 0.0))
+                   + sampleAt(cuv - vec2( off.x * 2.0, 0.0))) * 0.14
+                  + (sampleAt(cuv + vec2(0.0,  off.y))
+                   + sampleAt(cuv + vec2(0.0, -off.y))) * 0.12;
         col = clamp(col + blur * smoothstep(0.12, 0.85, lum) * 0.40, 0.0, 1.0);
     }
 
@@ -133,13 +129,19 @@ void main()
     // 微微发糊（屏幕空间锚定，随玻璃固定）
     {
         const vec2 off = 1.0 / ubuf.texSize;
-        vec3 blur4 = (sampleAt(clamp(cuv + vec2( off.x, 0.0), 0.0, 1.0))
-                    + sampleAt(clamp(cuv - vec2( off.x, 0.0), 0.0, 1.0))
-                    + sampleAt(clamp(cuv + vec2(0.0,  off.y), 0.0, 1.0))
-                    + sampleAt(clamp(cuv + vec2(0.0, -off.y), 0.0, 1.0))) * 0.25;
+        vec3 blur4 = (sampleAt(cuv + vec2( off.x, 0.0))
+                    + sampleAt(cuv - vec2( off.x, 0.0))
+                    + sampleAt(cuv + vec2(0.0,  off.y))
+                    + sampleAt(cuv + vec2(0.0, -off.y))) * 0.25;
         float corner = smoothstep(0.55, 0.85, length(v_uv - 0.5));
         col = mix(col, blur4, corner * 0.35);
     }
+
+    // 辉光叠加：max(col, 小图线性采样 × alpha)——与 Crt::phosphorBloom
+    // 的 max 叠加同模型（CPU 版最近邻放大，此处线性放大更平滑）。
+    // 叠加发生在栅网之前：辉光与内容一同被掩膜/扫描线调制（与 CPU
+    // 烘拍顺序一致）
+    col = max(col, texture(glow, v_uv).rgb * ubuf.glowInfo.x);
 
     // ---- 屏幕空间：固定不动的磷粉栅、扫描线（真玻璃结构）----
     vec2 sp = v_uv * ubuf.texSize; // 屏幕物理像素
@@ -149,8 +151,8 @@ void main()
     // ——逐通道调制，白字出 RGB 栅纹；单色机保持单栅
     {
         const float px = 1.0 / ubuf.texSize.x;
-        float lumL = dot(sampleAt(clamp(cuv - vec2(px, 0.0), 0.0, 1.0)), vec3(0.333));
-        float lumR = dot(sampleAt(clamp(cuv + vec2(px, 0.0), 0.0, 1.0)), vec3(0.333));
+        float lumL = dot(sampleAt(cuv - vec2(px, 0.0)), vec3(0.333));
+        float lumR = dot(sampleAt(cuv + vec2(px, 0.0)), vec3(0.333));
         float beamW = mix(0.12, 0.42, smoothstep(0.05, 0.9, lum));
         float grad = (lumL - lumR) * 0.5;
         bool c64 = ubuf.flags.y > 1.5 && ubuf.flags.y < 2.5;

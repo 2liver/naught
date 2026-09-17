@@ -30,6 +30,10 @@ qt_add_shaders(naught "shaders"
     FILES
         shaders/crt.vert
         shaders/crt.frag
+        shaders/persist.frag
+        shaders/downsample.frag
+        shaders/blurH.frag
+        shaders/blurV.frag
 )
 target_link_libraries(naught PRIVATE Qt6::Widgets)
 if(NOT APPLE)
@@ -69,14 +73,20 @@ add_custom_command(TARGET naught-agent POST_BUILD
             ${CMAKE_BINARY_DIR}/naught-agent.app)
 endif()
 
-# 主应用打包时把代理应用嵌进 Resources（安装程序从主包里拷贝布署）
+# 主应用打包时把代理应用嵌进 Resources（安装程序从主包里拷贝布署）。
+# 直接组装嵌套 bundle：不再 copy_directory 依赖 naught-agent 目标自身的
+# POST_BUILD 时序（agent 未重建时其 bundle 可能缺失 → 构建断裂）
 if(APPLE)
 add_dependencies(naught naught-agent)
 add_custom_command(TARGET naught POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory
-            $<TARGET_BUNDLE_CONTENT_DIR:naught>/Resources
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-            ${CMAKE_BINARY_DIR}/naught-agent.app
+            $<TARGET_BUNDLE_CONTENT_DIR:naught>/Resources/naught-agent.app/Contents/MacOS
+    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:naught-agent>
+            $<TARGET_BUNDLE_CONTENT_DIR:naught>/Resources/naught-agent.app/Contents/MacOS/naught-agent
+    COMMAND ${CMAKE_COMMAND} -E copy
+            ${CMAKE_SOURCE_DIR}/packaging/naught-agent-Info.plist
+            $<TARGET_BUNDLE_CONTENT_DIR:naught>/Resources/naught-agent.app/Contents/Info.plist
+    COMMAND codesign --force --sign -
             $<TARGET_BUNDLE_CONTENT_DIR:naught>/Resources/naught-agent.app)
 endif()
 
