@@ -522,6 +522,60 @@ bool Editor::selftest()
             e.clearInk();
             QApplication::processEvents();
         }
+        // 涂模式开着打字（用户报：笔刷期间打字光标行为/换行不准）：
+        // 涂/擦模式必须完全不干扰文本编辑——插入位置、换行、光标
+        // 落点与普通模式一致
+        {
+            e.setPlainText(QStringLiteral("起\n"));
+            e.toggleMode(Editor::Mode::Draw);
+            QTextCursor tc = e.textCursor();
+            // 文末可见位置（尾随块之前——真实打字的落点；moveCursor(End)
+            // 落到不可见空尾块，不是用户场景）
+            tc.setPosition(qMax(0, e.toPlainText().size() - 1));
+            e.setTextCursor(tc);
+            QApplication::processEvents();
+            // 40 字长行：必然触发行换行（WidgetWidth）
+            QString longLine;
+            for (int i = 0; i < 40; ++i)
+                longLine += QStringLiteral("字");
+            QTextCursor ins = e.textCursor();
+            ins.insertText(longLine);
+            QApplication::processEvents();
+            if (e.lineWrapMode() != QPlainTextEdit::WidgetWidth) {
+                qWarning("selftest FAIL: draw mode changed wrap mode");
+                e.toggleMode(Editor::Mode::Normal);
+                return false;
+            }
+            // 文末插入 = 并入"起"块（起字字...）——与普通模式同语义
+            if (!e.toPlainText().startsWith(QStringLiteral("起字字"))) {
+                qWarning("selftest FAIL: draw mode typing corrupted text got=[%s]",
+                         qPrintable(QString(e.toPlainText()).left(12)));
+                e.toggleMode(Editor::Mode::Normal);
+                return false;
+            }
+            // 光标必须在文末（打字后落点）
+            if (e.textCursor().position() != e.toPlainText().size() - 1) {
+                const QString esc = QString(e.toPlainText()).replace(QLatin1Char('\n'), QChar(0x23CE));
+                qWarning("selftest FAIL: draw mode typing caret off (pos=%d want %d size=%d text=[%s]... blocks=%d)",
+                         e.textCursor().position(), int(e.toPlainText().size() - 1),
+                         int(e.toPlainText().size()),
+                         qPrintable(esc.left(16)), e.document()->blockCount());
+                e.toggleMode(Editor::Mode::Normal);
+                return false;
+            }
+            // 换行键在涂模式照常工作
+            QKeyEvent ke(QEvent::KeyPress, Qt::Key_Return, {});
+            QApplication::sendEvent(&e, &ke);
+            QApplication::processEvents();
+            if (!e.toPlainText().endsWith(QStringLiteral("字\n\n"))) {
+                qWarning("selftest FAIL: draw mode enter broken");
+                e.toggleMode(Editor::Mode::Normal);
+                return false;
+            }
+            e.toggleMode(Editor::Mode::Normal);
+            QApplication::processEvents();
+            e.setPlainText(QStringLiteral("無\n"));
+        }
         // 笔迹统一撤销：画一笔 → Cmd+Z 撤销 → Cmd+Y 复原
         e.setPlainText(QStringLiteral("文字\n"));
         {
