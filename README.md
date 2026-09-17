@@ -170,9 +170,9 @@
 自定义目录:`… | sh -s -- <目录>`(仅默认目录会被启动台索引)。无法访问
 GitHub 时先 `export https_proxy=http://127.0.0.1:7897`。
 
-**Windows**(PowerShell 一条指令;直连失败自动走镜像):
+**Windows**(PowerShell 一条指令;强制 TLS 1.2,直连失败自动走镜像):
 
-    $d='D:\naught'; md $d -Force|Out-Null; $u='https://github.com/2liver/naught/releases/download/v0.3.14/naught-windows.zip'; try{iwr $u -OutFile "$d\n.zip" -ErrorAction Stop}catch{iwr "https://gh-proxy.com/$u" -OutFile "$d\n.zip"}; Expand-Archive "$d\n.zip" -DestinationPath $d -Force
+    [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; $d='D:\naught'; md $d -Force|Out-Null; $base='https://github.com/2liver/naught/releases/download/v0.3.14/naught-windows.zip'; foreach($m in @('','https://gh-proxy.com/','https://ghproxy.net/','https://gh.ddlc.top/')){try{iwr ($m+$base) -OutFile "$d\n.zip" -ErrorAction Stop; break}catch{}}; Expand-Archive "$d\n.zip" -DestinationPath $d -Force
 
 **Linux**(AppImage 单文件):
 
