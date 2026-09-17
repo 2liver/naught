@@ -2408,28 +2408,35 @@ public:
                 QTimer::singleShot(700, &loop, &QEventLoop::quit);
                 loop.exec();
             }
+            // 无可用 RHI 后端（无 GPU 的无头机器 / 所有后端被环境跳过）：
+            // GPU 相关断言整体豁免——渲染层优雅降级为无画面，CPU 检查照跑
+            const bool gpuOk = e.m_crtView && e.m_crtView->pipelineUsable();
+            const int g = e.viewport()->pos().x();
             QImage img(e.size(), QImage::Format_ARGB32);
             img.fill(Qt::white);
-            e.render(&img); // 新架构：覆盖层是普通 QWidget，render 捕获的就是真实 GPU 帧
-            const int g = e.viewport()->pos().x();
-            // GPU 输出经 RGB 掩膜：亮磷光 = R/G 子像素点燃、B 熄灭（琥珀文字
-            // 的 R 与 G 分量分别落在 R/G 掩膜上），不再以原始调色板判色
-            bool lit = false;
-            for (int y = 0; y < e.height() && !lit; ++y)
-                for (int x = g + 2; x < e.width() - 30 && !lit; ++x) {
-                    const QRgb px = img.pixel(x, y);
-                    if (qRed(px) + qGreen(px) > 200 && qBlue(px) < 100)
-                        lit = true;
+            if (gpuOk) {
+                e.render(&img); // 新架构：覆盖层是普通 QWidget，render 捕获的就是真实 GPU 帧
+                // GPU 输出经 RGB 掩膜：亮磷光 = R/G 子像素点燃、B 熄灭（琥珀文字
+                // 的 R 与 G 分量分别落在 R/G 掩膜上），不再以原始调色板判色
+                bool lit = false;
+                for (int y = 0; y < e.height() && !lit; ++y)
+                    for (int x = g + 2; x < e.width() - 30 && !lit; ++x) {
+                        const QRgb px = img.pixel(x, y);
+                        if (qRed(px) + qGreen(px) > 200 && qBlue(px) < 100)
+                            lit = true;
+                    }
+                if (!lit) {
+                    qWarning("selftest FAIL: no lit phosphor pixels in CRT render");
+                    return false;
                 }
-            if (!lit) {
-                qWarning("selftest FAIL: no lit phosphor pixels in CRT render");
-                return false;
-            }
-            const QRgb bgPx = img.pixel(g + 8, e.height() - 20); // 空行区
-            if (qRed(bgPx) > 90 || qGreen(bgPx) > 80 || qBlue(bgPx) > 60) {
-                qWarning("selftest FAIL: CRT background not dark (%d,%d,%d)",
-                         qRed(bgPx), qGreen(bgPx), qBlue(bgPx));
-                return false;
+                const QRgb bgPx = img.pixel(g + 8, e.height() - 20); // 空行区
+                if (qRed(bgPx) > 90 || qGreen(bgPx) > 80 || qBlue(bgPx) > 60) {
+                    qWarning("selftest FAIL: CRT background not dark (%d,%d,%d)",
+                             qRed(bgPx), qGreen(bgPx), qBlue(bgPx));
+                    return false;
+                }
+            } else {
+                qWarning("selftest SKIP: no usable RHI backend — CRT GPU render checks skipped");
             }
             // 快照几何：文字在顶部第一行；此前的涂擦测试留下两个墨水圆点，
             // 必须同样出现在合成快照里（墨水进光栅 = 显模式下涂/擦可用的回归闸）
@@ -2461,7 +2468,7 @@ public:
             }
             // 颜色分类取证：琥珀透色（r 主导、g 中量、b 近零——颜色穿过
             // 竖纹亮度纹理）、暗底、无蓝泛滥（坏管线 = 蓝通道点燃）
-            {
+            if (gpuOk) {
                 int amber = 0, blue = 0, dark = 0, other = 0;
                 for (int y = 0; y < e.height(); ++y)
                     for (int x = g; x < e.width() - 30; ++x) {
@@ -2483,19 +2490,21 @@ public:
                 }
             }
             // 扫描线：同列相邻行底色有明暗差（信息输出，防渲染层位错）
-            auto rowMean = [&](int yMod, int x0, int x1) {
-                long sum = 0;
-                int n = 0;
-                for (int y = yMod + 4; y + 3 < e.height(); y += 3)
-                    for (int x = x0; x < x1; ++x) {
-                        sum += qGray(img.pixel(x, y));
-                        ++n;
-                    }
-                return n ? double(sum) / n : -1.0;
-            };
-            const double m0 = rowMean(0, g + 8, g + 90);
-            const double m1 = rowMean(1, g + 8, g + 90);
-            qInfo("CRT-SCANLINE rows: %f vs %f", m0, m1);
+            if (gpuOk) {
+                auto rowMean = [&](int yMod, int x0, int x1) {
+                    long sum = 0;
+                    int n = 0;
+                    for (int y = yMod + 4; y + 3 < e.height(); y += 3)
+                        for (int x = x0; x < x1; ++x) {
+                            sum += qGray(img.pixel(x, y));
+                            ++n;
+                        }
+                    return n ? double(sum) / n : -1.0;
+                };
+                const double m0 = rowMean(0, g + 8, g + 90);
+                const double m1 = rowMean(1, g + 8, g + 90);
+                qInfo("CRT-SCANLINE rows: %f vs %f", m0, m1);
+            }
             e.toggleCrt();
             QApplication::processEvents();
             if (e.palette().color(QPalette::Base) == Crt::kBg
@@ -2668,7 +2677,10 @@ public:
         }
         // CRT 管线冒烟（C64 三色栅 + 行扫描激励）：渲两机各一帧落盘，
         // 供人工/取证核对（shader 编译失败 = 黑帧 + 空图）
-        {
+        // 无可用后端（无 GPU 无头机器）时整体豁免——GPU 帧无从产生
+        if (!e.m_crtView || !e.m_crtView->pipelineUsable()) {
+            qWarning("selftest SKIP: no usable RHI backend — CRT GPU smoke skipped");
+        } else {
             auto waitFrames = [&](int ms) {
                 QElapsedTimer clk;
                 clk.start();

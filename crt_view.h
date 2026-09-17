@@ -27,6 +27,10 @@ public:
     ~CrtView() override;
     void markDirty(bool force = false);
     void syncGeometry();
+    // 自检闸门：管线可用（后端 + 着色器全部就绪）才跑 GPU 相关断言
+    bool pipelineReady() const { return m_ps != nullptr; }
+    // 同上，但 Null 后端不算可用（Null 对一切说"成功"却不产出真实帧）
+    bool pipelineUsable() const;
     // 全屏/窗口过渡后 Metal 回读可能失联：强制重置管线（下一帧全量重建）
     void resetPipeline()
     {

@@ -115,6 +115,11 @@ void CrtView::releaseGpu()
     m_ubuf = nullptr;
 }
 
+bool CrtView::pipelineUsable() const
+{
+    return m_ps != nullptr && m_r != nullptr && m_r->backend() != QRhi::Null;
+}
+
 void CrtView::ensureRhi()
 {
     if (m_rhiUnavailable)
