@@ -83,6 +83,8 @@ public:
         c.screenEntity = m_crt && !m_viewLock;
         c.lastMouse = m_lastMouse;
         c.viewMoving = m_crt && m_mouseMoveClock.isValid() && m_mouseMoveClock.elapsed() < 150;
+        c.typing = m_crt && m_inputClock.isValid() && m_inputClock.elapsed() < 300;
+        c.drawing = m_crt && m_inkSession; // 涂/擦按住期间
         return c;
     }
     Editor()
@@ -276,8 +278,20 @@ public:
                 return;
             }
             wakeCaret();
-            m_lastWasInk = false;
-            m_undoWasInk = false; // 双栈撤销：文字变化后重做走文档栈（不再误重做笔迹）
+            if (m_crt)
+                m_inputClock.start(); // 输入突发期信号：链节流 + 半分辨率回读
+            // 统一撤销日志（时间序）：真实文字变化 = 一步文字撤销。
+            // 只在文档撤销栈确实记录了这一步时入日志（availableUndoSteps
+            // > 0）——程序性 setPlainText/打印暂停期 = 0，不入日志，
+            // 日志与文档栈永不失步
+            // 撤销/重做驱动的 contentsChange 不入日志（否则撤销会
+            // 被记成新操作并清空重做日志 → 重做失效）
+            if (!m_inUndoRedo && document()->availableUndoSteps() > 0) {
+                m_undoOps.append(true);
+                if (m_undoOps.size() > 200)
+                    m_undoOps.removeFirst();
+                m_redoOps.clear();
+            }
             // M3：手动编辑 = 字符画回归普通文本（程序打印/替换不受影响）
             if (!m_settingAscii && m_asciiActive) {
                 m_asciiActive = false;
@@ -1023,26 +1037,40 @@ public:
 
     void undoAll()
     {
-        if (m_lastWasInk && !m_inkUndo.isEmpty()) {
+        // 统一撤销（时间序）：文字与墨迹按发生顺序一个栈内互穿。
+        // 旧双栈靠 m_lastWasInk 猜"上一操作是不是笔迹"——交叉序列
+        //（笔迹→打字→撤销）会跳过笔迹、撤错目标（用户报：撤回的
+        // 并非想撤回的）。日志法逐条精确回放。
+        if (m_undoOps.isEmpty())
+            return;
+        const bool text = m_undoOps.takeLast();
+        m_redoOps.append(text);
+        if (text) {
+            m_inUndoRedo = true;
+            document()->undo();
+            m_inUndoRedo = false;
+        } else if (!m_inkUndo.isEmpty()) {
             const InkOp op = m_inkUndo.takeLast();
             m_inkRedo.append(op);
             m_canvas->restore(op.before);
-            m_undoWasInk = true;
-            return;
         }
-        m_undoWasInk = false;
-        document()->undo();
     }
 
     void redoAll()
     {
-        if (m_undoWasInk && !m_inkRedo.isEmpty()) {
+        if (m_redoOps.isEmpty())
+            return;
+        const bool text = m_redoOps.takeLast();
+        m_undoOps.append(text);
+        if (text) {
+            m_inUndoRedo = true;
+            document()->redo();
+            m_inUndoRedo = false;
+        } else if (!m_inkRedo.isEmpty()) {
             const InkOp op = m_inkRedo.takeLast();
             m_inkUndo.append(op);
             m_canvas->restore(op.after);
-            return;
         }
-        document()->redo();
     }
 
     bool inkEmpty() const { return m_canvas && m_canvas->snapshot().isEmpty(); }
@@ -1139,6 +1167,8 @@ public:
         m_settingAscii = true; // 高亮器 rehighlight 会发 contentsChanged——程序操作
         applyScheme();
         applyZoom(); // 字体随机器切换（Fusion Pixel ↔ VT323）
+        if (m_crtView)
+            m_crtView->flushHistory(); // 旧机磷光幽灵清零：切机瞬间画面即新机
         if (m_asciiActive)
             replaceAsciiArt(); // 画布在场 → 按新机器重印（真彩 ↔ 单色即时切换）
         viewport()->update();
@@ -1627,8 +1657,10 @@ public:
             const int cols = (m_machine == 0) ? 80 : (m_machine == 1) ? 64 : 40;
             qreal sz = qreal(viewport()->width()) / cols
                        / (m_machine == 0 ? 1.0 : 1.25);
-            if (m_machine == 2)
-                sz = qMin(sz, 16.0); // C64：真机字符 ≈ 物理 4mm——大窗口不无限放大
+            // 无封顶（旧版 C64 封顶 16 → 像素 20px）：封顶让窗口 ≥800px 时
+            // 与全屏字号相等，违反"窗口化永远小于全屏"（用户明令：窗口
+            // 模式按全屏比例缩小对齐，最起码永远更小）。纯 40 列网格，
+            // 字号严格 ∝ 宽度——窗口永远小于更宽的全屏。
             m_size = qMax(6.0, sz);
             applyAnchoredZoom(m_size);
             m_crtGridActive = true;
@@ -2414,33 +2446,39 @@ public:
             // 同一公式，不再取决于按键瞬间的旧宽度——用户报窗口化字号
             // 反超全屏的根修）
             {
-                // C64 网格同样跟随窗口（用户报 C64 ⌘0 窗口化字号反超
-                // 全屏的回归闸）：resize 后必须按新宽度重拟合，且严格
-                // 单调——更宽的窗口绝不得到更小的字号
+                // C64 ⌘0 窗口化 vs 全屏回归闸（用户点名：必须用真实
+                // ⌘0 快捷键路径测——旧版只测 zoomReset 直调）。规则：
+                // 无封顶 40 列网格 → 字号严格 ∝ 宽度，窗口化恒小于
+                // 全屏宽字号（用户明令"最起码永远小于全屏字体尺寸"）。
                 while (e.machine() != 2)
                     e.toggleMachine();
                 QApplication::processEvents();
-                e.zoomReset();
+                const int wWin = e.width();               // 窗口化宽度
+                e.resize(qMax(wWin + 200, wWin * 3 / 2), e.height()); // 模拟全屏宽
                 QApplication::processEvents();
-                const int wc0 = e.width();
-                const int px0 = e.document()->defaultFont().pixelSize();
-                e.resize(wc0 + 160, e.height());
+                QKeyEvent kzWin(QEvent::KeyPress, Qt::Key_0, Qt::ControlModifier);
+                QApplication::sendEvent(&e, &kzWin);      // 真实 ⌘0（全屏宽）
                 QApplication::processEvents();
-                const int px1 = e.document()->defaultFont().pixelSize();
-                // C64 公式：m_size = min(w/40/1.25, 16)，像素 = m_size×1.25
-                const auto c64Want = [](int w) {
-                    return qMax(6, qRound(qMin(w / 40.0 / 1.25, 16.0) * 1.25));
-                };
-                if (qAbs(px0 - c64Want(wc0)) > 1 || qAbs(px1 - c64Want(wc0 + 160)) > 1
-                    || px1 < px0) {
-                    qWarning("selftest FAIL: C64 crt grid not following window (%d->%d, want %d->%d)",
-                             px0, px1, c64Want(wc0), c64Want(wc0 + 160));
+                const int pxFull = e.document()->defaultFont().pixelSize();
+                e.resize(wWin, e.height());               // 回到窗口化
+                QApplication::processEvents();
+                QKeyEvent kzWin2(QEvent::KeyPress, Qt::Key_0, Qt::ControlModifier);
+                QApplication::sendEvent(&e, &kzWin2);     // 真实 ⌘0（窗口化）
+                QApplication::processEvents();
+                const int pxWin = e.document()->defaultFont().pixelSize();
+                // 公式：m_size = w/40/1.25，像素 = m_size×1.25 = w/40
+                const auto c64Want = [](int w) { return qMax(6, qRound(w / 40.0)); };
+                if (qAbs(pxWin - c64Want(wWin)) > 1
+                    || qAbs(pxFull - c64Want(wWin * 3 / 2)) > 1
+                    || pxWin >= pxFull) {
+                    qWarning("selftest FAIL: C64 ⌘0 windowed not smaller than fullscreen (win=%d full=%d want %d/%d) — 老bug回归",
+                             pxWin, pxFull, c64Want(wWin), c64Want(wWin * 3 / 2));
                     return false;
                 }
                 while (e.machine() != 0)
                     e.toggleMachine();
                 QApplication::processEvents();
-                e.resize(wc0, e.height()); // 恢复窗口宽度（后续打印测试按窗口拟合）
+                e.resize(wWin, e.height()); // 恢复窗口宽度（后续打印测试按窗口拟合）
                 QApplication::processEvents();
                 e.zoomReset(); // 恢复琥珀网格态（后续画面断言以之为准）
             }
@@ -2800,6 +2838,44 @@ public:
             }
             while (e.machine() != 0)
                 e.toggleMachine(); // 后续快照几何断言按琥珀口径
+            // 输入暴力闸（用户报：显模式删字/输入法落字卡一秒）：连发
+            // 删除（模拟按住删除键自动重复）+ 模拟输入法落字。断言零
+            // 回读看门狗触发（轻恢复/整管线重建 = 卡顿的元凶）+ 停手
+            // 后 800ms 内画面落地
+            if (gpuOk) {
+                const int firesBefore = e.m_crtView->watchdogFires();
+                e.setPlainText(QStringLiteral("一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十\n"));
+                QApplication::processEvents();
+                e.moveCursor(QTextCursor::End);
+                for (int i = 0; i < 30; ++i) {
+                    QKeyEvent kb(QEvent::KeyPress, Qt::Key_Backspace, Qt::NoModifier);
+                    QApplication::sendEvent(&e, &kb);
+                    QApplication::processEvents();
+                }
+                for (int i = 0; i < 10; ++i) {
+                    QTextCursor c = e.textCursor();
+                    c.insertText(QStringLiteral("無")); // 输入法落字路径（激发+标脏）
+                    QApplication::processEvents();
+                }
+                e.m_crtView->markDirty(true);
+                QApplication::processEvents();
+                {
+                    QEventLoop settle;
+                    QTimer::singleShot(800, &settle, &QEventLoop::quit);
+                    settle.exec();
+                }
+                QApplication::processEvents();
+                if (e.m_crtView->watchdogFires() != firesBefore) {
+                    qWarning("selftest FAIL: input burst triggered readback watchdog (%d fires, maxReadback=%dms) — 卡一秒根因",
+                             e.m_crtView->watchdogFires() - firesBefore,
+                             e.m_crtView->maxReadbackMs());
+                    return false;
+                }
+                qInfo("CRT-INPUT-BURST watchdog=0 maxReadback=%dms",
+                      e.m_crtView->maxReadbackMs());
+                e.setPlainText(QStringLiteral("無\n"));
+                QApplication::processEvents();
+            }
             // 颜色分类取证：琥珀透色（r 主导、g 中量、b 近零——颜色穿过
             // 竖纹亮度纹理）、暗底、无蓝泛滥（坏管线 = 蓝通道点燃）
             if (gpuOk) {
@@ -2839,6 +2915,108 @@ public:
                 const double m1 = rowMean(1, g + 8, g + 90);
                 qInfo("CRT-SCANLINE rows: %f vs %f", m0, m1);
             }
+            // ⌃⇧⌘T 暗角渐散闸（用户报：暗角之间有缝隙、像黑边框）：
+            // 空文档均匀底 → 亮度剖面必须连续渐散——边缘 ≥55% 中心、
+            // 四角 ≥45% 中心、无 30px 窗口内 ≥35% 中心的亮度断崖。
+            // 旧版 bezel（7% 窄带 55% 压暗）会让边缘 ~50% 且四角与
+            // 边缘之间出现阶跃——本闸把"黑边框感"数值化锁死
+            if (gpuOk) {
+                e.toggleViewLock(); // 解锁 → 屏幕实体（⌃⇧⌘T 形态）
+                e.m_lastMouse = QPointF(-1, -1); // 观察者居中：反光带基准角固定
+                e.setPlainText(QString());
+                e.verticalScrollBar()->setValue(0);
+                // 冲刷余晖历史（切机/前序内容残留的幽灵）——量的是
+                // 静态暗角结构，不是历史槽
+                e.m_crtView->flushHistory();
+                e.m_crtView->markDirty(true);
+                QApplication::processEvents();
+                {
+                    QEventLoop settle;
+                    QTimer::singleShot(150, &settle, &QEventLoop::quit);
+                    settle.exec();
+                }
+                e.m_crtView->flushHistory();
+                e.m_crtView->markDirty(true);
+                QApplication::processEvents();
+                {
+                    QEventLoop settle;
+                    QTimer::singleShot(150, &settle, &QEventLoop::quit);
+                    settle.exec();
+                }
+                for (int guard = 0; guard < 300 && e.m_crtView && !e.m_crtView->readbackIdle(); ++guard) {
+                    QEventLoop settle2;
+                    QTimer::singleShot(16, &settle2, &QEventLoop::quit);
+                    settle2.exec();
+                }
+                const QImage vig = e.crtShownImage();
+                if (vig.isNull() || vig.width() < 100 || vig.height() < 60) {
+                    qWarning("selftest FAIL: vignette gate — no frame captured");
+                    e.toggleViewLock();
+                    e.setPlainText(QStringLiteral("無\n"));
+                    return false;
+                }
+                // 5×5 盒式平滑亮度（扫描线/颗粒平均掉）
+                const auto smooth = [&vig](int x, int y) {
+                    long sum = 0;
+                    int n = 0;
+                    for (int yy = qMax(0, y - 2); yy <= qMin(vig.height() - 1, y + 2); ++yy)
+                        for (int xx = qMax(0, x - 2); xx <= qMin(vig.width() - 1, x + 2); ++xx) {
+                            const QRgb px = vig.pixel(xx, yy);
+                            sum += qRed(px) + qGreen(px) + qBlue(px);
+                            ++n;
+                        }
+                    return n ? double(sum) / n : 0.0;
+                };
+                const int vy = vig.height() / 2;
+                const double center = smooth(vig.width() / 2, vy);
+                if (center < 10.0) {
+                    qWarning("selftest FAIL: vignette gate — frame too dark (center=%.0f)", center);
+                    e.toggleViewLock();
+                    e.setPlainText(QStringLiteral("無\n"));
+                    return false;
+                }
+                // 边缘 ≥50% 中心（两侧 2%-6% 带取最暗；三行平均稀释
+                // 慢放暗带——旧版 7% 窄带 55% 压暗实测 ≈45%，新值
+                // 55-75%，50% 阈值清晰分离"黑边框感"）
+                double edgeMin = 1e9;
+                for (const int ey : { vy - 30, vy, vy + 30 })
+                    for (int x = int(vig.width() * 0.02); x < int(vig.width() * 0.06); ++x)
+                        edgeMin = qMin(edgeMin, smooth(x, qBound(4, ey, vig.height() - 5)));
+                for (const int ey : { vy - 30, vy, vy + 30 })
+                    for (int x = int(vig.width() * 0.94); x < int(vig.width() * 0.98); ++x)
+                        edgeMin = qMin(edgeMin, smooth(x, qBound(4, ey, vig.height() - 5)));
+                // 四角 ≥70% 同行中点（横扫慢放暗带按行整行调制——同
+                // 行比值对带鲁棒；角检只量角相对行的额外压暗）
+                double cornerRatio = 1e9;
+                const int cx[4] = { int(vig.width() * 0.04), int(vig.width() * 0.96),
+                                    int(vig.width() * 0.04), int(vig.width() * 0.96) };
+                const int cy[4] = { int(vig.height() * 0.08), int(vig.height() * 0.08),
+                                    int(vig.height() * 0.92), int(vig.height() * 0.92) };
+                for (int i = 0; i < 4; ++i) {
+                    const double rowMid = smooth(vig.width() / 2, cy[i]);
+                    if (rowMid > 5.0)
+                        cornerRatio = qMin(cornerRatio, smooth(cx[i], cy[i]) / rowMid);
+                }
+                // 剖面平滑性：任一 30px 窗口亮度下降 ≤35% 中心
+                double maxDrop = 0.0;
+                for (int x = int(vig.width() * 0.01); x < int(vig.width() * 0.99) - 30; ++x)
+                    maxDrop = qMax(maxDrop, smooth(x, vy) - smooth(x + 30, vy));
+                if (edgeMin < center * 0.50 || cornerRatio < 0.60
+                    || maxDrop > center * 0.45) {
+                    qWarning("selftest FAIL: vignette not diffused (edge=%.0f%% corner=%.0f%% drop=%.0f%% center=%.0f) — 黑边框感",
+                             edgeMin / center * 100.0, cornerRatio * 100.0,
+                             maxDrop / center * 100.0, center);
+                    e.toggleViewLock();
+                    e.setPlainText(QStringLiteral("無\n"));
+                    return false;
+                }
+                qInfo("CRT-VIGNETTE edge=%.0f%% corner=%.0f%% maxDrop=%.0f%%",
+                      edgeMin / center * 100.0, cornerRatio * 100.0,
+                      maxDrop / center * 100.0);
+                e.toggleViewLock(); // 恢复锁定
+                e.setPlainText(QStringLiteral("無\n"));
+                QApplication::processEvents();
+            }
             e.toggleCrt();
             QApplication::processEvents();
             if (e.palette().color(QPalette::Base) == Crt::kBg
@@ -2846,6 +3024,179 @@ public:
                     != QFontDatabase::systemFont(QFontDatabase::GeneralFont).family()) {
                 qWarning("selftest FAIL: CRT toggle-off did not restore font/palette");
                 return false;
+            }
+            // ============ 混合交叉暴力闸（用户点名：笔刷×打字×撤销×重做
+            // 交叉猛测）============
+            // 固定种子随机操作流：打字/删除/换行/涂笔/擦除/撤销/重做/
+            // 模式切换。按"时间序统一撤销"的正确语义建模型：每步操作
+            // 前压一帧（文字+笔迹），撤销=回到上一帧、重做=前进一帧。
+            // 逐步断言应用文字与模型完全一致（旧双栈撤销在交叉序列中
+            // 会撤错目标——用户报"撤回的并非想撤回的"）。
+            {
+                e.setPlainText(QStringLiteral("起\n"));
+                e.clearInk();
+                QApplication::processEvents();
+                e.verticalScrollBar()->setValue(0);
+                QApplication::processEvents();
+                const QString chars = QStringLiteral("abcegx無");
+                struct Frame {
+                    QString doc; // 完整文档串（块以 \n 连接 + 尾随 \n）
+                    QVector<QPainterPath> paths; // 笔迹几何
+                };
+                QVector<Frame> undoStack, redoStack;
+                QString curDoc = e.toPlainText(); // 模型当前文档串
+                QVector<QPainterPath> curPaths = e.inkPaths();
+                const auto pushFrame = [&] {
+                    undoStack.append({ curDoc, curPaths });
+                    if (undoStack.size() > 200)
+                        undoStack.removeFirst();
+                    redoStack.clear();
+                };
+                pushFrame(); // 初始帧（"起\n"）——撤销栈底
+                const auto sendKey = [&](int key, Qt::KeyboardModifiers mod) {
+                    QKeyEvent ke(QEvent::KeyPress, key, mod);
+                    QApplication::sendEvent(&e, &ke);
+                    QApplication::processEvents();
+                };
+                const auto strokeAt = [&](bool erase) {
+                    // 涂/擦：固定三点一笔。空擦（没碰到任何笔迹）=
+                    // 无操作，不入撤销栈（应用同语义：after==before 不记录）
+                    QWidget *vp = e.viewport();
+                    const QVector<QPainterPath> beforePaths = e.inkPaths();
+                    const QPointF p1(vp->width() * 0.3, vp->height() * 0.5);
+                    const QPointF p2(vp->width() * 0.5, vp->height() * 0.45);
+                    const QPointF p3(vp->width() * 0.7, vp->height() * 0.5);
+                    QMouseEvent pr(QEvent::MouseButtonPress, p1, vp->mapToGlobal(p1.toPoint()),
+                                   Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                    QApplication::sendEvent(vp, &pr);
+                    QMouseEvent mv1(QEvent::MouseMove, p2, vp->mapToGlobal(p2.toPoint()),
+                                    Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                    QApplication::sendEvent(vp, &mv1);
+                    QMouseEvent mv2(QEvent::MouseMove, p3, vp->mapToGlobal(p3.toPoint()),
+                                    Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                    QApplication::sendEvent(vp, &mv2);
+                    QMouseEvent re(QEvent::MouseButtonRelease, p3, vp->mapToGlobal(p3.toPoint()),
+                                   Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+                    QApplication::sendEvent(vp, &re);
+                    QApplication::processEvents();
+                    if (e.inkPaths() != beforePaths) {
+                        pushFrame();
+                        curPaths = e.inkPaths();
+                    }
+                    return true;
+                };
+                uint32_t rng = 0x9E3779B9u;
+                const auto rnd = [&rng] {
+                    rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+                    return rng;
+                };
+                int opNo = 0;
+                bool ok = true;
+                QString trace;
+                for (int step = 0; step < 90 && ok; ++step) {
+                    const int op = int(rnd() % 10);
+                    ++opNo;
+                    const bool atStart = (opNo % 2 == 1);
+                    curPaths = e.inkPaths(); // 每步后同步笔迹基线
+                    if (op < 3) { // 打字（文首/文末交替，模型同知）
+                        const QChar ch = chars.at(int(rnd() % uint(chars.size())));
+                        QTextCursor c = e.textCursor();
+                        // 文末 = 尾随换行之前（真实打字位置；size() 是空尾块）
+                        c.setPosition(atStart ? 0 : qMax(0, e.toPlainText().size() - 1));
+                        e.setTextCursor(c);
+                        QApplication::processEvents();
+                        pushFrame();
+                        QTextCursor cc = e.textCursor();
+                        cc.insertText(QString(ch)); // 与输入法落字同路径
+                        QApplication::processEvents();
+                        curDoc.insert(atStart ? 0 : curDoc.size() - 1, ch); // 位置级
+                        trace += QStringLiteral("T%1;").arg(QString(ch));
+                        if (e.toPlainText() != curDoc) {
+                            qWarning("selftest FAIL: chaos op#%d type '%s' [%s]",
+                                     opNo, qPrintable(QString(ch)), qPrintable(trace));
+                            ok = false;
+                        }
+                    } else if (op < 5) { // 删除/换行
+                        QTextCursor c = e.textCursor();
+                        c.setPosition(atStart ? 0 : qMax(0, e.toPlainText().size() - 1));
+                        e.setTextCursor(c);
+                        QApplication::processEvents();
+                        const bool noopDel = (op == 3) && atStart;
+                        if (!noopDel)
+                            pushFrame();
+                        if (op == 3) {
+                            sendKey(Qt::Key_Backspace, {});
+                            if (!atStart) {
+                                // 纯字符串位置级删除 = QTextDocument 块语义的
+                                // 精确镜像（删 \n = 并块、删空行 = 收一行）
+                                const int pos = curDoc.size() - 1;
+                                if (pos > 0)
+                                    curDoc.remove(pos - 1, 1);
+                            } // 文首退格 = 无操作（不入栈）
+                            trace += QStringLiteral("B;");
+                            if (e.toPlainText() != curDoc) {
+                                qWarning("selftest FAIL: chaos op#%d backspace got=[%s] want=[%s] [%s]",
+                                         opNo,
+                                         qPrintable(QString(e.toPlainText()).replace(QLatin1Char('\n'), QChar(0x23CE))),
+                                         qPrintable(QString(curDoc).replace(QLatin1Char('\n'), QChar(0x23CE))),
+                                         qPrintable(trace));
+                                ok = false;
+                            }
+                        } else {
+                            sendKey(Qt::Key_Return, {});
+                            curDoc.insert(atStart ? 0 : curDoc.size() - 1, QLatin1Char('\n'));
+                            trace += QStringLiteral("N;");
+                            if (e.toPlainText() != curDoc) {
+                                qWarning("selftest FAIL: chaos op#%d enter [%s]",
+                                         opNo, qPrintable(trace));
+                                ok = false;
+                            }
+                        }
+                    } else if (op < 7) { // 涂/擦（含模式切换）
+                        sendKey(op == 5 ? Qt::Key_D : Qt::Key_E, Qt::ControlModifier);
+                        trace += op == 5 ? QStringLiteral("D;") : QStringLiteral("E;");
+                        strokeAt(false);
+                    } else if (op == 7) { // 撤销
+                        if (undoStack.size() > 1) {
+                            redoStack.append({ curDoc, curPaths }); // 重做帧 = 撤销前状态
+                            const Frame expected = undoStack.takeLast();
+                            sendKey(Qt::Key_Z, Qt::ControlModifier);
+                            curDoc = expected.doc; // 恢复被弹出的帧（上一状态）
+                            curPaths = expected.paths;
+                            trace += QStringLiteral("U;");
+                            if (e.toPlainText() != curDoc || e.inkPaths() != curPaths) {
+                                qWarning("selftest FAIL: chaos op#%d undo — got=[%s] want=[%s] [%s]",
+                                         opNo,
+                                         qPrintable(QString(e.toPlainText()).replace(QLatin1Char('\n'), QChar(0x23CE))),
+                                         qPrintable(QString(curDoc).replace(QLatin1Char('\n'), QChar(0x23CE))),
+                                         qPrintable(trace));
+                                ok = false;
+                            }
+                        }
+                    } else { // 重做
+                        if (!redoStack.isEmpty()) {
+                            undoStack.append({ curDoc, curPaths }); // 重做前的状态可再撤销
+                            const Frame expected = redoStack.takeLast();
+                            sendKey(Qt::Key_Y, Qt::ControlModifier);
+                            curDoc = expected.doc; // 恢复撤销前的状态
+                            curPaths = expected.paths;
+                            trace += QStringLiteral("R;");
+                            if (e.toPlainText() != curDoc || e.inkPaths() != curPaths) {
+                                qWarning("selftest FAIL: chaos op#%d redo — text ok=%d ink got=%d want=%d [%s]",
+                                         opNo, int(e.toPlainText() == curDoc),
+                                         int(e.inkPaths().size()), int(curPaths.size()),
+                                         qPrintable(trace));
+                                ok = false;
+                            }
+                        }
+                    }
+                }
+                if (!ok)
+                    return false;
+                qInfo("CRT-CHAOS 90 ops passed (undo/redo interleave consistent)");
+                e.setPlainText(QStringLiteral("無\n"));
+                e.clearInk();
+                QApplication::processEvents();
             }
             // M1：退出重进显 → 视角锁定重置
             e.toggleCrt();
@@ -4133,10 +4484,13 @@ private:
         if (after == m_inkBefore)
             return;
         m_inkUndo.append({m_inkBefore, after});
-        if (m_inkUndo.size() > 100)
+        m_undoOps.append(false);
+        if (m_inkUndo.size() > 100) {
             m_inkUndo.removeFirst();
+            m_undoOps.removeFirst(); // 日志与墨迹栈锁步截断
+        }
         m_inkRedo.clear();
-        m_lastWasInk = true;
+        m_redoOps.clear();
     }
 
     void resizeEvent(QResizeEvent *event) override
@@ -4512,8 +4866,9 @@ private:
     QVector<Canvas::InkStroke> m_inkBefore;
     bool m_inkSession = false;
     bool m_shiftInkActive = false;
-    bool m_lastWasInk = false;
-    bool m_undoWasInk = false;
+    QVector<bool> m_undoOps; // 统一撤销日志：true=文字步 false=墨迹步（时间序）
+    QVector<bool> m_redoOps;
+    bool m_inUndoRedo = false; // 撤销/重做重入保护：contentsChange 不入日志
     bool m_codeMode = false;
     int m_gutterWidth = 0;
     QFont m_codeFont;
@@ -4530,6 +4885,7 @@ private:
     bool m_scrolling = false;
     bool m_crtGridActive = false; // 显·机器原生网格态：resize 重拟合
     QElapsedTimer m_mouseMoveClock; // 鼠标移动时钟：视图移动期幽灵加速衰减
+    QElapsedTimer m_inputClock;     // 输入突发时钟：打字/删除期链节流 + 半分辨率
     SnapshotCompositor m_compositor; // 快照合成器（全量/增量/脏区）
     QRect m_snapDirty;          // P3：增量快照脏区（编辑器坐标）
     bool m_snapFullDirty = true; // 全量标志（滚动/缩放/换机/首次）

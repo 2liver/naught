@@ -42,6 +42,9 @@ public:
     bool pipelineUsable() const;
     // 自检同步点：在途回读是否已落地（false = 可安全捕获当前帧）
     bool readbackIdle() const { return !m_readbackInFlight; }
+    // 性能埋点（显模式卡顿取证/回归闸）：
+    int watchdogFires() const { return m_watchdogFires; }
+    int maxReadbackMs() const { return m_maxReadbackMs; }
     // 全屏/窗口过渡后 Metal 回读可能失联：强制重置管线（下一帧全量重建）
     void resetPipeline()
     {
@@ -51,6 +54,13 @@ public:
         ensureRhi();
     }
     QImage frameImage() const { return m_pending; }
+    void flushHistory()
+    {
+        // 强制余晖历史清零（切机/调色板切换用）：旧机的磷光幽灵
+        // 不得滞留新机屏幕——连续 3 帧纯快照后自然恢复
+        m_sinceViewChange = 0;
+        m_forceNow = true;
+    }
     QImage shownImage() const { return m_shown; } // 着色后回读帧（GPU 真输出）
 
 protected:
@@ -98,6 +108,11 @@ private:
     QRhiSampler *m_samplerLinear = nullptr;
     QRhiBuffer *m_ubuf = nullptr;
     QPointF m_lastView{ -1.0, -1.0 }; // 上一帧观察者位置：跳变帧清零余晖历史
+    int m_watchdogFires = 0;              // 回读看门狗触发次数（性能回归闸）
+    int m_watchdogStreak = 0;             // 连续轻恢复计数：三次才整管线重建
+    int m_maxReadbackMs = 0;              // 回读最坏延迟 ms（性能回归闸）
+    QElapsedTimer m_chainClock;           // 上一链启动时刻：输入突发期链节流
+    int m_lastMachine = -1;              // 上一帧机型：切机 = 历史清零
     int m_sinceViewChange = 3;          // 观察者稳定后的连续帧数：<3 时余晖权重保持清零
     QImage m_pending; // CPU 合成快照（上传源，仅脏帧重拍）
     QImage m_shown;   // 最近一帧 GPU 输出（paintEvent 绘制）

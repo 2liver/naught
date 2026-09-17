@@ -397,18 +397,38 @@ void CrtView::renderFrame()
         || !m_ubuf || !m_snapTex) {
         return;
     }
-    // 回读看门狗：全屏过渡等场景下 Metal 回读可能失联——超时强制复位
+    // 回读看门狗：全屏过渡等场景下 Metal 回读可能失联——超时强制复位。
+    // 轻恢复优先：只作废在途回读 + 强制下一拍重渲染（迟到回调按代际
+    // 丢弃）；整管线重建 = 主线程重活（用户实机"卡一秒"的元凶：800ms
+    // 超时 + 全量重建）。连续三次轻恢复仍卡（RHI 真失联——全屏换
+    // NSWindow 场景）才整管线重建
     if (m_readbackInFlight && m_readbackClock.isValid()
         && m_readbackClock.elapsed() > 800) {
+        ++m_watchdogFires;
+        ++m_watchdogStreak;
         m_readbackInFlight = false;
         ++m_readbackGen; // 在途回读作废：迟到回调不覆盖新帧
-        releaseGpu();
-        ensureRhi();
         m_forceNow = true;
         m_sinceRefresh.invalidate();
+        if (m_watchdogStreak >= 3) {
+            qWarning("CRT-RHI watchdog x%d — full pipeline rebuild", m_watchdogStreak);
+            releaseGpu();
+            ensureRhi();
+            m_watchdogStreak = 0;
+        }
+    } else if (m_readbackInFlight) {
+        m_watchdogStreak = 0;
     }
     if (m_readbackInFlight)
         return;
+    const CrtConfig cfg = m_source->config(); // 每帧配置值快照
+    // 输入突发期链节流：打字/删除连发时链按 ~20fps 节流（50ms 起拍
+    // 间隔）——GPU/回读不被逐键压垮，主线程有余量处理输入法提交
+    //（用户报：显模式删字/落字卡一秒；节流后脏旗保留，停手即补齐）
+    if ((cfg.typing || cfg.drawing) && m_chainClock.isValid()
+        && m_chainClock.elapsed() < 50)
+        return;
+    m_chainClock.start();
     // P1 脏驱动：无变化且未到环境拍 → 整链跳过。环境拍 120ms 保底
     // 滚动带/颗粒/余晖的持续推进（余晖在 GPU 按时间衰减，零 CPU 重活）
     const bool dirty = m_renderDirty || m_forceNow;
@@ -417,11 +437,14 @@ void CrtView::renderFrame()
         return;
     m_renderDirty = false;
     m_ambientClock.restart();
-    const CrtConfig cfg = m_source->config(); // 每帧配置值快照
     // 滚动期半分辨率：运动掩蔽下 2×2 下采样不可感知，回读数据量 ÷4、
     // GPU 填充 ÷4；掩膜/扫描线锚定的屏幕栅格随目标减半（滚动中不可见），
     // 停稳后 settle 标全量、回全分辨率重拍自愈
-    m_renderScale = cfg.scrolling ? 0.5 : 1.0;
+    // 半分辨率：滚动 + 画刷会话（涂/擦按住拖动）。画刷会话随落笔/
+    // 抬笔切换（会话边界各一次管线重建，远轻于会话内逐 move 的全
+    // 分辨率链+2.7MB 回读——显模式笔刷卡顿的直接修法）；输入突发
+    // 期不做（打字节流已由 50ms 起拍间隔承担，且重建正是要避免的冻结）
+    m_renderScale = (cfg.scrolling || cfg.drawing) ? 0.5 : 1.0;
     const QSize want(qMax(1, int(width() * devicePixelRatioF() * m_renderScale)),
                      qMax(1, int(height() * devicePixelRatioF() * m_renderScale)));
     if (want != m_texSize) {
@@ -497,10 +520,12 @@ void CrtView::renderFrame()
     const bool viewJump = qAbs(view.x() - m_lastView.x())
                           + qAbs(view.y() - m_lastView.y()) > 0.005;
     m_lastView = view;
+    const bool machineJump = int(cfg.machine) != m_lastMachine;
+    m_lastMachine = int(cfg.machine);
     // 跳变/移动后连续 3 帧纯快照：三个历史槽全部被当前帧内容覆盖，
     // 才允许余晖权重恢复——否则槽里滞留的旧位置内容会在恢复瞬间
     // 复活成双影带（DPR2/慢机实测 bands=3）
-    if (cfg.viewMoving || viewJump)
+    if (cfg.viewMoving || viewJump || machineJump)
         m_sinceViewChange = 0;
     else if (m_sinceViewChange < 3)
         ++m_sinceViewChange;
@@ -600,6 +625,7 @@ void CrtView::renderFrame()
 
             img.setDevicePixelRatio(devicePixelRatioF()); // 物理像素：1:1 落屏
             m_shown = std::move(img);
+            m_maxReadbackMs = qMax(m_maxReadbackMs, int(m_readbackClock.elapsed()));
             m_readbackInFlight = false;
             delete rb;
             update();
