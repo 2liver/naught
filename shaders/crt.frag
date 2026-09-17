@@ -27,12 +27,11 @@ vec3 sampleAt(vec2 uv)
 
 vec2 curve(vec2 uv) {
     vec2 c = uv - 0.5;
-    // 视差（鼠标即观察者）：左右——观察者侧的图像后退；上下——已确认为直觉同向
+    // 视差（鼠标即观察者）：左右——观察者侧的图像后退；上下——已确认为直觉同向。
+    // 铁律：不做桶形畸变（毁打字）——视差只平移电子图像，不弯曲字形。
     c.x += ubuf.view.x * 0.032;
     c.y -= ubuf.view.y * 0.032;
-    float r2 = dot(c, c);
-    float k = mix(0.05, 0.10, step(0.5, ubuf.flags.x)); // 实验·屏幕实体：曲率加倍
-    return c * (1.0 + k * r2) + 0.5;
+    return c + 0.5;
 }
 
 float hash21(vec2 p)
@@ -62,12 +61,13 @@ float triadDot(vec2 sp, float phase)
 
 void main()
 {
-    // ---- 内容空间：弯曲的电子图像（含视差）。栅网/扫描线/玻璃都在
+    // ---- 内容空间：电子图像（含视差平移）。栅网/扫描线/玻璃都在
     // 屏幕空间——真机上它们是固定在玻璃上的，不随视差移动 ----
-    // 实验·屏幕实体：曲率加倍时输入内缩同步加大——内容永不越界（不裁字）
+    // 铁律：无桶形畸变 → 内容 1:1 采样、零内缩。旧内缩（0.965 缩放 +
+    // 0.0175 偏移）是桶形时代的防越界补丁：它把内容放大 3.6% 并把
+    // 顶部/左侧 ~5px 裁出屏外——顶部第一行文字被吃、整幅偏大（用户报）。
     float ent = step(0.5, ubuf.flags.x);
-    vec2 inuv = v_uv * mix(0.965, 0.93, ent) + mix(0.0175, 0.035, ent);
-    vec2 cuv = clamp(curve(inuv), 0.0, 1.0);
+    vec2 cuv = clamp(curve(v_uv), 0.0, 1.0);
     vec3 col = sampleAt(cuv);
 
     // 真衍射。单色机：亮边 ±1px R/B 微彩边（bright(x)−bright(x±1) 差分，
@@ -141,7 +141,7 @@ void main()
     // 的 max 叠加同模型（CPU 版最近邻放大，此处线性放大更平滑）。
     // 叠加发生在栅网之前：辉光与内容一同被掩膜/扫描线调制（与 CPU
     // 烘拍顺序一致）
-    col = max(col, texture(glow, v_uv).rgb * ubuf.glowInfo.x);
+    col = max(col, texture(glow, cuv).rgb * ubuf.glowInfo.x);
 
     // ---- 屏幕空间：固定不动的磷粉栅、扫描线（真玻璃结构）----
     vec2 sp = v_uv * ubuf.texSize; // 屏幕物理像素
@@ -188,9 +188,11 @@ void main()
         col += grain + dust * ubuf.dustCol.rgb * 0.10;
     }
 
-    // 玻璃反光带：一道对角淡白反光，随观察者移动（真玻璃反射）
+    // 玻璃反光带：一道对角淡白反光（charter：一次性预渲染覆盖层——
+    // 基准角固定）。观察者移动时角度轻微摆动（真玻璃反射），但锁定
+    // 正对视角下仍是那道经典对角带，不因 view=0 而消失
     {
-        vec2 n = normalize(vec2(ubuf.view.x * 0.8, 0.6));
+        vec2 n = normalize(vec2(0.35 + ubuf.view.x * 0.15, 0.94));
         float refl = pow(max(0.0, 1.0 - abs(dot(n, vec2(0.35, 0.94)) - 0.62) * 3.2), 2.0);
         col += ubuf.refl.rgb * refl * 0.045;
     }

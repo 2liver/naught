@@ -464,15 +464,16 @@ void CrtView::renderFrame()
         m_forceNow = false;
         m_sinceRefresh.restart();
     }
-    // 观察者 = 鼠标（视差每帧更新，不受快照节流）；锁定（M1）= 复现鼠标
-    // 离开窗口后的"完美视角"（观察者站在屏幕正前方，内容完整不被裁剪）
+    // 观察者 = 鼠标（视差每帧更新，不受快照节流）；锁定（M1）= 观察者
+    // 正对屏幕中心：视差偏移为零，电子图像不位移、不倾斜（铁律 4：
+    // 不毁打字——非零偏移会让整幅内容整体偏移，观感为"弧斜"）
     QPointF view;
     if (cfg.viewLocked) {
-        view = QPointF(-0.25, -0.12); // 与无鼠标默认分支同值
+        view = QPointF(0.0, 0.0);
     } else {
         view = cfg.lastMouse;
         if (view.x() < 0) {
-            view = QPointF(-0.25, -0.12);
+            view = QPointF(0.0, 0.0);
         } else {
             view = QPointF(
                 (view.x() / qMax(1.0, qreal(m_source->sourceViewportSize().width())) - 0.5) * 2.0,
@@ -487,7 +488,23 @@ void CrtView::renderFrame()
     else
         m_frameClock.start();
     // 余晖权重（前两帧历史纹理未初始化 → 清零 = 无历史）
-    const bool histPrimed = m_histFrame >= 2;
+    // 视图移动期（鼠标拖动视差）或视图跳变帧（锁切换/解锁——观察者
+    // 位置突变）：历史清零 = 纯快照——旧位置的磷光幽灵当场熄灭，文字
+    // 跟随鼠标移动时零拖影（用户报的"动鼠标出倒影"根修；宽窗口大
+    // 字号下拖影带可达 6 条，4 倍速衰减压不住）。viewJump 兜住
+    // viewMoving 150ms 时钟与渲染节奏的竞态（慢机/ASAN 下锁后第一
+    // 帧迟到、时钟已过期 → 旧偏移 hist 与新帧混合成双影带）
+    const bool viewJump = qAbs(view.x() - m_lastView.x())
+                          + qAbs(view.y() - m_lastView.y()) > 0.005;
+    m_lastView = view;
+    // 跳变/移动后连续 3 帧纯快照：三个历史槽全部被当前帧内容覆盖，
+    // 才允许余晖权重恢复——否则槽里滞留的旧位置内容会在恢复瞬间
+    // 复活成双影带（DPR2/慢机实测 bands=3）
+    if (cfg.viewMoving || viewJump)
+        m_sinceViewChange = 0;
+    else if (m_sinceViewChange < 3)
+        ++m_sinceViewChange;
+    const bool histPrimed = m_histFrame >= 2 && m_sinceViewChange >= 3;
     const float k1[4] = { histPrimed ? float(pal.persist1[2]) : 0.0f,
                           histPrimed ? float(pal.persist1[1]) : 0.0f,
                           histPrimed ? float(pal.persist1[0]) : 0.0f, 1.0f };

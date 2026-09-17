@@ -97,6 +97,8 @@ private:
     QRhiSampler *m_samplerNearest = nullptr;
     QRhiSampler *m_samplerLinear = nullptr;
     QRhiBuffer *m_ubuf = nullptr;
+    QPointF m_lastView{ -1.0, -1.0 }; // 上一帧观察者位置：跳变帧清零余晖历史
+    int m_sinceViewChange = 3;          // 观察者稳定后的连续帧数：<3 时余晖权重保持清零
     QImage m_pending; // CPU 合成快照（上传源，仅脏帧重拍）
     QImage m_shown;   // 最近一帧 GPU 输出（paintEvent 绘制）
     bool m_forceNow = false;

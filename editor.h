@@ -442,6 +442,9 @@ public:
         beginInkSession();
         m_canvas->clearAll();
         endInkSession();
+        markSnapshotFullDirty(); // 墨水进了光栅快照：清墨必须强制重拍，
+        // 否则 80ms 节流窗口内旧墨迹残留在 CRT 画面上（用户擦除后
+        // 画面滞后 = 本行缺失的根修；暴力闸清墨依赖此标脏）
     }
 
     // 言：选中（或当前）每一行头尾加「」，批量校对打钩；空行跳过；
@@ -2411,6 +2414,37 @@ public:
             // 同一公式，不再取决于按键瞬间的旧宽度——用户报窗口化字号
             // 反超全屏的根修）
             {
+                // C64 网格同样跟随窗口（用户报 C64 ⌘0 窗口化字号反超
+                // 全屏的回归闸）：resize 后必须按新宽度重拟合，且严格
+                // 单调——更宽的窗口绝不得到更小的字号
+                while (e.machine() != 2)
+                    e.toggleMachine();
+                QApplication::processEvents();
+                e.zoomReset();
+                QApplication::processEvents();
+                const int wc0 = e.width();
+                const int px0 = e.document()->defaultFont().pixelSize();
+                e.resize(wc0 + 160, e.height());
+                QApplication::processEvents();
+                const int px1 = e.document()->defaultFont().pixelSize();
+                // C64 公式：m_size = min(w/40/1.25, 16)，像素 = m_size×1.25
+                const auto c64Want = [](int w) {
+                    return qMax(6, qRound(qMin(w / 40.0 / 1.25, 16.0) * 1.25));
+                };
+                if (qAbs(px0 - c64Want(wc0)) > 1 || qAbs(px1 - c64Want(wc0 + 160)) > 1
+                    || px1 < px0) {
+                    qWarning("selftest FAIL: C64 crt grid not following window (%d->%d, want %d->%d)",
+                             px0, px1, c64Want(wc0), c64Want(wc0 + 160));
+                    return false;
+                }
+                while (e.machine() != 0)
+                    e.toggleMachine();
+                QApplication::processEvents();
+                e.resize(wc0, e.height()); // 恢复窗口宽度（后续打印测试按窗口拟合）
+                QApplication::processEvents();
+                e.zoomReset(); // 恢复琥珀网格态（后续画面断言以之为准）
+            }
+            {
                 const int w0 = e.width();
                 e.zoomReset();
                 const QFont gf0 = e.document()->defaultFont();
@@ -2541,6 +2575,49 @@ public:
             } else {
                 qWarning("selftest SKIP: no usable RHI backend — CRT GPU render checks skipped");
             }
+            // 快照几何：文字在顶部第一行；此前的涂擦测试留下两个墨水圆点，
+            // 必须同样出现在合成快照里（墨水进光栅 = 显模式下涂/擦可用的回归闸）。
+            // 必须在暴力几何闸之前跑：暴力闸 clearInk() 会清掉墨水
+            {
+                // 块状反相光标有焦点时会把首字格反相、吃掉顶部琥珀——
+                // 光标挪到文末，让顶部断言照旧测文字本身
+                QTextCursor endC = e.textCursor();
+                endC.movePosition(QTextCursor::End);
+                e.setTextCursor(endC);
+                QApplication::processEvents();
+                QImage snapImg(e.viewport()->size(), QImage::Format_ARGB32);
+                snapImg.fill(Qt::transparent);
+                e.paintTextSnapshot(snapImg);
+                const QImage snap = snapImg;
+                int topAmber = 0, inkAmber = 0;
+                for (int y = 0; y < snap.height(); ++y)
+                    for (int x = 0; x < snap.width(); ++x) {
+                        const QRgb px = snap.pixel(x, y);
+                        if (qRed(px) > 150 && qGreen(px) > 80 && qBlue(px) < 90) {
+                            if (y < 40) ++topAmber; else ++inkAmber;
+                        }
+                    }
+                qInfo("CRT-SNAP amber top=%d ink=%d", topAmber, inkAmber);
+                if (topAmber < 10 || inkAmber < 500) {
+                    qWarning("selftest FAIL: snapshot composite broken (text top=%d ink=%d)",
+                             topAmber, inkAmber);
+                    return false;
+                }
+            }
+            // 清墨：ghost 带检查只统计文本。墨水矩形（涂擦测试留下）在
+            // 下半屏，会与顶部文字构成第二亮带——原版检查靠"顶部文字
+            // 被内缩裁掉看不见"侥幸通过，内缩修掉后必须显式清墨
+            e.clearInk();
+            // 强制重拍并等新帧落盘：waitReadback 在"无在途回读"时立即
+            // 返回，会拿到清墨前的旧 m_shown（含墨帧）——时序洞
+            e.m_crtView->markDirty(true);
+            QApplication::processEvents();
+            {
+                QEventLoop settle;
+                QTimer::singleShot(100, &settle, &QEventLoop::quit);
+                settle.exec();
+            }
+            QApplication::processEvents();
             // 鼠标移动复现（用户报：动鼠标出倒影）——解锁追随视角后
             // 注入两段鼠标位移，各捕一帧落盘对比
             {
@@ -2566,6 +2643,15 @@ public:
                     e.m_crtView->markDirty(true);
                     QApplication::processEvents();
 
+                }
+                waitReadback();
+                // 确保捕获扫动后的新帧（同上时序洞：无在途回读时立即返回）
+                e.m_crtView->markDirty(true);
+                QApplication::processEvents();
+                {
+                    QEventLoop settle;
+                    QTimer::singleShot(80, &settle, &QEventLoop::quit);
+                    settle.exec();
                 }
                 waitReadback();
                 // 回归断言：停稳后不得残留旧位置的亮幽灵带（倒影）
@@ -2599,11 +2685,12 @@ public:
                 e.toggleViewLock(); // 恢复锁定
             }
             // ============ 暴力几何闸（用户实机倒影/弧斜的根修测试） ============
-            // 粘贴代码级内容 + 鼠标移动后，画面必须满足：
+            // 琥珀 + C64 两台各跑一遍。粘贴代码级内容 + 鼠标扫动后，画面必须满足：
             //   1. 文本亮带只允许出现在顶部 20% 区域（一行都不能偏）
             //   2. 其余行必须纯暗（任何第二亮带 = 倒影回归，直接失败）
-            //   3. 上下半帧不得镜像相似（倒影 = 绕中心镜像）
-            {
+            //   3. 下半帧不得出现远超背景基线的亮行（镜像倒影 = 亮文本行）
+            // 判定全部用亮度 (r+g+b)——琥珀/C64 蓝底同口径（暴力跨机型）
+            for (const int violentMachine : { 0, 2 }) {
                 auto waitReadback = [&] {
                     for (int guard = 0; guard < 300 && e.m_crtView && !e.m_crtView->readbackIdle(); ++guard) {
                         QEventLoop settle;
@@ -2611,6 +2698,9 @@ public:
                         settle.exec();
                     }
                 };
+                while (e.machine() != violentMachine)
+                    e.toggleMachine();
+                QApplication::processEvents();
                 e.clearInk(); // 清早期测试的墨迹圆点——暴力统计只许文本
                 e.setPlainText(QStringLiteral("orders = [(\"张三\", 99.5)]\nbig = [o for o in orders if o[1] > 100]\nprint(big)\n"));
                 e.verticalScrollBar()->setValue(0);
@@ -2639,132 +2729,77 @@ public:
                 e.verticalScrollBar()->setValue(0);
                 QApplication::processEvents();
                 waitReadback();
-                {
-                    QImage pp(e.viewport()->size(), QImage::Format_ARGB32);
-                    pp.fill(Qt::black);
-                    QPainter ppp(&pp);
-                    e.viewport()->render(&ppp);
-                    ppp.end();
-                    int firstLit = -1, lastLit = -1;
-                    for (int y = 0; y < pp.height(); ++y) {
-                        const uchar *line = pp.constScanLine(y);
-                        int n = 0;
-                        for (int x = 0; x < pp.width(); ++x)
-                            if (line[x*4+1] > 120 || line[x*4+2] > 120) ++n;
-                        if (n > 5) { if (firstLit < 0) firstLit = y; lastLit = y; }
-                    }
-                    qWarning("PROBE-AT-CAPTURE: img=%dx%d dpr=%g vp=%dx%d scroll=%d lit=%d..%d",
-                             pp.width(), pp.height(), pp.devicePixelRatio(),
-                             e.viewport()->width(), e.viewport()->height(),
-                             e.verticalScrollBar()->value(), firstLit, lastLit);
-                    // 复刻合成器精确配置
-                    {
-                        QImage pp2(e.viewport()->size() * 2, QImage::Format_ARGB32);
-                        pp2.setDevicePixelRatio(2.0);
-                        QPainter ppp2(&pp2);
-                        ppp2.fillRect(pp2.rect(), QColor(12, 9, 3));
-                        e.viewport()->render(&ppp2, e.viewport()->pos());
-                        ppp2.end();
-                        int f2 = -1, l2 = -1;
-                        for (int y = 0; y < pp2.height(); ++y) {
-                            const uchar *line = pp2.constScanLine(y);
-                            int n = 0;
-                            for (int x = 0; x < pp2.width(); ++x)
-                                if (line[x*4+1] > 120 || line[x*4+2] > 120) ++n;
-                            if (n > 5) { if (f2 < 0) f2 = y; l2 = y; }
-                        }
-                        qWarning("PROBE-COMPOSITOR-EXACT: img=%dx%d dpr=%g lit=%d..%d",
-                                 pp2.width(), pp2.height(), pp2.devicePixelRatio(), f2, l2);
-                    }
-                }
                 QImage vimg(e.size(), QImage::Format_ARGB32);
                 vimg.fill(Qt::white);
                 e.render(&vimg);
-                vimg.save(QStringLiteral("/tmp/crt_violent.png")); // TEMP-DEBUG
-                e.crtShownImage().save(QStringLiteral("/tmp/crt_violent_shown.png")); // TEMP-DEBUG
 
-                // 逐行亮像素统计
-                QVector<int> rowLit(vimg.height(), 0);
-                int litTotal = 0;
+                // 像素级亮度统计：下半帧像素亮度中位数 = 背景基线
+                //（调色板无关：琥珀暗底 ~24、C64 蓝底 ~130 各取自身基线）。
+                // 文字核心亮度是背景的 4~5 倍（琥珀 431 / C64 521），
+                // 背景的栅纹/颗粒峰只到 ~2 倍内——2.5 倍阈清晰切开。
+                // 中位数对镜像污染鲁棒（倒影亮带只占少量像素，几乎不
+                // 移动中位数），基线不会被倒影本身抬走。
+                QVector<int> allLum;
+                const int rowCols = vimg.width() - 32;
+                allLum.reserve((vimg.height() / 2) * rowCols);
+                for (int y = vimg.height() / 2; y < vimg.height(); ++y)
+                    for (int x = 2; x < vimg.width() - 30; ++x) {
+                        const QRgb px = vimg.pixel(x, y);
+                        allLum.append(qRed(px) + qGreen(px) + qBlue(px));
+                    }
+                std::sort(allLum.begin(), allLum.end());
+                const int bgMed = allLum.isEmpty() ? 0 : allLum[allLum.size() / 2];
+                const int bright = bgMed * 5 / 2;
+                QVector<int> brightCount(vimg.height(), 0);
                 for (int y = 0; y < vimg.height(); ++y)
                     for (int x = 2; x < vimg.width() - 30; ++x) {
                         const QRgb px = vimg.pixel(x, y);
-                        if (qRed(px) + qGreen(px) > 200 && qBlue(px) < 100) {
-                            ++rowLit[y];
-                            ++litTotal;
-                        }
+                        if (qRed(px) + qGreen(px) + qBlue(px) > bright)
+                            ++brightCount[y];
                     }
-                // 1. 文本带必须在顶部 20%
-                int topBandRows = 0, strayBandRows = 0;
-                const int topLimit = vimg.height() / 5;
+                // 文本行 = 行内 ≥4 个超阈像素（字形笔画核心）
+                const auto isTextRow = [&brightCount](int y) {
+                    return brightCount[y] >= 4;
+                };
+                // 1. 文本带必须从顶部开始（首行文本行出现在顶部 12% 内）
+                int first = -1, last = -1;
                 for (int y = 0; y < vimg.height(); ++y)
-                    if (rowLit[y] > 4) {
-                        if (y < topLimit)
-                            ++topBandRows;
-                        else
-                            ++strayBandRows;
+                    if (isTextRow(y)) {
+                        if (first < 0)
+                            first = y;
+                        last = y;
                     }
-                if (topBandRows < 4) {
-                    qWarning("selftest FAIL: violent — no text band in top 20%% (topBand=%d lit=%d)",
-                             topBandRows, litTotal);
+                if (first < 0 || first > vimg.height() * 12 / 100) {
+                    qWarning("selftest FAIL: violent — text band not starting at top (machine=%d first=%d bgMed=%d bright=%d) — 位移",
+                             e.machine(), first, bgMed, bright);
                     return false;
                 }
-                if (strayBandRows > 1) {
-                    qWarning("selftest FAIL: violent — content outside top 20%% (stray=%d rows) — 倒影/位移",
-                             strayBandRows);
-                    return false;
-                }
-                // 3. 下半帧能量闸（倒影 = 绕中心镜像的亮副本）：下半帧
-                // 亮像素总量必须远小于上半帧（文本在顶部，下方应纯暗）
-                {
-                    long topSum = 0, bottomSum = 0;
-                    const int half = vimg.height() / 2;
-                    for (int y = 0; y < half; ++y)
-                        for (int x = 2; x < vimg.width() - 30; ++x) {
-                            const QRgb px = vimg.pixel(x, y);
-                            topSum += qRed(px) + qGreen(px);
+                // 2. 文本带必须连续：带内空隙 ≤ 6 行（扫描线暗行不割带）；
+                //    第二亮带 = 倒影/残影回归，直接失败
+                int gap = 0;
+                for (int y = first + 1; y <= last; ++y)
+                    if (!isTextRow(y)) {
+                        if (++gap > 6) {
+                            qWarning("selftest FAIL: violent — text band split (machine=%d gap at y=%d first=%d last=%d) — 倒影",
+                                     e.machine(), y, first, last);
+                            return false;
                         }
-                    for (int y = half; y < vimg.height(); ++y)
-                        for (int x = 2; x < vimg.width() - 30; ++x) {
-                            const QRgb px = vimg.pixel(x, y);
-                            bottomSum += qRed(px) + qGreen(px);
-                        }
-                    if (bottomSum * 4 > topSum) {
-                        qWarning("selftest FAIL: violent — bottom half too bright (top=%ld bottom=%ld) — 倒影",
-                                 topSum, bottomSum);
+                    } else {
+                        gap = 0;
+                    }
+                // 3. 镜像倒影：下半帧任何文本级亮行（倒影 = 绕中心镜像的
+                //    亮文本副本；旧版 bottom*4>top 在背景磷光恒亮下
+                //    数学上不可过，废弃）
+                for (int y = vimg.height() / 2; y < vimg.height(); ++y)
+                    if (isTextRow(y)) {
+                        qWarning("selftest FAIL: violent — bright row in bottom half (machine=%d y=%d count=%d bg=%d) — 倒影",
+                                 e.machine(), y, brightCount[y], bgMed);
                         return false;
                     }
-                }
                 e.setPlainText(QStringLiteral("無\n"));
             }
-            // 快照几何：文字在顶部第一行；此前的涂擦测试留下两个墨水圆点，
-            // 必须同样出现在合成快照里（墨水进光栅 = 显模式下涂/擦可用的回归闸）
-            {
-                // 块状反相光标有焦点时会把首字格反相、吃掉顶部琥珀——
-                // 光标挪到文末，让顶部断言照旧测文字本身
-                QTextCursor endC = e.textCursor();
-                endC.movePosition(QTextCursor::End);
-                e.setTextCursor(endC);
-                QApplication::processEvents();
-                QImage snapImg(e.viewport()->size(), QImage::Format_ARGB32);
-                snapImg.fill(Qt::transparent);
-                e.paintTextSnapshot(snapImg);
-                const QImage snap = snapImg;
-                int topAmber = 0, inkAmber = 0;
-                for (int y = 0; y < snap.height(); ++y)
-                    for (int x = 0; x < snap.width(); ++x) {
-                        const QRgb px = snap.pixel(x, y);
-                        if (qRed(px) > 150 && qGreen(px) > 80 && qBlue(px) < 90) {
-                            if (y < 40) ++topAmber; else ++inkAmber;
-                        }
-                    }
-                qInfo("CRT-SNAP amber top=%d ink=%d", topAmber, inkAmber);
-                if (topAmber < 10 || inkAmber < 500) {
-                    qWarning("selftest FAIL: snapshot composite broken (text top=%d ink=%d)",
-                             topAmber, inkAmber);
-                    return false;
-                }
-            }
+            while (e.machine() != 0)
+                e.toggleMachine(); // 后续快照几何断言按琥珀口径
             // 颜色分类取证：琥珀透色（r 主导、g 中量、b 近零——颜色穿过
             // 竖纹亮度纹理）、暗底、无蓝泛滥（坏管线 = 蓝通道点燃）
             if (gpuOk) {
