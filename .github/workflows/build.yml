@@ -17,7 +17,8 @@ jobs:
             extra: ""
           - os: ubuntu-22.04
             qt: 6.9.3
-            extra: "libgl1-mesa-dev libxkbcommon-x11-0"
+            # mesa-vulkan-drivers=lavapipe 软件 Vulkan（无 GPU 跑者上 CRT 管线唯一可用后端）
+            extra: "libgl1-mesa-dev libxkbcommon-x11-0 mesa-vulkan-drivers libvulkan1"
           - os: windows-2022
             qt: 6.9.3
             extra: ""
@@ -43,17 +44,18 @@ jobs:
       - name: Build diagnostics (on failure)
         if: failure()
         run: |
+          echo "::error::BUILD FAILED — log tail:"
           grep -iE "error|fatal|undefined" build.log | tail -3 | awk '{print "::error::" $0}'
           tail -5 build.log | awk '{print "::warning::" $0}'
       - name: Selftest (macOS)
         if: runner.os == 'macOS'
         env:
           QT_QPA_PLATFORM: offscreen
-        run: ./build/naught.app/Contents/MacOS/naught --selftest > selftest.log 2>&1 || { grep -iE "selftest FAIL" selftest.log | tail -3 | awk '{print "::error::" $0}'; tail -5 selftest.log | awk '{print "::warning::" $0}'; exit 1; }
+        run: ./build/naught.app/Contents/MacOS/naught --selftest > selftest.log 2>&1; rc=$?; if [ $rc -ne 0 ]; then echo "::error::SELFTEST FAILED rc=$rc"; grep -iE "selftest FAIL" selftest.log | tail -3 | awk '{print "::error::" $0}'; tail -5 selftest.log | awk '{print "::warning::" $0}'; exit $rc; fi
       - name: Selftest (Linux)
         if: runner.os == 'Linux'
-        run: QT_QPA_PLATFORM=offscreen ./build/naught --selftest > selftest.log 2>&1 || { grep -iE "selftest FAIL" selftest.log | tail -3 | awk '{print "::error::" $0}'; tail -5 selftest.log | awk '{print "::warning::" $0}'; exit 1; }
+        run: QT_QPA_PLATFORM=offscreen ./build/naught --selftest > selftest.log 2>&1; rc=$?; if [ $rc -ne 0 ]; then echo "::error::SELFTEST FAILED rc=$rc"; grep -iE "selftest FAIL" selftest.log | tail -3 | awk '{print "::error::" $0}'; tail -5 selftest.log | awk '{print "::warning::" $0}'; exit $rc; fi
       - name: Selftest (Windows)
         if: runner.os == 'Windows'
         shell: bash
-        run: QT_QPA_PLATFORM=offscreen ./build/Release/naught.exe --selftest > selftest.log 2>&1 || { grep -iE "selftest FAIL" selftest.log | tail -3 | awk '{print "::error::" $0}'; tail -5 selftest.log | awk '{print "::warning::" $0}'; exit 1; }
+        run: QT_QPA_PLATFORM=offscreen ./build/Release/naught.exe --selftest > selftest.log 2>&1; rc=$?; if [ $rc -ne 0 ]; then echo "::error::SELFTEST FAILED rc=$rc"; grep -iE "selftest FAIL" selftest.log | tail -3 | awk '{print "::error::" $0}'; tail -5 selftest.log | awk '{print "::warning::" $0}'; exit $rc; fi

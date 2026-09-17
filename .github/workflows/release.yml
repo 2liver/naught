@@ -33,6 +33,10 @@ jobs:
           # qt_add_shaders/qsb 在独立模块里，qtbase 不带
           modules: qtshadertools
 
+      - name: Linux system deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libgl1-mesa-dev libxkbcommon-x11-0 mesa-vulkan-drivers libvulkan1
+
       - name: Build KF6 syntax-highlighting
         shell: bash
         run: |
@@ -58,6 +62,7 @@ jobs:
       - name: Build diagnostics (on failure)
         if: failure()
         run: |
+          echo "::error::BUILD FAILED — log tail:"
           grep -iE "error|fatal|undefined" build.log | tail -3 | awk '{print "::error::" $0}'
           tail -5 build.log | awk '{print "::warning::" $0}'
 
@@ -72,20 +77,20 @@ jobs:
         if: runner.os == 'macOS'
         env:
           QT_QPA_PLATFORM: offscreen
-        run: ./build/naught.app/Contents/MacOS/naught --selftest > selftest.log 2>&1 || { grep -iE "selftest FAIL" selftest.log | tail -3 | awk '{print "::error::" $0}'; tail -5 selftest.log | awk '{print "::warning::" $0}'; exit 1; }
+        run: ./build/naught.app/Contents/MacOS/naught --selftest > selftest.log 2>&1; rc=$?; if [ $rc -ne 0 ]; then echo "::error::SELFTEST FAILED rc=$rc"; grep -iE "selftest FAIL" selftest.log | tail -3 | awk '{print "::error::" $0}'; tail -5 selftest.log | awk '{print "::warning::" $0}'; exit $rc; fi
 
       - name: Selftest (Linux)
         if: runner.os == 'Linux'
         env:
           QT_QPA_PLATFORM: offscreen
-        run: ./build/naught --selftest > selftest.log 2>&1 || { grep -iE "selftest FAIL" selftest.log | tail -3 | awk '{print "::error::" $0}'; tail -5 selftest.log | awk '{print "::warning::" $0}'; exit 1; }
+        run: ./build/naught --selftest > selftest.log 2>&1; rc=$?; if [ $rc -ne 0 ]; then echo "::error::SELFTEST FAILED rc=$rc"; grep -iE "selftest FAIL" selftest.log | tail -3 | awk '{print "::error::" $0}'; tail -5 selftest.log | awk '{print "::warning::" $0}'; exit $rc; fi
 
       - name: Selftest (Windows)
         if: runner.os == 'Windows'
         shell: bash
         env:
           QT_QPA_PLATFORM: offscreen
-        run: ./build/Release/naught.exe --selftest > selftest.log 2>&1 || { grep -iE "selftest FAIL" selftest.log | tail -3 | awk '{print "::error::" $0}'; tail -5 selftest.log | awk '{print "::warning::" $0}'; exit 1; }
+        run: ./build/Release/naught.exe --selftest > selftest.log 2>&1; rc=$?; if [ $rc -ne 0 ]; then echo "::error::SELFTEST FAILED rc=$rc"; grep -iE "selftest FAIL" selftest.log | tail -3 | awk '{print "::error::" $0}'; tail -5 selftest.log | awk '{print "::warning::" $0}'; exit $rc; fi
 
       - name: Package macOS (zip + dmg)
         if: runner.os == 'macOS'

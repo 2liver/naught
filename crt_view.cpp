@@ -116,6 +116,8 @@ void CrtView::releaseGpu()
 
 void CrtView::ensureRhi()
 {
+    if (m_rhiUnavailable)
+        return; // 已判定无可用管线：不再每帧重建（toggleCrt 关闭重开也不复活）
     if (m_r && m_ps && m_srb && m_pxbuf && m_ubuf)
         return; // 资源完整
     // 半残状态（releaseGpu 释放了子资源但保留 rhi——resize/全屏重建路径
@@ -192,10 +194,19 @@ void CrtView::ensureRhi()
     });
     m_srb->create();
     m_ps->setRenderPassDescriptor(m_rp);
-    if (!m_ps->create())
-        shaderLog(QStringLiteral("PS CREATE FAIL"));
-    else
-        shaderLog(QStringLiteral("PS CREATE OK"));
+    if (!m_ps->create()) {
+        // 后端可用但着色器变体缺失（例：GLES2 无 ES 变体 / 存储缓冲
+        // 不受支持）——整条管线作废，渲染层整体跳过（优雅降级），
+        // 而不是带着半残管线继续跑帧导致崩溃
+        shaderLog(QStringLiteral("PS CREATE FAIL — pipeline disabled"));
+        delete m_ps;
+        m_ps = nullptr;
+        delete m_srb;
+        m_srb = nullptr;
+        m_rhiUnavailable = true;
+        return;
+    }
+    shaderLog(QStringLiteral("PS CREATE OK"));
 
     m_texSize = QSize(qMax(1, int(width() * dpr)), qMax(1, int(height() * dpr)));
     m_forceNow = true;

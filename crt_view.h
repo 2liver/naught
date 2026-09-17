@@ -64,6 +64,7 @@ private:
     QImage m_shown;   // 最近一帧 GPU 输出（paintEvent 绘制）
     bool m_forceNow = false;
     bool m_readbackInFlight = false;
+    bool m_rhiUnavailable = false; // 后端可用但管线创建失败：本会话渲染层停用
     int m_readbackGen = 0; // 回读代次：看门狗复位后陈旧回调作废
     bool m_renderDirty = false;   // 脏驱动：有变化才整链渲染
     QElapsedTimer m_ambientClock; // 环境动态（滚动带/颗粒/余晖）低帧率拍
