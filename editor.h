@@ -2418,6 +2418,7 @@ public:
             img.fill(Qt::white);
             if (gpuOk) {
                 e.render(&img); // 新架构：覆盖层是普通 QWidget，render 捕获的就是真实 GPU 帧
+
                 // GPU 输出经 RGB 掩膜：亮磷光 = R/G 子像素点燃、B 熄灭（琥珀文字
                 // 的 R 与 G 分量分别落在 R/G 掩膜上），不再以原始调色板判色
                 bool lit = false;
@@ -2429,6 +2430,31 @@ public:
                     }
                 if (!lit) {
                     qWarning("selftest FAIL: no lit phosphor pixels in CRT render");
+                    return false;
+                }
+                // Y 翻转回归闸：文字在顶部 → 顶部必须有亮带、底部空行区
+                // 必须暗（翻转过一次：内容整屏上下颠倒——顶部暗、底部亮，
+                // 旧单点检查恰好漏过，用户实测抓到）
+                int topLit = 0, bottomLit = 0;
+                for (int y = 0; y < qMin(40, e.height()); ++y)
+                    for (int x = g + 2; x < e.width() - 30; ++x) {
+                        const QRgb px = img.pixel(x, y);
+                        if (qRed(px) + qGreen(px) > 200 && qBlue(px) < 100)
+                            ++topLit;
+                    }
+                for (int y = qMax(0, e.height() - 24); y < e.height(); ++y)
+                    for (int x = g + 2; x < e.width() - 30; ++x) {
+                        const QRgb px = img.pixel(x, y);
+                        if (qRed(px) + qGreen(px) > 200 && qBlue(px) < 100)
+                            ++bottomLit;
+                    }
+                if (topLit < 15) { // 6px 网格字形 ≈ 30 像素，门槛留裕度
+                    qWarning("selftest FAIL: no text band at top of CRT render (topLit=%d) — Y-flip?", topLit);
+                    return false;
+                }
+                if (bottomLit > topLit / 2) {
+                    qWarning("selftest FAIL: bottom brighter than text band (top=%d bottom=%d) — Y-flip?",
+                             topLit, bottomLit);
                     return false;
                 }
                 const QRgb bgPx = img.pixel(g + 8, e.height() - 20); // 空行区
