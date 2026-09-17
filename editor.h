@@ -1638,6 +1638,50 @@ public:
     static bool selftest()
     {
         qInfo("SELFTEST-ENTER");
+        // Qt 渲染层探针：viewport 裸渲染到不同 DPR 目标，测文本落点
+        // （倒影/位移的根修取证：确认 QWidget::render 在 DPR 下的行为）
+        {
+            auto probe = [](QWidget *vp, const char *tag, qreal dpr) {
+                const int W = vp->width(), H = vp->height();
+                QImage img(QSize(int(W * dpr), int(H * dpr)), QImage::Format_ARGB32);
+                img.setDevicePixelRatio(dpr);
+                img.fill(Qt::black);
+                QPainter p(&img);
+                vp->render(&p);
+                p.end();
+                int firstLit = -1, lastLit = -1, litRows = 0;
+                for (int y = 0; y < img.height(); ++y) {
+                    const uchar *line = img.constScanLine(y);
+                    int n = 0;
+                    for (int x = 0; x < img.width(); ++x)
+                        if (line[x * 4 + 1] + line[x * 4 + 2] + line[x * 4] < 250)
+                            ++n; // 暗字（默认黑字白底）
+                    if (n > 5) {
+                        if (firstLit < 0) firstLit = y;
+                        lastLit = y;
+                        ++litRows;
+                    }
+                }
+                qWarning("QT-RENDER %s: img=%dx%d dpr=%g vp=%dx%d lit=%d..%d rows=%d",
+                         tag, img.width(), img.height(), dpr, W, H, firstLit, lastLit, litRows);
+            };
+            QPlainTextEdit pure;
+            pure.resize(400, 300);
+            pure.setPlainText(QStringLiteral("orders = [(\"张三\", 99.5)]\nbig = [o for o in orders]\nprint(big)\n"));
+            pure.show();
+            QApplication::processEvents();
+            probe(pure.viewport(), "pure-plain", 1.0);
+            probe(pure.viewport(), "pure-dpr2", 2.0);
+            {
+                Editor e2;
+                e2.resize(400, 300);
+                e2.setPlainText(QStringLiteral("orders = [(\"张三\", 99.5)]\nbig = [o for o in orders]\nprint(big)\n"));
+                e2.show();
+                QApplication::processEvents();
+                probe(e2.viewport(), "editor-plain", 1.0);
+                probe(e2.viewport(), "editor-dpr2", 2.0);
+            }
+        }
         Editor e;
         qInfo("SELFTEST-EDITOR-CONSTRUCTED");
         e.setPlainText(QStringLiteral("無"));
@@ -2567,6 +2611,7 @@ public:
                         settle.exec();
                     }
                 };
+                e.clearInk(); // 清早期测试的墨迹圆点——暴力统计只许文本
                 e.setPlainText(QStringLiteral("orders = [(\"张三\", 99.5)]\nbig = [o for o in orders if o[1] > 100]\nprint(big)\n"));
                 e.verticalScrollBar()->setValue(0);
                 QApplication::processEvents();
@@ -2594,9 +2639,49 @@ public:
                 e.verticalScrollBar()->setValue(0);
                 QApplication::processEvents();
                 waitReadback();
+                {
+                    QImage pp(e.viewport()->size(), QImage::Format_ARGB32);
+                    pp.fill(Qt::black);
+                    QPainter ppp(&pp);
+                    e.viewport()->render(&ppp);
+                    ppp.end();
+                    int firstLit = -1, lastLit = -1;
+                    for (int y = 0; y < pp.height(); ++y) {
+                        const uchar *line = pp.constScanLine(y);
+                        int n = 0;
+                        for (int x = 0; x < pp.width(); ++x)
+                            if (line[x*4+1] > 120 || line[x*4+2] > 120) ++n;
+                        if (n > 5) { if (firstLit < 0) firstLit = y; lastLit = y; }
+                    }
+                    qWarning("PROBE-AT-CAPTURE: img=%dx%d dpr=%g vp=%dx%d scroll=%d lit=%d..%d",
+                             pp.width(), pp.height(), pp.devicePixelRatio(),
+                             e.viewport()->width(), e.viewport()->height(),
+                             e.verticalScrollBar()->value(), firstLit, lastLit);
+                    // 复刻合成器精确配置
+                    {
+                        QImage pp2(e.viewport()->size() * 2, QImage::Format_ARGB32);
+                        pp2.setDevicePixelRatio(2.0);
+                        QPainter ppp2(&pp2);
+                        ppp2.fillRect(pp2.rect(), QColor(12, 9, 3));
+                        e.viewport()->render(&ppp2, e.viewport()->pos());
+                        ppp2.end();
+                        int f2 = -1, l2 = -1;
+                        for (int y = 0; y < pp2.height(); ++y) {
+                            const uchar *line = pp2.constScanLine(y);
+                            int n = 0;
+                            for (int x = 0; x < pp2.width(); ++x)
+                                if (line[x*4+1] > 120 || line[x*4+2] > 120) ++n;
+                            if (n > 5) { if (f2 < 0) f2 = y; l2 = y; }
+                        }
+                        qWarning("PROBE-COMPOSITOR-EXACT: img=%dx%d dpr=%g lit=%d..%d",
+                                 pp2.width(), pp2.height(), pp2.devicePixelRatio(), f2, l2);
+                    }
+                }
                 QImage vimg(e.size(), QImage::Format_ARGB32);
                 vimg.fill(Qt::white);
                 e.render(&vimg);
+                vimg.save(QStringLiteral("/tmp/crt_violent.png")); // TEMP-DEBUG
+                e.crtShownImage().save(QStringLiteral("/tmp/crt_violent_shown.png")); // TEMP-DEBUG
 
                 // 逐行亮像素统计
                 QVector<int> rowLit(vimg.height(), 0);
@@ -2629,20 +2714,24 @@ public:
                              strayBandRows);
                     return false;
                 }
-                // 3. 上下半帧镜像相似度（倒影 = 绕中心镜像）
+                // 3. 下半帧能量闸（倒影 = 绕中心镜像的亮副本）：下半帧
+                // 亮像素总量必须远小于上半帧（文本在顶部，下方应纯暗）
                 {
-                    long mirror = 0;
+                    long topSum = 0, bottomSum = 0;
                     const int half = vimg.height() / 2;
-                    const int n = half * (vimg.width() / 8);
-                    for (int y = 0; y < half; y += 2)
-                        for (int x = 2; x < vimg.width() - 30; x += 8) {
-                            const QRgb a = vimg.pixel(x, y);
-                            const QRgb b = vimg.pixel(x, vimg.height() - 1 - y);
-                            mirror += qAbs((qRed(a) + qGreen(a)) - (qRed(b) + qGreen(b))) > 40;
+                    for (int y = 0; y < half; ++y)
+                        for (int x = 2; x < vimg.width() - 30; ++x) {
+                            const QRgb px = vimg.pixel(x, y);
+                            topSum += qRed(px) + qGreen(px);
                         }
-                    if (mirror * 10 < n) {
-                        qWarning("selftest FAIL: violent — vertical mirror detected (%ld/%d)",
-                                 mirror, n);
+                    for (int y = half; y < vimg.height(); ++y)
+                        for (int x = 2; x < vimg.width() - 30; ++x) {
+                            const QRgb px = vimg.pixel(x, y);
+                            bottomSum += qRed(px) + qGreen(px);
+                        }
+                    if (bottomSum * 4 > topSum) {
+                        qWarning("selftest FAIL: violent — bottom half too bright (top=%ld bottom=%ld) — 倒影",
+                                 topSum, bottomSum);
                         return false;
                     }
                 }

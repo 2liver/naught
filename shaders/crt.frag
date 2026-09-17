@@ -141,7 +141,7 @@ void main()
     // 的 max 叠加同模型（CPU 版最近邻放大，此处线性放大更平滑）。
     // 叠加发生在栅网之前：辉光与内容一同被掩膜/扫描线调制（与 CPU
     // 烘拍顺序一致）
-    col = max(col, texture(glow, vec2(v_uv.x, 1.0 - v_uv.y)).rgb * ubuf.glowInfo.x);
+    col = max(col, texture(glow, v_uv).rgb * ubuf.glowInfo.x);
 
     // ---- 屏幕空间：固定不动的磷粉栅、扫描线（真玻璃结构）----
     vec2 sp = v_uv * ubuf.texSize; // 屏幕物理像素
