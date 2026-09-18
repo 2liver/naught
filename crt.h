@@ -132,15 +132,11 @@ QImage gaussianBlur(const QImage &src, int radius, int iterations);
 // 加法混入新帧——快分量 = 1 帧内的亮回响，慢分量 = 长尾余热（真磷粉
 // 的双指数衰减近似）。分通道权重：红磷拖尾最长、绿次之、蓝最快，
 // 残影因此偏暖。静态画面微微增亮（磷粉永不完全熄灭）。
-// 注：已整体 GPU 化（shaders/persist.frag，lighten-max + 按时间衰减
-// pow(persist, dt/80ms)）。本实现保留为黄金参考（模型与系数同源）。
 void phosphorPersistence(QImage &img, const QImage &prev1, const QImage &prev2, const Palette &pal);
 
 // 磷光辉光（二期三件套·回接）：1/4 降采样往返 + 三轮分离盒式模糊
 // （真高斯形状），再以 lighten（max）叠回——文字核心保持全亮、
 // 四周长出磷粉光晕。整图字节直写，绕开 QImage 画笔的引擎层 DPR
 // 二次缩放；只在快照重建（80ms 节流）时执行。
-// 注：已整体 GPU 化（downsample.frag + blurH/blurV.frag + crt.frag 的
-// 线性 max 叠加）。本实现保留为黄金参考（模型与系数同源）。
 void phosphorBloom(QImage &img, qreal alpha = 0.42);
 } // namespace Crt

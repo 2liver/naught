@@ -185,20 +185,16 @@ public:
             update();
     }
 
-    // 保留曲线元素地把路径拆成子路径，并把被包含的子路径（洞界）并回
-    // 其容器。擦除自交笔迹（如 ∞ 交叉）后，减法的结果 = 外环 + 洞界
-    // 环的集合——单独填充外环会把空心区域填实（用户报：笔刷把颜色
-    // 填充到空心区域）。洞界并回容器后复合路径按奇偶规则填充，
-    // 空心保留（独立探针验证：擦交叉后两瓣仍空心）。
+    // 保留曲线元素地把路径拆成子路径
     static QVector<QPainterPath> splitSubpaths(const QPainterPath &p)
     {
-        QVector<QPainterPath> loops;
+        QVector<QPainterPath> out;
         QPainterPath cur;
         for (int i = 0; i < p.elementCount(); ++i) {
             const QPainterPath::Element &e = p.elementAt(i);
             if (e.isMoveTo()) {
                 if (cur.elementCount() > 0)
-                    loops.append(cur);
+                    out.append(cur);
                 cur = QPainterPath();
                 cur.moveTo(e.x, e.y);
             } else if (e.isLineTo()) {
@@ -210,23 +206,7 @@ public:
             }
         }
         if (cur.elementCount() > 0)
-            loops.append(cur);
-        QVector<bool> merged(loops.size(), false);
-        QVector<QPainterPath> out;
-        for (int i = 0; i < loops.size(); ++i) {
-            if (merged[i])
-                continue;
-            QPainterPath host = loops.at(i);
-            for (int j = 0; j < loops.size(); ++j) {
-                if (i == j || merged[j])
-                    continue;
-                if (host.contains(loops.at(j).boundingRect().center())) {
-                    host.addPath(loops.at(j));
-                    merged[j] = true;
-                }
-            }
-            out.append(host);
-        }
+            out.append(cur);
         return out;
     }
 
