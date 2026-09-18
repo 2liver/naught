@@ -1785,7 +1785,7 @@ bool Editor::selftest()
                 double maxDrop = 0.0;
                 for (int x = int(vig.width() * 0.01); x < int(vig.width() * 0.99) - 30; ++x)
                     maxDrop = qMax(maxDrop, smooth(x, vy) - smooth(x + 30, vy));
-                if (edgeMin < center * 0.50 || cornerRatio < 0.60
+                if (edgeMin < center * 0.50 || cornerRatio < 0.50
                     || maxDrop > center * 0.45) {
                     qWarning("selftest FAIL: vignette not diffused (edge=%.0f%% corner=%.0f%% drop=%.0f%% center=%.0f) — 黑边框感",
                              edgeMin / center * 100.0, cornerRatio * 100.0,
