@@ -23,6 +23,9 @@ public:
 
 private:
     void paintExcitation(QPainter &p) const;
+public:
+    // 公开给自检：直接画光标（离屏无焦点时合成器门控会跳过——形状
+    // 验证需要确定性入口）
     void paintCursor(QImage &img) const;
     Editor &m_e;
 };

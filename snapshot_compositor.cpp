@@ -185,14 +185,32 @@ void SnapshotCompositor::paintCursor(QImage &img) const
     const int x0 = qFloor(cell.x() * dpr), y0 = qFloor(cell.y() * dpr);
     const int x1 = qCeil((cell.x() + cell.width()) * dpr);
     const int y1 = qCeil((cell.y() + cell.height()) * dpr);
-    // 双色反相：t = 像素亮度在 底→墨 间的归一位置；out = lerp(块, 底, t)
+    const int w = img.width(), h = img.height();
+    // IBM PC（机型 3）：真机 BIOS 文本光标 = 下划线（单元格底缘 2~3
+    // 扫描线的亮条，字形保持可见、无反相）。其余机型 = 整格反相块
+    //（Osborne 的块光标 / C64 的闪烁块——charter 记录；用户四轮考据
+    // 指正：并非所有机型都是块状）
     const Crt::Palette &pp = m_e.crtPalette();
+    if (m_e.machine() == 3) {
+        const QColor ucol = m_e.m_codeMode ? QColor(0xE8, 0xE8, 0xE0) : pp.cursorBlock;
+        const int bandH = qMax(2, qCeil(cell.height() * dpr * 0.18));
+        for (int y = qMax(0, y1 - bandH); y < y1 && y < h; ++y) {
+            uchar *line = img.scanLine(y);
+            for (int x = qMax(0, x0); x < x1 && x < w; ++x) {
+                const int i = x * 4;
+                line[i + 2] = uchar(ucol.red());
+                line[i + 1] = uchar(ucol.green());
+                line[i] = uchar(ucol.blue());
+            }
+        }
+        return;
+    }
+    // 双色反相：t = 像素亮度在 底→墨 间的归一位置；out = lerp(块, 底, t)
     // 编模式（多彩语法高亮）下块光标用中性暖白：绿磷块在代码里太突兀
     const QColor block = m_e.m_codeMode ? QColor(0xE8, 0xE8, 0xE0) : pp.cursorBlock;
     const int bgSum = pp.bg.red() + pp.bg.green() + pp.bg.blue();
     const int inkSum = pp.ink.red() + pp.ink.green() + pp.ink.blue();
     const int span = qMax(1, inkSum - bgSum); // 防御除零（底=墨时）
-    const int w = img.width(), h = img.height();
     // 注意：ARGB32 内存布局为 BGRA，字节直接寻址（见 edgeDiff 同款注释）。
     // 光标可能滚出视口（cursorRect 变负）——循环必须裁剪到图像内，
     // 否则 scanLine(负y) 段错误（用户"插入图片后缩放闪退"的真凶）

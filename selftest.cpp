@@ -522,36 +522,45 @@ bool Editor::selftest()
             e.clearInk();
             QApplication::processEvents();
         }
-        // 擦除自交笔迹后"填实"（用户三轮拍板：此行为保留为功能——
-        // "画闭合空心 + 橡皮在里面擦一下 = 填满"。本闸锁定该功能：
-        // 擦 ∞ 交叉点后两瓣必须填实）
+        // 擦除填实功能（用户三轮拍板保留 + 四轮前置条件）：画闭合
+        // 空心 + 橡皮从空心内部开始擦（口径 ≈ 空心大小）= 填满。
+        // 本闸锁定该功能：小环 + 内部覆盖洞界拖动 → 圈心必须填实
         {
-            e.toggleMode(Editor::Mode::Draw);
+            e.setPlainText(QString());
+            e.clearInk();
             QWidget *vp = e.viewport();
-            const QPointF xc(vp->width() / 2.0, vp->height() / 2.0);
-            const QPointF seq[9] = {
-                xc, xc + QPointF(-30, -30), xc + QPointF(0, -60), xc + QPointF(30, -30),
-                xc, xc + QPointF(-30, 30), xc + QPointF(0, 60), xc + QPointF(30, 30), xc
-            };
-            QMouseEvent pr(QEvent::MouseButtonPress, seq[0], vp->mapToGlobal(seq[0].toPoint()),
+            e.toggleMode(Editor::Mode::Draw);
+            const QPointF xc(vp->width() * 0.35, vp->height() * 0.5);
+            const QPointF s0(xc.x() + 18, xc.y());
+            QMouseEvent pr(QEvent::MouseButtonPress, s0, vp->mapToGlobal(s0.toPoint()),
                            Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
             QApplication::sendEvent(vp, &pr);
-            for (int i = 1; i < 9; ++i) {
-                QMouseEvent mv(QEvent::MouseMove, seq[i], vp->mapToGlobal(seq[i].toPoint()),
+            for (int a = 30; a <= 360; a += 30) {
+                const qreal r = a * 3.14159265 / 180.0;
+                const QPointF p(xc.x() + 18.0 * qCos(r), xc.y() + 18.0 * qSin(r));
+                QMouseEvent mv(QEvent::MouseMove, p, vp->mapToGlobal(p.toPoint()),
                                Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
                 QApplication::sendEvent(vp, &mv);
             }
-            QMouseEvent re(QEvent::MouseButtonRelease, seq[8], vp->mapToGlobal(seq[8].toPoint()),
+            QMouseEvent re(QEvent::MouseButtonRelease, s0, vp->mapToGlobal(s0.toPoint()),
                            Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
             QApplication::sendEvent(vp, &re);
-            // 切擦除模式，擦掉交叉点
+            // 橡皮从空心内部开始拖（覆盖洞界）
             e.toggleMode(Editor::Mode::Erase);
-            QMouseEvent ep(QEvent::MouseButtonPress, xc, vp->mapToGlobal(xc.toPoint()),
+            const QPointF f0(xc.x() - 6, xc.y());
+            QMouseEvent fp(QEvent::MouseButtonPress, f0, vp->mapToGlobal(f0.toPoint()),
                            Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-            QApplication::sendEvent(vp, &ep);
-            QMouseEvent er(QEvent::MouseButtonRelease, xc, vp->mapToGlobal(xc.toPoint()),
+            QApplication::sendEvent(vp, &fp);
+            for (int dx = -3; dx <= 6; dx += 3) {
+                const QPointF p(xc.x() + dx, xc.y());
+                QMouseEvent mv(QEvent::MouseMove, p, vp->mapToGlobal(p.toPoint()),
+                               Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                QApplication::sendEvent(vp, &mv);
+            }
+            const QPointF f1(xc.x() + 6, xc.y());
+            QMouseEvent fr(QEvent::MouseButtonRelease, f1, vp->mapToGlobal(f1.toPoint()),
                            Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
-            QApplication::sendEvent(vp, &er);
+            QApplication::sendEvent(vp, &fr);
             e.toggleMode(Editor::Mode::Normal);
             QApplication::processEvents();
             QImage exImg(vp->size() * 2, QImage::Format_ARGB32);
@@ -561,137 +570,28 @@ bool Editor::selftest()
             ip.translate(e.viewport()->pos() * 2);
             e.m_canvas->render(&ip);
             ip.end();
-            const QPoint lobeTop(int(xc.x() * 2), int((xc.y() - 38) * 2));
-            const QPoint lobeBot(int(xc.x() * 2), int((xc.y() + 38) * 2));
-            if (qAlpha(exImg.pixel(lobeTop)) <= 8 || qAlpha(exImg.pixel(lobeBot)) <= 8) {
-                qWarning("selftest FAIL: erase-fill feature lost (top=%d bot=%d)",
-                         qAlpha(exImg.pixel(lobeTop)), qAlpha(exImg.pixel(lobeBot)));
+            const QPoint centerPx(int(xc.x() * 2), int(xc.y() * 2));
+            if (qAlpha(exImg.pixel(centerPx)) <= 8) {
+                qWarning("selftest FAIL: erase-fill feature lost (center=%d)",
+                         qAlpha(exImg.pixel(centerPx)));
                 return false;
             }
             e.clearInk();
             QApplication::processEvents();
         }
-        // 撤销时间线精确回归（用户报：画一笔→打字→擦掉笔迹后撤销
-        // 不按原路撤回）。确定性序列，逐撤销断言状态：
-        //   画一笔(ink) → 打字(text) → 擦掉笔迹(ink)
-        //   撤销1 = 擦除还原（笔迹回来）→ 撤销2 = 字删除 → 撤销3 = 笔迹消失
+        // 填实前置条件回归（用户四轮拍板）：
+        // (a) 笔刷口径比空心小 → 纯橡皮擦（圈心保持空心）
+        // (b) 橡皮从外部入侵（不管多大）→ 纯橡皮擦（只切不填）
         {
-            e.setPlainText(QStringLiteral("起\n"));
-            e.clearInk();
-            QApplication::processEvents();
-            // 1) 画一笔
-            e.toggleMode(Editor::Mode::Draw);
-            QWidget *vp = e.viewport();
-            const QPointF p1(vp->width() * 0.25, vp->height() * 0.4);
-            const QPointF p2(vp->width() * 0.55, vp->height() * 0.4);
-            QMouseEvent pr(QEvent::MouseButtonPress, p1, vp->mapToGlobal(p1.toPoint()),
-                           Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-            QApplication::sendEvent(vp, &pr);
-            QMouseEvent mv(QEvent::MouseMove, p2, vp->mapToGlobal(p2.toPoint()),
-                           Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-            QApplication::sendEvent(vp, &mv);
-            QMouseEvent re(QEvent::MouseButtonRelease, p2, vp->mapToGlobal(p2.toPoint()),
-                           Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
-            QApplication::sendEvent(vp, &re);
-            e.toggleMode(Editor::Mode::Normal);
-            QApplication::processEvents();
-            const int ink1 = int(e.inkPaths().size());
-            if (ink1 != 1) {
-                qWarning("selftest FAIL: timeline stroke count %d", ink1);
-                return false;
-            }
-            // 2) 打字
-            QTextCursor tc = e.textCursor();
-            tc.setPosition(qMax(0, e.toPlainText().size() - 1));
-            e.setTextCursor(tc);
-            tc.insertText(QStringLiteral("字"));
-            QApplication::processEvents();
-            if (!e.toPlainText().startsWith(QStringLiteral("起字"))) {
-                qWarning("selftest FAIL: timeline typing");
-                return false;
-            }
-            // 3) 擦掉笔迹（同坐标）
-            e.toggleMode(Editor::Mode::Erase);
-            QMouseEvent ep(QEvent::MouseButtonPress, p1, vp->mapToGlobal(p1.toPoint()),
-                           Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-            QApplication::sendEvent(vp, &ep);
-            QMouseEvent em(QEvent::MouseMove, p2, vp->mapToGlobal(p2.toPoint()),
-                           Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-            QApplication::sendEvent(vp, &em);
-            QMouseEvent er2(QEvent::MouseButtonRelease, p2, vp->mapToGlobal(p2.toPoint()),
-                            Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
-            QApplication::sendEvent(vp, &er2);
-            e.toggleMode(Editor::Mode::Normal);
-            QApplication::processEvents();
-            if (int(e.inkPaths().size()) != 0) {
-                qWarning("selftest FAIL: timeline erase left %d paths", int(e.inkPaths().size()));
-                return false;
-            }
-            // 撤销1：擦除还原 → 笔迹回来、字还在
-            {
-                QKeyEvent kz(QEvent::KeyPress, Qt::Key_Z, Qt::ControlModifier);
-                QApplication::sendEvent(&e, &kz);
-                QApplication::processEvents();
-            }
-            if (int(e.inkPaths().size()) != 1
-                || !e.toPlainText().startsWith(QStringLiteral("起字"))) {
-                qWarning("selftest FAIL: timeline undo#1 wrong (ink=%d text=[%s])",
-                         int(e.inkPaths().size()),
-                         qPrintable(QString(e.toPlainText()).left(6)));
-                return false;
-            }
-            // 撤销2：字删除 → 笔迹还在、字没了
-            {
-                QKeyEvent kz(QEvent::KeyPress, Qt::Key_Z, Qt::ControlModifier);
-                QApplication::sendEvent(&e, &kz);
-                QApplication::processEvents();
-            }
-            if (int(e.inkPaths().size()) != 1
-                || !e.toPlainText().startsWith(QStringLiteral("起"))) {
-                qWarning("selftest FAIL: timeline undo#2 wrong (ink=%d text=[%s])",
-                         int(e.inkPaths().size()),
-                         qPrintable(QString(e.toPlainText()).left(6)));
-                return false;
-            }
-            // 撤销3：笔迹消失
-            {
-                QKeyEvent kz(QEvent::KeyPress, Qt::Key_Z, Qt::ControlModifier);
-                QApplication::sendEvent(&e, &kz);
-                QApplication::processEvents();
-            }
-            if (int(e.inkPaths().size()) != 0) {
-                qWarning("selftest FAIL: timeline undo#3 wrong (ink=%d)", int(e.inkPaths().size()));
-                return false;
-            }
-            // 重做1：笔迹回来
-            {
-                QKeyEvent ky(QEvent::KeyPress, Qt::Key_Y, Qt::ControlModifier);
-                QApplication::sendEvent(&e, &ky);
-                QApplication::processEvents();
-            }
-            if (int(e.inkPaths().size()) != 1) {
-                qWarning("selftest FAIL: timeline redo#1 wrong (ink=%d)", int(e.inkPaths().size()));
-                return false;
-            }
-            e.clearInk();
-            e.setPlainText(QStringLiteral("無\n"));
-            QApplication::processEvents();
-        }
-        // 多实心撤销粒度（用户报：多个"填实"一次全撤，无时间线）。
-        // 画两个小环 + 各擦一下填实 → 撤销必须一次只撤一个实心
-        {
-            e.setPlainText(QString());
-            e.clearInk();
-            QWidget *vp = e.viewport();
-            e.toggleMode(Editor::Mode::Draw);
-            const auto ringAt = [&](const QPointF &c, qreal rad) {
-                const QPointF s0(c.x() + rad, c.y());
+            const auto ringAt2 = [&](const QPointF &c) {
+                QWidget *vp = e.viewport();
+                const QPointF s0(c.x() + 18, c.y());
                 QMouseEvent pr(QEvent::MouseButtonPress, s0, vp->mapToGlobal(s0.toPoint()),
                                Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
                 QApplication::sendEvent(vp, &pr);
                 for (int a = 30; a <= 360; a += 30) {
                     const qreal r = a * 3.14159265 / 180.0;
-                    const QPointF p(c.x() + rad * qCos(r), c.y() + rad * qSin(r));
+                    const QPointF p(c.x() + 18.0 * qCos(r), c.y() + 18.0 * qSin(r));
                     QMouseEvent mv(QEvent::MouseMove, p, vp->mapToGlobal(p.toPoint()),
                                    Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
                     QApplication::sendEvent(vp, &mv);
@@ -700,37 +600,8 @@ bool Editor::selftest()
                                Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
                 QApplication::sendEvent(vp, &re);
             };
-            ringAt(QPointF(vp->width() * 0.3, vp->height() * 0.5), 18.0);
-            ringAt(QPointF(vp->width() * 0.7, vp->height() * 0.5), 18.0);
-            e.toggleMode(Editor::Mode::Erase);
-            const auto fillAt = [&](const QPointF &c) {
-                // 单笔拖动 = 一次橡皮会话（真实用户的"擦一下"）
-                const QPointF p0(c.x() - 6, c.y());
-                QMouseEvent pr(QEvent::MouseButtonPress, p0, vp->mapToGlobal(p0.toPoint()),
-                               Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-                QApplication::sendEvent(vp, &pr);
-                for (int dx = -3; dx <= 6; dx += 3) {
-                    const QPointF p(c.x() + dx, c.y());
-                    QMouseEvent mv(QEvent::MouseMove, p, vp->mapToGlobal(p.toPoint()),
-                                   Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-                    QApplication::sendEvent(vp, &mv);
-                }
-                const QPointF p1(c.x() + 6, c.y());
-                QMouseEvent re(QEvent::MouseButtonRelease, p1, vp->mapToGlobal(p1.toPoint()),
-                               Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
-                QApplication::sendEvent(vp, &re);
-            };
-            fillAt(QPointF(vp->width() * 0.3, vp->height() * 0.5));
-            fillAt(QPointF(vp->width() * 0.7, vp->height() * 0.5));
-            e.toggleMode(Editor::Mode::Normal);
-            QApplication::processEvents();
-            // 撤一次：只应撤掉后一个填实（环2 的洞回来），环1 的实心还在
-            {
-                QKeyEvent kz(QEvent::KeyPress, Qt::Key_Z, Qt::ControlModifier);
-                QApplication::sendEvent(&e, &kz);
-                QApplication::processEvents();
-            }
-            const QImage ck = [&] {
+            const auto centerAlpha = [&](const QPointF &c) {
+                QWidget *vp = e.viewport();
                 QImage img(vp->size() * 2, QImage::Format_ARGB32);
                 img.fill(Qt::transparent);
                 img.setDevicePixelRatio(2.0);
@@ -738,90 +609,60 @@ bool Editor::selftest()
                 p.translate(e.viewport()->pos() * 2);
                 e.m_canvas->render(&p);
                 p.end();
-                return img;
-            }();
-            const QPoint c1(int(vp->width() * 0.3 * 2), int(vp->height() * 0.5 * 2));
-            const QPoint c2(int(vp->width() * 0.7 * 2), int(vp->height() * 0.5 * 2));
-            const bool solid1 = qAlpha(ck.pixel(c1)) > 8;
-            const bool solid2 = qAlpha(ck.pixel(c2)) > 8;
-            qInfo("CRT-FILL-UNDO after1: solid1=%d solid2=%d", int(solid1), int(solid2));
-            // 时间线语义：环2 的填实被撤（洞回来），环1 的填实仍在
-            if (!solid1 || solid2) {
-                qWarning("selftest FAIL: fill undo granularity wrong (solid1=%d solid2=%d)",
-                         int(solid1), int(solid2));
-                return false;
-            }
-            e.clearInk();
-            QApplication::processEvents();
-        }
-        // 实心内部穿孔回归（用户报：填实后橡皮无法从内部擦除，只能
-        // 外部入侵。根修 = 洞环条件并回：新打的洞在擦除前是实心 →
-        // 并回保洞；既有空心不并 → 填实功能保留）
-        {
+                return qAlpha(img.pixel(QPoint(int(c.x() * 2), int(c.y() * 2))));
+            };
+            QWidget *vp = e.viewport();
+            // (a) 小笔刷（默认 20 → 压到 6）内部擦 = 纯擦
             e.setPlainText(QString());
             e.clearInk();
-            QWidget *vp = e.viewport();
+            const QPointF ca(vp->width() * 0.3, vp->height() * 0.4);
             e.toggleMode(Editor::Mode::Draw);
-            const QPointF c(vp->width() * 0.4, vp->height() * 0.5);
-            const QPointF s0(c.x() + 18, c.y());
-            QMouseEvent pr(QEvent::MouseButtonPress, s0, vp->mapToGlobal(s0.toPoint()),
-                           Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-            QApplication::sendEvent(vp, &pr);
-            for (int a = 30; a <= 360; a += 30) {
-                const qreal r = a * 3.14159265 / 180.0;
-                const QPointF p(c.x() + 18.0 * qCos(r), c.y() + 18.0 * qSin(r));
-                QMouseEvent mv(QEvent::MouseMove, p, vp->mapToGlobal(p.toPoint()),
-                               Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-                QApplication::sendEvent(vp, &mv);
-            }
-            QMouseEvent re(QEvent::MouseButtonRelease, s0, vp->mapToGlobal(s0.toPoint()),
-                           Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
-            QApplication::sendEvent(vp, &re);
-            // 填实（单笔拖动盖洞界）
+            ringAt2(ca);
             e.toggleMode(Editor::Mode::Erase);
-            const QPointF f0(c.x() - 6, c.y());
-            QMouseEvent fp(QEvent::MouseButtonPress, f0, vp->mapToGlobal(f0.toPoint()),
-                           Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-            QApplication::sendEvent(vp, &fp);
-            for (int dx = -3; dx <= 6; dx += 3) {
-                const QPointF p(c.x() + dx, c.y());
-                QMouseEvent mv(QEvent::MouseMove, p, vp->mapToGlobal(p.toPoint()),
-                               Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-                QApplication::sendEvent(vp, &mv);
-            }
-            const QPointF f1(c.x() + 6, c.y());
-            QMouseEvent fr(QEvent::MouseButtonRelease, f1, vp->mapToGlobal(f1.toPoint()),
-                           Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
-            QApplication::sendEvent(vp, &fr);
-            // 实心内部穿孔
-            const QPointF p0(c.x() - 5, c.y());
-            QMouseEvent pp(QEvent::MouseButtonPress, p0, vp->mapToGlobal(p0.toPoint()),
-                           Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-            QApplication::sendEvent(vp, &pp);
-            const QPointF p1(c.x() + 5, c.y());
-            QMouseEvent pm(QEvent::MouseMove, p1, vp->mapToGlobal(p1.toPoint()),
-                           Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-            QApplication::sendEvent(vp, &pm);
-            QMouseEvent pre2(QEvent::MouseButtonRelease, p1, vp->mapToGlobal(p1.toPoint()),
-                             Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
-            QApplication::sendEvent(vp, &pre2);
-            e.toggleMode(Editor::Mode::Normal);
-            QApplication::processEvents();
-            QImage pk(vp->size() * 2, QImage::Format_ARGB32);
-            pk.fill(Qt::transparent);
-            pk.setDevicePixelRatio(2.0);
-            QPainter p(&pk);
-            p.translate(e.viewport()->pos() * 2);
-            e.m_canvas->render(&p);
-            p.end();
-            const QPoint centerPix(int(c.x() * 2), int(c.y() * 2));
-            if (qAlpha(pk.pixel(centerPix)) > 8) {
-                qWarning("selftest FAIL: internal punch of solid failed (center alpha=%d)",
-                         qAlpha(pk.pixel(centerPix)));
+            while (e.brushSize() > 6.0)
+                e.brushDown();
+            const QPointF ia0(ca.x() - 4, ca.y());
+            QMouseEvent ip0(QEvent::MouseButtonPress, ia0, vp->mapToGlobal(ia0.toPoint()),
+                            Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(vp, &ip0);
+            const QPointF ia1(ca.x() + 4, ca.y());
+            QMouseEvent im0(QEvent::MouseMove, ia1, vp->mapToGlobal(ia1.toPoint()),
+                            Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(vp, &im0);
+            QMouseEvent ir0(QEvent::MouseButtonRelease, ia1, vp->mapToGlobal(ia1.toPoint()),
+                            Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(vp, &ir0);
+            if (centerAlpha(ca) > 8) {
+                qWarning("selftest FAIL: small brush inside filled the hollow — 纯橡皮擦被破坏");
+                e.clearInk();
                 return false;
             }
-            qInfo("CRT-PUNCH center punched");
             e.clearInk();
+            // (b) 大笔刷从外部入侵 = 纯擦（切开口子，不填洞）
+            while (e.brushSize() < 30.0)
+                e.brushUp();
+            const QPointF cb(vp->width() * 0.7, vp->height() * 0.4);
+            e.toggleMode(Editor::Mode::Draw);
+            ringAt2(cb);
+            e.toggleMode(Editor::Mode::Erase);
+            const QPointF ob0(cb.x() - 40, cb.y());
+            QMouseEvent op0(QEvent::MouseButtonPress, ob0, vp->mapToGlobal(ob0.toPoint()),
+                            Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(vp, &op0);
+            const QPointF ob1(cb.x() - 10, cb.y());
+            QMouseEvent om0(QEvent::MouseMove, ob1, vp->mapToGlobal(ob1.toPoint()),
+                            Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(vp, &om0);
+            QMouseEvent or0(QEvent::MouseButtonRelease, ob1, vp->mapToGlobal(ob1.toPoint()),
+                             Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(vp, &or0);
+            if (centerAlpha(cb) > 8) {
+                qWarning("selftest FAIL: outside-in brush filled the hollow — 纯橡皮擦被破坏");
+                e.clearInk();
+                return false;
+            }
+            e.clearInk();
+            e.toggleMode(Editor::Mode::Normal);
             QApplication::processEvents();
         }
         // 涂模式开着打字（用户报：笔刷期间打字光标行为/换行不准）：
@@ -2109,6 +1950,51 @@ bool Editor::selftest()
                 }
                 qInfo("CRT-SCROLL-GHOST gray=%ld", gray);
                 e.setPlainText(QStringLiteral("無\n"));
+                QApplication::processEvents();
+            }
+            // 机型 3（IBM PC）打字光标 = 下划线（用户四轮考据指正）：
+            // 单元格底缘亮条、字形无反相；其余机型 = 整格反相块
+            {
+                while (e.machine() != 3)
+                    e.toggleMachine();
+                QApplication::processEvents();
+                e.setPlainText(QStringLiteral("無\n"));
+                e.moveCursor(QTextCursor::End);
+                QApplication::processEvents();
+                // 直接调 paintCursor（离屏无焦点，合成器的 hasFocus 门控
+                // 会跳过光标——直接调用 = 确定性验证形状）
+                QImage snap3(e.size() * 2, QImage::Format_ARGB32);
+                snap3.setDevicePixelRatio(2.0);
+                snap3.fill(e.crtPalette().bg);
+                e.m_compositor.paintCursor(snap3);
+                const QRect cell = e.cursorRect().translated(e.viewport()->pos());
+                const qreal dpr3 = snap3.devicePixelRatio();
+                const QPoint topPx(qFloor((cell.x() + cell.width() / 2.0) * dpr3),
+                                   qFloor((cell.y() + 2) * dpr3));
+                const QPoint botPx(qFloor((cell.x() + cell.width() / 2.0) * dpr3),
+                                   qFloor((cell.y() + cell.height() - 2) * dpr3));
+                const QRgb topC = snap3.pixel(topPx);
+                const QRgb botC = snap3.pixel(botPx);
+                const Crt::Palette &wp = e.crtPalette();
+                const auto nearCol = [](const QRgb a, const QColor &b, int tol) {
+                    return qAbs(qRed(a) - b.red()) < tol && qAbs(qGreen(a) - b.green()) < tol
+                           && qAbs(qBlue(a) - b.blue()) < tol;
+                };
+                // 底部亮条 ≈ 光标块色；顶部 ≠ 块色（下划线不反相字形）
+                if (!nearCol(botC, wp.cursorBlock, 60)
+                    || nearCol(topC, wp.cursorBlock, 60)) {
+                    qWarning("selftest FAIL: machine3 underline caret wrong (top=%d,%d,%d bot=%d,%d,%d block=%d,%d,%d)",
+                             qRed(topC), qGreen(topC), qBlue(topC),
+                             qRed(botC), qGreen(botC), qBlue(botC),
+                             wp.cursorBlock.red(), wp.cursorBlock.green(), wp.cursorBlock.blue());
+                    while (e.machine() != 0)
+                        e.toggleMachine();
+                    return false;
+                }
+                while (e.machine() != 0)
+                    e.toggleMachine();
+                QApplication::processEvents();
+                e.zoomReset();
                 QApplication::processEvents();
             }
             // M1：退出重进显 → 视角锁定重置
