@@ -528,7 +528,10 @@ void CrtView::renderFrame()
         m_sinceViewChange = 0;
     else if (m_sinceViewChange < 3)
         ++m_sinceViewChange;
-    const bool histPrimed = m_histFrame >= 2 && m_sinceViewChange >= 3;
+    // 滚动期余晖清零（用户报：⌃⇧⌘T 滚动时滚动条旁灰块伪影——余晖
+    // 的 max 模型把中灰把手的旧位置涂抹成残影；旧版只跳辉光不关余晖）
+    const bool histPrimed = m_histFrame >= 2 && m_sinceViewChange >= 3
+                            && !cfg.scrolling;
     const float k1[4] = { histPrimed ? float(pal.persist1[2]) : 0.0f,
                           histPrimed ? float(pal.persist1[1]) : 0.0f,
                           histPrimed ? float(pal.persist1[0]) : 0.0f, 1.0f };

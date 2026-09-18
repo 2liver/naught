@@ -522,9 +522,9 @@ bool Editor::selftest()
             e.clearInk();
             QApplication::processEvents();
         }
-        // 擦除自交笔迹后空心保留（用户报"笔刷把颜色填充到空心区域"
-        // 的确凿复现：擦 ∞ 交叉点 → 减法的外环碎片单独填充会把两瓣
-        // 填实。根修 = 洞环并回容器（canvas.h splitSubpaths），本闸锁定）
+        // 擦除自交笔迹后"填实"（用户三轮拍板：此行为保留为功能——
+        // "画闭合空心 + 橡皮在里面擦一下 = 填满"。本闸锁定该功能：
+        // 擦 ∞ 交叉点后两瓣必须填实）
         {
             e.toggleMode(Editor::Mode::Draw);
             QWidget *vp = e.viewport();
@@ -563,8 +563,8 @@ bool Editor::selftest()
             ip.end();
             const QPoint lobeTop(int(xc.x() * 2), int((xc.y() - 38) * 2));
             const QPoint lobeBot(int(xc.x() * 2), int((xc.y() + 38) * 2));
-            if (qAlpha(exImg.pixel(lobeTop)) > 8 || qAlpha(exImg.pixel(lobeBot)) > 8) {
-                qWarning("selftest FAIL: erase of self-crossing stroke filled hollow lobes (top=%d bot=%d)",
+            if (qAlpha(exImg.pixel(lobeTop)) <= 8 || qAlpha(exImg.pixel(lobeBot)) <= 8) {
+                qWarning("selftest FAIL: erase-fill feature lost (top=%d bot=%d)",
                          qAlpha(exImg.pixel(lobeTop)), qAlpha(exImg.pixel(lobeBot)));
                 return false;
             }
