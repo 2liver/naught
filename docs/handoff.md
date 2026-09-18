@@ -58,9 +58,9 @@ macOS 写作应用「無」(naught),C++/Qt 6.9.3。核心卖点 = 「显」(Cmd+
 
 ## 3.5 第五轮反馈(待修/已修)
 
-1. 方向键光标隐形移动 + Shift 无法选中(常规/显都有,存亡级)——子代理对照稳定版审计中;离屏合成事件复现不了。
+1. 方向键光标隐形移动 + Shift 无法选中(常规/显都有,存亡级)——**已修**:①眨眼定时器 setSingleShot(true) 但处理器从不重启(唤醒后 750ms 永久熄灭 = 隐形根因)——改周期触发;②cursorPositionChanged 只标脏区不 markDirty(显模式块光标/选区冻结)——补 markDirty。闸:820ms 后光标仍亮。
 2. 滚动条灰伪影(离窗重进后)——已修:滚动条淡出期余晖清零(CrtConfig.fading + histPrimed)。
-3. 橡皮擦回归纯擦除——已修:填实功能整体移除(isFillStart/m_fillSession/fillMode 删除,splitSubpaths 并所有闭合洞界 = 并集纯切)。用户另报的两个橡皮 bug(按住 Shift 跨模式擦不掉、擦换画清空内容且不可复原)——子代理状态机审计中。
+3. 橡皮擦回归纯擦除——已修:填实功能整体移除(isFillStart/m_fillSession/fillMode 删除,splitSubpaths 并所有闭合洞界 = 并集纯切)。两个橡皮 bug 已修(子代理状态机审计):toggleMode 切换前终结会话(endStroke+eraseEnd+endInkSession+释放 grab)+ clearAll 复位擦除态;闸 = 纯 Shift 跨模式两序列(NoButton+ShiftModifier 配方)。
 4. 视差上下对调——已修:crt.frag curve() 的 c.y 改 +=。
 5. 架构答问——见下 §5.5。
 6. 平铺式来回画线卡顿——已修:canvas.h 活跃笔画增量轮廓缓存(旧版每帧 O(n²) 重算整条轮廓)。
