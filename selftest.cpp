@@ -1102,7 +1102,9 @@ bool Editor::selftest()
                 qWarning("selftest FAIL: ge() not undone in one step");
                 return false;
             }
-            // 用户报告的核心案例：选中前两行（顶行在选区里）——每一行都要被隔离
+            // 用户报告的核心案例：选中前两行（顶行在选区里）——每一行
+            // 都要被隔离；首行上方同样补空行（用户报：首行功能失效——
+            // 旧代码首行无"上一行"即跳过 = 首行永远少一行空行）
             {
                 QTextBlock b0 = e.document()->findBlockByNumber(0);
                 QTextBlock b1 = e.document()->findBlockByNumber(1);
@@ -1111,7 +1113,7 @@ bool Editor::selftest()
                 cc2.setPosition(b1.position() + b1.length() - 1, QTextCursor::KeepAnchor);
                 e.setTextCursor(cc2);
                 e.ge();
-                if (e.toPlainText() != QStringLiteral("甲一\n\n乙二\n\n丙三\n")) {
+                if (e.toPlainText() != QStringLiteral("\n甲一\n\n乙二\n\n丙三\n")) {
                     qWarning("selftest FAIL: ge() top-two lines got [%s]", qPrintable(e.toPlainText()));
                     return false;
                 }
@@ -1140,13 +1142,13 @@ bool Editor::selftest()
             e.setPlainText(QStringLiteral("一\n二\n\n三\n"));
             e.selectAll();
             e.ge();
-            if (e.toPlainText() != QStringLiteral("一\n\n二\n\n三\n")) {
+            if (e.toPlainText() != QStringLiteral("\n一\n\n二\n\n三\n")) {
                 qWarning("selftest FAIL: ge() with inner blank got [%s]", qPrintable(e.toPlainText()));
                 return false;
             }
             e.selectAll();
-            e.ge(); // 文首无上行、文末空块已空、内部已隔离 → 全文档幂等
-            if (e.toPlainText() != QStringLiteral("一\n\n二\n\n三\n")) {
+            e.ge(); // 首行上方已有空行、文末空块已空、内部已隔离 → 全文档幂等
+            if (e.toPlainText() != QStringLiteral("\n一\n\n二\n\n三\n")) {
                 qWarning("selftest FAIL: ge() full-doc idempotence got [%s]", qPrintable(e.toPlainText()));
                 return false;
             }
@@ -1161,10 +1163,11 @@ bool Editor::selftest()
                 qWarning("selftest FAIL: Ctrl+L did not call yan()");
                 return false;
             }
-            // Ctrl+F：文首无上行、文末空块已空 → 语义正确的不动（且不崩溃）
+            // Ctrl+F 首行：首行上方同样补空行（用户报：首行功能失效——
+            // 旧代码首行不动 = "无法触发"；新语义首行也隔离）
             QKeyEvent kf(QEvent::KeyPress, Qt::Key_F, Qt::ControlModifier);
             QApplication::sendEvent(&e, &kf);
-            if (e.toPlainText() != QStringLiteral("「丁四」\n")) {
+            if (e.toPlainText() != QStringLiteral("\n「丁四」\n")) {
                 qWarning("selftest FAIL: Ctrl+F at document edge changed text");
                 return false;
             }
@@ -1181,6 +1184,141 @@ bool Editor::selftest()
                 return false;
             }
         }
+        // ============ 第六轮闸：空行 ⌘F 不崩 + 死键复活 + 首行不特殊 ============
+        // A. ⌘F 空行（用户报：非首行且行为空 → 闪退；根因 ge() 对空
+        //    lines 向量取 last()/first() 越界）。空行 = 隔板，语义 = 不动
+        {
+            e.setPlainText(QStringLiteral("abc\ndef\n\n"));
+            QTextCursor cc = e.textCursor();
+            cc.setPosition(8); // 空行（第 3 行）
+            e.setTextCursor(cc);
+            QApplication::processEvents();
+            QKeyEvent kf(QEvent::KeyPress, Qt::Key_F, Qt::ControlModifier);
+            QApplication::sendEvent(&e, &kf);
+            QApplication::processEvents();
+            if (e.toPlainText() != QStringLiteral("abc\ndef\n\n")) {
+                qWarning("selftest FAIL: ge() on empty line changed text [%s]",
+                         qPrintable(e.toPlainText()));
+                return false;
+            }
+            qInfo("GE-EMPTY ok (no crash, no-op)");
+        }
+        // B. 死键复活（用户报：首行很多功能无法触发——根因 = 仅菜单
+        //    QAction 的功能键在 macOS 上从不注册（QMenuBar 未挂窗），
+        //    统一收进 keyPressEvent）。逐个走真实键路径验证
+        {
+            const auto keyMeta = [&](Qt::Key k, Qt::KeyboardModifiers m = Qt::ControlModifier) {
+                QKeyEvent ke(QEvent::KeyPress, k, m);
+                QApplication::sendEvent(&e, &ke);
+                QApplication::processEvents();
+            };
+            // ⌘⇧C 居中：首行也生效（用户点名的案例）
+            e.setPlainText(QStringLiteral("abc\n"));
+            QTextCursor cc = e.textCursor();
+            cc.setPosition(0);
+            e.setTextCursor(cc);
+            keyMeta(Qt::Key_C, Qt::ControlModifier | Qt::ShiftModifier);
+            if (e.toPlainText() == QStringLiteral("abc\n")) {
+                qWarning("selftest FAIL: Cmd+Shift+C (center) dead on first line");
+                return false;
+            }
+            // ⌘⇧G 单线框：首行
+            e.setPlainText(QStringLiteral("abc\n"));
+            keyMeta(Qt::Key_G, Qt::ControlModifier | Qt::ShiftModifier);
+            if (!e.toPlainText().contains(QStringLiteral("─"))
+                && !e.toPlainText().contains(QLatin1Char('-'))) {
+                qWarning("selftest FAIL: Cmd+Shift+G (box single) dead [%s]",
+                         qPrintable(e.toPlainText()));
+                return false;
+            }
+            // ⌘⇧H 双线框
+            e.setPlainText(QStringLiteral("abc\n"));
+            keyMeta(Qt::Key_H, Qt::ControlModifier | Qt::ShiftModifier);
+            if (!e.toPlainText().contains(QLatin1Char('='))
+                && !e.toPlainText().contains(QStringLiteral("═"))) {
+                qWarning("selftest FAIL: Cmd+Shift+H (box double) dead [%s]",
+                         qPrintable(e.toPlainText()));
+                return false;
+            }
+            // ⌘⇧U 圆角框
+            e.setPlainText(QStringLiteral("abc\n"));
+            keyMeta(Qt::Key_U, Qt::ControlModifier | Qt::ShiftModifier);
+            if (!e.toPlainText().contains(QStringLiteral("╭"))
+                && !e.toPlainText().contains(QLatin1Char('/'))) {
+                qWarning("selftest FAIL: Cmd+Shift+U (box round) dead [%s]",
+                         qPrintable(e.toPlainText()));
+                return false;
+            }
+            // ⌘⇧V 粗线框
+            e.setPlainText(QStringLiteral("abc\n"));
+            keyMeta(Qt::Key_V, Qt::ControlModifier | Qt::ShiftModifier);
+            if (!e.toPlainText().contains(QStringLiteral("┃"))
+                && !e.toPlainText().contains(QLatin1Char('#'))) {
+                qWarning("selftest FAIL: Cmd+Shift+V (box bold) dead [%s]",
+                         qPrintable(e.toPlainText()));
+                return false;
+            }
+            // ⌘⇧J 压成一行 + ⌘⇧K 还原
+            e.setPlainText(QStringLiteral("one\ntwo\nthree\n"));
+            keyMeta(Qt::Key_J, Qt::ControlModifier | Qt::ShiftModifier);
+            if (e.toPlainText() != QStringLiteral("one two three")) {
+                qWarning("selftest FAIL: Cmd+Shift+J (join) dead [%s]",
+                         qPrintable(e.toPlainText()));
+                return false;
+            }
+            keyMeta(Qt::Key_K, Qt::ControlModifier | Qt::ShiftModifier);
+            if (e.toPlainText() != QStringLiteral("one\ntwo\nthree\n")) {
+                qWarning("selftest FAIL: Cmd+Shift+K (restore) dead [%s]",
+                         qPrintable(e.toPlainText()));
+                return false;
+            }
+            // ⌘⇧P 路径列表 → 树
+            e.setPlainText(QStringLiteral("a/b\na/c\n"));
+            keyMeta(Qt::Key_P, Qt::ControlModifier | Qt::ShiftModifier);
+            if (e.toPlainText() == QStringLiteral("a/b\na/c\n")) {
+                qWarning("selftest FAIL: Cmd+Shift+P (paths to tree) dead [%s]",
+                         qPrintable(e.toPlainText()));
+                return false;
+            }
+            // ⌘⇧R 树 → 路径列表
+            keyMeta(Qt::Key_R, Qt::ControlModifier | Qt::ShiftModifier);
+            if (e.toPlainText() == QStringLiteral("a/b\na/c\n")) {
+                qWarning("selftest FAIL: Cmd+Shift+R (tree to paths) dead [%s]",
+                         qPrintable(e.toPlainText()));
+                return false;
+            }
+            // ⌘⇧. / ⌘⇧, 字体循环：验证选择游标移动（用户字体槽非空 =
+            // 已切到用户字体；再循环回出厂 = 空）。非显模式字体不生效
+            // 于文档，故不比对 family（只在显模式应用）
+            e.refreshFonts();
+            if (!e.m_userFonts.isEmpty()) {
+                keyMeta(Qt::Key_Period, Qt::ControlModifier | Qt::ShiftModifier);
+                const bool onUser = !e.machineUserFont().isEmpty();
+                keyMeta(Qt::Key_Comma, Qt::ControlModifier | Qt::ShiftModifier);
+                const bool backFactory = e.machineUserFont().isEmpty();
+                if (!onUser || !backFactory) {
+                    qWarning("selftest FAIL: Cmd+Shift+./, (font cycle) dead (onUser=%d back=%d)",
+                             int(onUser), int(backFactory));
+                    return false;
+                }
+            }
+            // 裸 ⌘C/⌘V = 系统复制粘贴必须仍走基类（死键修复不得吞掉）
+            e.setPlainText(QStringLiteral("xyz\n"));
+            QKeyEvent kca(QEvent::KeyPress, Qt::Key_A, Qt::ControlModifier);
+            QApplication::sendEvent(&e, &kca); // 全选
+            QKeyEvent kco(QEvent::KeyPress, Qt::Key_C, Qt::ControlModifier);
+            QApplication::sendEvent(&e, &kco); // 复制
+            QKeyEvent kng(QEvent::KeyPress, Qt::Key_N, Qt::ControlModifier);
+            QApplication::sendEvent(&e, &kng); // 空
+            QKeyEvent kpa(QEvent::KeyPress, Qt::Key_V, Qt::ControlModifier);
+            QApplication::sendEvent(&e, &kpa); // 粘贴
+            if (e.toPlainText() != QStringLiteral("xyz\n")) {
+                qWarning("selftest FAIL: bare Cmd+C/V broken [%s]", qPrintable(e.toPlainText()));
+                return false;
+            }
+            qInfo("DEAD-KEYS ok");
+        }
+        // ============ 第六轮闸完 ============
         // 先言后隔组合：言保持的选区直接喂给隔（批量校对的完整动线）
         {
             e.setPlainText(QStringLiteral("甲\n一\n二\n三\n丙\n"));
@@ -2304,6 +2442,73 @@ bool Editor::selftest()
                     }
                 }
                 qInfo("CRT-SHIFT-STORM watchdog=0 compositor text ok");
+                // ============ 第六轮闸：打字 + 方向键落光标闪退（用户报：
+                // 码一行字 + 左右键 → 闪退；栈 = renderFrame uploadTexture
+                // 空指针——方向键标脏驱动帧循环后踩中半残管线。根修 =
+                // renderFrame/ensureRhi 全路径失败即弃帧重试（不崩）。
+                // 闸：打字 + 方向键/选区风暴后画面必须仍活、文字完整）
+                {
+                    e.setPlainText(QStringLiteral("abc\n"));
+                    e.verticalScrollBar()->setValue(0);
+                    QApplication::processEvents();
+                    const char *line = "the quick brown fox 42";
+                    quint32 seed = 0xABBAu;
+                    const auto rnd = [&seed]() {
+                        seed = seed * 1664525u + 1013904223u;
+                        return (seed >> 8) % 1000u;
+                    };
+                    for (int i = 0; i < 60; ++i) {
+                        const int op = rnd();
+                        if (op < 420) {
+                            const char ch = line[(i * 7 + op) % 23];
+                            QKeyEvent kt(QEvent::KeyPress, 0, Qt::NoModifier,
+                                         QString(QLatin1Char(ch)));
+                            QApplication::sendEvent(&e, &kt);
+                        } else if (op < 700) {
+                            const Qt::Key keys[4] = { Qt::Key_Left, Qt::Key_Right,
+                                                      Qt::Key_Up, Qt::Key_Down };
+                            QKeyEvent kn(QEvent::KeyPress, keys[(op / 70) % 4], Qt::NoModifier);
+                            QApplication::sendEvent(&e, &kn);
+                        } else if (op < 850) {
+                            const Qt::Key keys[2] = { Qt::Key_Left, Qt::Key_Right };
+                            QKeyEvent ks(QEvent::KeyPress, keys[(op / 75) % 2], Qt::ShiftModifier);
+                            QApplication::sendEvent(&e, &ks);
+                        } else {
+                            const int w = 300 + int(rnd()) % 400;
+                            e.resize(w, 300);
+                        }
+                        if (i % 3 == 0) {
+                            QApplication::processEvents();
+                            QEventLoop sl;
+                            QTimer::singleShot(3, &sl, &QEventLoop::quit);
+                            sl.exec();
+                        }
+                    }
+                    for (int i = 0; i < 30; ++i) {
+                        QApplication::processEvents();
+                        QEventLoop sl;
+                        QTimer::singleShot(10, &sl, &QEventLoop::quit);
+                        sl.exec();
+                    }
+                    // 画面仍活（合成器确定性输出）+ 文字在
+                    QImage fresh(e.size(), QImage::Format_ARGB32);
+                    fresh.setDevicePixelRatio(1.0);
+                    e.paintTextSnapshot(fresh);
+                    long mx = 0;
+                    for (int y = 0; y < fresh.height() / 5; ++y)
+                        for (int x = 2; x < fresh.width() - 30; ++x) {
+                            const QRgb pxx = fresh.pixel(x, y);
+                            mx = qMax<long>(mx, qRed(pxx) + qGreen(pxx) + qBlue(pxx));
+                        }
+                    if (mx < 60 || e.document()->characterCount() < 3) {
+                        qWarning("selftest FAIL: arrow storm lost text (mx=%ld cc=%d)",
+                                 mx, e.document()->characterCount());
+                        return false;
+                    }
+                    qInfo("CRT-ARROW-STORM survived (cc=%d)", e.document()->characterCount());
+                    e.setPlainText(QStringLiteral("無\n"));
+                    QApplication::processEvents();
+                }
                 e.setPlainText(QStringLiteral("無\n"));
             }
             // 滚动灰块回归（用户报：⌃⇧⌘T 滚动时滚动条旁灰块伪影——
@@ -2342,7 +2547,6 @@ bool Editor::selftest()
                     settle2.exec();
                 }
                 const QImage gb = e.crtShownImage();
-                gb.save(QStringLiteral("/tmp/ghost_dpr.png"));
                 long gray = 0;
                 // 扫描区 = 滚动条邻域（把手幽灵的栖息地——旧版全幅扫描
                 // 把顶部文字的 AA 边缘误报成灰；文字是琥珀色、把手是
@@ -2358,6 +2562,7 @@ bool Editor::selftest()
                             ++gray; // 中性灰（琥珀是 r≫g≫b，把手灰 r≈g≈b）
                     }
                 if (gray > 30) {
+                    gb.save(QStringLiteral("/tmp/ghost_fail.png")); // 取证
                     // 取证：灰像素的 y 分布（10 行一档）
                     QString dist;
                     for (int y0 = 0; y0 < gb.height(); y0 += 10) {
@@ -3121,6 +3326,201 @@ bool Editor::selftest()
                          rCols, rWrong, bCols, bWrong);
                 return false;
             }
+        }
+        // ============ NAUGHT_FUZZ：第六轮闪退复现/功能矩阵/暴力乱测 ============
+        if (qEnvironmentVariableIsSet("NAUGHT_FUZZ")) {
+            qInfo("FUZZ-ENTER");
+            // A. ⌘F 空行闪退复现（用户报：非首行且行为空 → 闪退）
+            {
+                e.setPlainText(QStringLiteral("abc\ndef\n\n"));
+                QTextCursor cc = e.textCursor();
+                cc.setPosition(8); // 空行（第 3 行）
+                e.setTextCursor(cc);
+                QApplication::processEvents();
+                QKeyEvent kf(QEvent::KeyPress, Qt::Key_F, Qt::MetaModifier);
+                QApplication::sendEvent(&e, &kf);
+                QApplication::processEvents();
+                qInfo("FUZZ ge-empty ok text=[%s]", qPrintable(e.toPlainText().replace(QLatin1Char('\n'), QLatin1Char('|'))));
+            }
+            // B. 功能矩阵：单行文档（首行）与多行文档第 2 行各跑一遍，
+            //    报告哪些在首行不生效
+            {
+                const auto snapshot = [&]() { return e.toPlainText(); };
+                struct Fn {
+                    const char *name;
+                    void (Editor::*fn)();
+                };
+                const Fn fns[] = {
+                    { "center", &Editor::centerToWidth },
+                    { "ge", &Editor::ge },
+                    { "yan", &Editor::yan },
+                    { "join", &Editor::joinLinesTo },
+                    { "split", &Editor::restoreLines },
+                    { "p2t", &Editor::pathsToTree },
+                    { "t2p", &Editor::treeToPaths },
+                };
+                const auto runAt = [&](const QString &doc, int pos, const char *tag) {
+                    QString report = QStringLiteral("FUZZ %1:").arg(tag);
+                    for (const Fn &f : fns) {
+                        e.setPlainText(doc);
+                        QTextCursor c = e.textCursor();
+                        c.setPosition(qBound(0, pos, e.document()->characterCount() - 1));
+                        e.setTextCursor(c);
+                        QApplication::processEvents();
+                        const QString before = snapshot();
+                        (e.*f.fn)();
+                        QApplication::processEvents();
+                        const QString after = snapshot();
+                        report += QStringLiteral(" %1=%2").arg(QLatin1String(f.name),
+                                before == after ? QStringLiteral("noop") : QStringLiteral("ok"));
+                    }
+                    qInfo("%s", qPrintable(report));
+                };
+                runAt(QStringLiteral("single line here\n"), 0, "first-line");
+                runAt(QStringLiteral("line one\nline two here\nline three\n"), 12, "mid-line");
+            }
+            // C. 暴力乱测（用户点名：交叉混叠各种功能，想尽办法弄坏它）：
+            //    打字 × 方向键 × Home/End × Shift 选区 × Enter/Tab ×
+            //    缩放 × 换机 × 编模式 × ⌘F/⌘L/⌘⇧C × 撤销重做 ×
+            //    窗口 resize 风暴（管线全量重建路径 = 闪退嫌疑区）。
+            //    LCG 固定种子 → 失败可精确复现
+            {
+                quint32 seed = 0x5EEDC0DEu + quint32(qEnvironmentVariableIntValue("NAUGHT_FUZZ_SEED"));
+                const auto rnd = [&seed]() {
+                    seed = seed * 1664525u + 1013904223u;
+                    return (seed >> 8) % 1000u;
+                };
+                const char *line = "the quick brown fox 42 jumps over the lazy dog 無無無";
+                for (int crtRound = 0; crtRound < 2; ++crtRound) {
+                    if (crtRound == 1)
+                        e.toggleCrt();
+                    QApplication::processEvents();
+                    e.setPlainText(QStringLiteral("abc\ndef\n\n"));
+                    e.show();
+                    e.setFocus();
+                    e.resize(640, 480);
+                    QApplication::processEvents();
+                    int ops = 0;
+                    for (int i = 0; i < 500; ++i) {
+                        const int op = rnd();
+                        if (op < 300) { // 打字（含中文/标点/换行）
+                            const char ch = line[(i * 7 + op) % (int(sizeof(line) - 1))];
+                            QKeyEvent kt(QEvent::KeyPress, 0, Qt::NoModifier,
+                                         QString(QLatin1Char(ch)));
+                            QApplication::sendEvent(&e, &kt);
+                        } else if (op < 400) { // 方向键/Home/End
+                            const int k = (op / 20) % 6;
+                            const Qt::Key keys[6] = { Qt::Key_Left, Qt::Key_Right,
+                                                      Qt::Key_Up, Qt::Key_Down,
+                                                      Qt::Key_Home, Qt::Key_End };
+                            QKeyEvent kn(QEvent::KeyPress, keys[k], Qt::NoModifier);
+                            QApplication::sendEvent(&e, &kn);
+                        } else if (op < 480) { // Shift 选区风暴
+                            const Qt::Key keys[4] = { Qt::Key_Left, Qt::Key_Right,
+                                                      Qt::Key_Up, Qt::Key_Down };
+                            QKeyEvent ks(QEvent::KeyPress, keys[(op / 20) % 4],
+                                         Qt::ShiftModifier);
+                            QApplication::sendEvent(&e, &ks);
+                        } else if (op < 540) { // Enter / Tab / Backspace
+                            const Qt::Key keys[3] = { Qt::Key_Return, Qt::Key_Tab,
+                                                      Qt::Key_Backspace };
+                            QKeyEvent ke2(QEvent::KeyPress, keys[(op / 20) % 3],
+                                          Qt::NoModifier);
+                            QApplication::sendEvent(&e, &ke2);
+                        } else if (op < 620) { // 功能键：⌘F ⌘L ⌘⇧C ⌘B ⌘0
+                            const int k = (op / 20) % 5;
+                            const Qt::Key keys[5] = { Qt::Key_F, Qt::Key_L, Qt::Key_C,
+                                                      Qt::Key_B, Qt::Key_0 };
+                            QKeyEvent kf2(QEvent::KeyPress, keys[k],
+                                          (k == 2) ? Qt::MetaModifier | Qt::ShiftModifier
+                                                   : Qt::MetaModifier);
+                            QApplication::sendEvent(&e, &kf2);
+                        } else if (op < 700) { // 缩放 / 换机 / 撤销重做
+                            const int k = (op / 20) % 4;
+                            if (k == 0) {
+                                QKeyEvent kz2(QEvent::KeyPress, Qt::Key_Equal, Qt::MetaModifier);
+                                QApplication::sendEvent(&e, &kz2);
+                            } else if (k == 1) {
+                                QKeyEvent km(QEvent::KeyPress, Qt::Key_Minus, Qt::MetaModifier);
+                                QApplication::sendEvent(&e, &km);
+                            } else if (k == 2) {
+                                QKeyEvent kz3(QEvent::KeyPress, Qt::Key_Z, Qt::MetaModifier);
+                                QApplication::sendEvent(&e, &kz3);
+                            } else {
+                                QKeyEvent ky2(QEvent::KeyPress, Qt::Key_Y, Qt::MetaModifier);
+                                QApplication::sendEvent(&e, &ky2);
+                            }
+                        } else if (op < 800) { // 换机 ⌘⇧M
+                            QKeyEvent km2(QEvent::KeyPress, Qt::Key_M,
+                                          Qt::MetaModifier | Qt::ShiftModifier);
+                            QApplication::sendEvent(&e, &km2);
+                        } else if (op < 900) { // resize 风暴：管线全量重建路径
+                            const int w = 240 + int(rnd()) % 900;
+                            const int h = 180 + int(rnd()) % 700;
+                            e.resize(w, h);
+                            QApplication::processEvents();
+                        } else { // 清空/重打（kong ⌘N）
+                            QKeyEvent kn2(QEvent::KeyPress, Qt::Key_N, Qt::MetaModifier);
+                            QApplication::sendEvent(&e, &kn2);
+                        }
+                        ++ops;
+                        if (i % 4 == 0) {
+                            QApplication::processEvents();
+                            QEventLoop sl;
+                            QTimer::singleShot(2, &sl, &QEventLoop::quit);
+                            sl.exec();
+                        }
+                    }
+                    // 收尾：让所有在途帧/回读/定时器落定
+                    for (int i = 0; i < 40; ++i) {
+                        QApplication::processEvents();
+                        QEventLoop sl;
+                        QTimer::singleShot(10, &sl, &QEventLoop::quit);
+                        sl.exec();
+                    }
+                    qInfo("FUZZ storm crt=%d ops=%d survived textlen=%d", crtRound, ops,
+                          e.document()->characterCount());
+                    if (crtRound == 1)
+                        e.toggleCrt();
+                    QApplication::processEvents();
+                }
+            }
+            // D. 真实快捷键路径（QAction + QKeySequence，与 main.mm 同配方）：
+            //    首行 vs 其他行触发情况
+            {
+                e.setPlainText(QStringLiteral("abc\n"));
+                QTextCursor cc = e.textCursor();
+                cc.setPosition(0);
+                e.setTextCursor(cc);
+                QAction *act = new QAction(&e);
+                act->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+C")));
+                act->setShortcutContext(Qt::ApplicationShortcut);
+                int fires = 0;
+                QObject::connect(act, &QAction::triggered, [&] { ++fires; });
+                e.show();
+                e.setFocus();
+                QApplication::processEvents();
+                for (int rep = 0; rep < 2; ++rep) {
+                    QKeyEvent kc(QEvent::KeyPress, Qt::Key_C,
+                                 Qt::MetaModifier | Qt::ShiftModifier);
+                    QApplication::sendEvent(&e, &kc);
+                    QApplication::processEvents();
+                }
+                qInfo("FUZZ shortcut Cmd+Shift+C fires=%d (pos0)", fires);
+                QTextCursor cc2 = e.textCursor();
+                cc2.setPosition(e.document()->characterCount() - 2);
+                e.setTextCursor(cc2);
+                QApplication::processEvents();
+                for (int rep = 0; rep < 2; ++rep) {
+                    QKeyEvent kc(QEvent::KeyPress, Qt::Key_C,
+                                 Qt::MetaModifier | Qt::ShiftModifier);
+                    QApplication::sendEvent(&e, &kc);
+                    QApplication::processEvents();
+                }
+                qInfo("FUZZ shortcut Cmd+Shift+C fires=%d (end)", fires);
+                delete act;
+            }
+            qInfo("FUZZ-EXIT");
         }
         return true;
 }

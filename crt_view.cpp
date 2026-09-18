@@ -269,6 +269,9 @@ void CrtView::ensureRhi()
                                  QRhiTexture::RenderTarget | QRhiTexture::UsedAsTransferSource);
     if (!m_colorTex->create()) {
         shaderLog(QStringLiteral("TEX CREATE FAIL"));
+        releaseGpu();
+        delete m_r;
+        m_r = nullptr;
         return;
     }
     m_rt = makeRt(m_colorTex);
@@ -279,6 +282,9 @@ void CrtView::ensureRhi()
                                 QRhiTexture::UsedAsTransferSource);
     if (!m_snapTex->create()) {
         shaderLog(QStringLiteral("SNAP TEX CREATE FAIL"));
+        releaseGpu();
+        delete m_r;
+        m_r = nullptr;
         return;
     }
 
@@ -288,6 +294,9 @@ void CrtView::ensureRhi()
                                        QRhiTexture::RenderTarget | QRhiTexture::UsedAsTransferSource);
         if (!m_histTex[i]->create()) {
             shaderLog(QStringLiteral("HIST TEX CREATE FAIL"));
+            releaseGpu();
+            delete m_r;
+            m_r = nullptr;
             return;
         }
         m_histRt[i] = makeRt(m_histTex[i]);
@@ -300,6 +309,9 @@ void CrtView::ensureRhi()
                               QRhiTexture::RenderTarget | QRhiTexture::UsedAsTransferSource);
     if (!m_glowA->create() || !m_glowB->create()) {
         shaderLog(QStringLiteral("GLOW TEX CREATE FAIL"));
+        releaseGpu();
+        delete m_r;
+        m_r = nullptr;
         return;
     }
     m_glowRtA = makeRt(m_glowA);
@@ -311,6 +323,9 @@ void CrtView::ensureRhi()
                                       QRhiSampler::ClampToEdge, QRhiSampler::ClampToEdge);
     if (!m_samplerNearest->create() || !m_samplerLinear->create()) {
         shaderLog(QStringLiteral("SAMPLER CREATE FAIL"));
+        releaseGpu();
+        delete m_r;
+        m_r = nullptr;
         return;
     }
 
@@ -390,6 +405,9 @@ void CrtView::ensureRhi()
         shaderLog(QStringLiteral("PIPELINE SET INCOMPLETE — render layer disabled"));
         qWarning("CRT-RHI pipeline create FAIL — render layer disabled");
         m_rhiUnavailable = true;
+        releaseGpu();
+        delete m_r;
+        m_r = nullptr;
         return;
     }
     shaderLog(QStringLiteral("PS CREATE OK x5"));
@@ -428,6 +446,13 @@ void CrtView::renderFrame()
             releaseGpu();
             ensureRhi();
             m_watchdogStreak = 0;
+            // 重建失败（后端/纹理创建失败 = 半残状态）→ 本帧放弃，
+            // 标脏下一帧重试——旧代码继续跑，拿着空纹理/空批次上传
+            // = 段错误（用户报：码一行字 + 方向键落光标闪退）
+            if (!m_r || !m_ps || !m_snapTex || !m_ubuf) {
+                m_renderDirty = true;
+                return;
+            }
         }
     } else if (m_readbackInFlight) {
         m_watchdogStreak = 0;
@@ -458,8 +483,10 @@ void CrtView::renderFrame()
     if (want != m_texSize) {
         releaseGpu(); // 帧边界安全重建（此刻无在途回读）
         ensureRhi();
-        if (!m_ps)
+        if (!m_r || !m_ps || !m_snapTex || !m_ubuf) {
+            m_renderDirty = true;
             return;
+        }
         // 重建后跳过本帧的重拍：重建帧会赶上视口布局未就绪（快照失字
         // = 黑帧），且该黑帧的回读串行压制后续帧 → 用户看到"松 Shift
         // 黑屏一会"。下一帧（布局已就绪）重拍，黑帧永不产生
@@ -469,6 +496,10 @@ void CrtView::renderFrame()
     }
 
     QRhiResourceUpdateBatch *u = m_r->nextResourceUpdateBatch();
+    if (!u) { // 批次分配失败：本帧放弃，下一帧重试（防御，不崩）
+        m_renderDirty = true;
+        return;
+    }
 
     // 快照：合成真实组件（80ms 节流；force 立即）。环境拍（无脏）复用
     // 上一拍快照——文本不重拍，GPU 侧余晖照常推进
@@ -518,8 +549,12 @@ void CrtView::renderFrame()
             }
             QImage up = m_pending.convertToFormat(QImage::Format_RGBA8888);
             up.setDevicePixelRatio(1.0); // 上传按原始像素：QRhi 尊重图像 DPR
-
-            u->uploadTexture(m_snapTex, up);
+            if (m_snapTex && !up.isNull())
+                u->uploadTexture(m_snapTex, up);
+            else { // 纹理半残/图像空：本帧放弃，下一帧重试（防御，不崩）
+                m_renderDirty = true;
+                return;
+            }
         }
         m_forceNow = false;
         m_sinceRefresh.restart();

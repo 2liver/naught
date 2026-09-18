@@ -578,6 +578,10 @@ public:
             if (b == last)
                 break;
         }
+        if (lines.isEmpty())
+            return; // 全是空行（用户报：非首行空行上按 ⌘F 闪退——
+            // 旧代码 lines.last()/first() 空向量越界 = 段错误；
+            // 负向验证：去掉本守卫 → SIGSEGV 复现）
         QVector<int> inserts;
         // 相邻内容行之间：若中间无空行，必插
         for (int i = 0; i + 1 < lines.size(); ++i) {
@@ -590,9 +594,15 @@ public:
             if (below.isValid() && below.length() > 1)
                 inserts.append(lines.last().position() + lines.last().length() - 1);
         }
-        // 首行之前：插在上一行换行符处（若插本行首会劈块，句柄漂移）
-        if (lines.first().position() > 0 && lines.first().previous().length() > 1)
-            inserts.append(lines.first().position() - 1);
+        // 首行之前：非首行插在上一行换行符处（不劈块）；首行没有
+        // 上一行，直接在文档头插换行符（位置 0）——应用按降序，
+        // 0 最后插，不影响此前各插入点（位置法恒有效，无句柄漂移）
+        if (lines.first().position() > 0) {
+            if (lines.first().previous().length() > 1)
+                inserts.append(lines.first().position() - 1);
+        } else {
+            inserts.append(0);
+        }
         if (inserts.isEmpty())
             return;
         std::sort(inserts.begin(), inserts.end(), std::greater<int>());
@@ -1956,9 +1966,11 @@ protected:
                     toggleMachine(); // 显·切换计算机：M = Machine（琥珀 ↔ 绿磷）
                 return;
             case Qt::Key_A:
-                if (event->modifiers() & Qt::ShiftModifier)
+                if (event->modifiers() & Qt::ShiftModifier) {
                     declareArtFromSelection(); // 立为图：选区 → 字符画源图（可调画布）
-                return;
+                    return;
+                }
+                break; // 裸 ⌘A = 系统全选，落回基类（同病根：无条件 return 吞键）
             case Qt::Key_I:
                 setDark(true); // 阴：I 如冰（阴冷）
                 return;
@@ -2008,6 +2020,72 @@ protected:
             case Qt::Key_ParenRight:
                 brushReset(); // Shift+"0"在 macOS Qt 中报作右括号键
                 return;
+            case Qt::Key_C:
+                if (event->modifiers() & Qt::ShiftModifier) {
+                    centerToWidth(); // 居中（⌘⇧C：原仅菜单 QAction，死键）
+                    return;
+                }
+                break; // 裸 ⌘C = 系统复制，落回基类
+            case Qt::Key_G:
+                if (event->modifiers() & Qt::ShiftModifier) {
+                    formatBox(0); // 单线框
+                    return;
+                }
+                break;
+            case Qt::Key_H:
+                if (event->modifiers() & Qt::ShiftModifier) {
+                    formatBox(1); // 双线框
+                    return;
+                }
+                break;
+            case Qt::Key_U:
+                if (event->modifiers() & Qt::ShiftModifier) {
+                    formatBox(2); // 圆角框
+                    return;
+                }
+                break;
+            case Qt::Key_V:
+                if (event->modifiers() & Qt::ShiftModifier) {
+                    formatBox(3); // 粗线框（⌘⇧V 接管系统"粘贴并匹配样式"）
+                    return;
+                }
+                break; // 裸 ⌘V = 系统粘贴，落回基类
+            case Qt::Key_J:
+                if (event->modifiers() & Qt::ShiftModifier) {
+                    joinLinesTo(); // 压成一行
+                    return;
+                }
+                break;
+            case Qt::Key_K:
+                if (event->modifiers() & Qt::ShiftModifier) {
+                    restoreLines(); // 还原为多行
+                    return;
+                }
+                break;
+            case Qt::Key_P:
+                if (event->modifiers() & Qt::ShiftModifier) {
+                    pathsToTree(); // 路径列表 → 树
+                    return;
+                }
+                break;
+            case Qt::Key_R:
+                if (event->modifiers() & Qt::ShiftModifier) {
+                    treeToPaths(); // 树 → 路径列表
+                    return;
+                }
+                break;
+            case Qt::Key_Comma:
+                if (event->modifiers() & Qt::ShiftModifier) {
+                    cycleCrtFont(-1); // 上一字体
+                    return;
+                }
+                break;
+            case Qt::Key_Period:
+                if (event->modifiers() & Qt::ShiftModifier) {
+                    cycleCrtFont(+1); // 下一字体
+                    return;
+                }
+                break;
             default:
                 break;
             }
