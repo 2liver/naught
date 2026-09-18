@@ -401,8 +401,12 @@ public:
         m_scrollSettle.setSingleShot(true);
         connect(&m_scrollSettle, &QTimer::timeout, this, [this] {
             m_scrolling = false;
-            if (m_crtView)
+            if (m_crtView) {
+                // 停稳冲刷余晖历史：滚动期积累的旧把手位置不得在
+                // 停稳后第一帧复活（审计建议 2）
+                m_crtView->flushHistory();
                 m_crtView->markDirty(true);
+            }
         });
         connect(verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int) {
             m_scrolling = true;

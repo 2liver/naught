@@ -1972,6 +1972,55 @@ bool Editor::selftest()
                 qInfo("CRT-SHIFT-STORM watchdog=0 lit=%ld", lit);
                 e.setPlainText(QStringLiteral("無\n"));
             }
+            // 滚动灰块回归（用户报：⌃⇧⌘T 滚动时滚动条旁灰块伪影——
+            // 余晖把中灰把手的旧位置涂抹成残影；根修 = 滚动期余晖清零
+            // + 停稳冲刷。闸：滚动后内容区（滚动条列之外）零中性灰）
+            if (gpuOk) {
+                {
+                    QString doc;
+                    for (int i = 0; i < 300; ++i)
+                        doc += QStringLiteral("無無無無無無無無無無\n");
+                    e.setPlainText(doc);
+                    QApplication::processEvents();
+                }
+                e.verticalScrollBar()->setValue(0);
+                e.m_crtView->markDirty(true);
+                QApplication::processEvents();
+                {
+                    QEventLoop settle;
+                    QTimer::singleShot(150, &settle, &QEventLoop::quit);
+                    settle.exec();
+                }
+                e.verticalScrollBar()->setValue(e.verticalScrollBar()->maximum());
+                QApplication::processEvents();
+                {
+                    QEventLoop settle;
+                    QTimer::singleShot(60, &settle, &QEventLoop::quit);
+                    settle.exec();
+                }
+                for (int guard = 0; guard < 200 && e.m_crtView && !e.m_crtView->readbackIdle(); ++guard) {
+                    QEventLoop settle2;
+                    QTimer::singleShot(16, &settle2, &QEventLoop::quit);
+                    settle2.exec();
+                }
+                const QImage gb = e.crtShownImage();
+                long gray = 0;
+                const int xLimit = qMax(10, gb.width() - 24); // 排除滚动条列自身
+                for (int y = 0; y < gb.height(); ++y)
+                    for (int x = 2; x < xLimit; ++x) {
+                        const QRgb px = gb.pixel(x, y);
+                        const int r = qRed(px), g = qGreen(px), b = qBlue(px);
+                        if (r + g + b > 60 && qAbs(r - g) < 25 && qAbs(g - b) < 25)
+                            ++gray; // 中性灰（琥珀是 r≫g≫b，把手灰 r≈g≈b）
+                    }
+                if (gray > 30) {
+                    qWarning("selftest FAIL: scrollbar gray ghost after scroll (gray=%ld)", gray);
+                    return false;
+                }
+                qInfo("CRT-SCROLL-GHOST gray=%ld", gray);
+                e.setPlainText(QStringLiteral("無\n"));
+                QApplication::processEvents();
+            }
             // M1：退出重进显 → 视角锁定重置
             e.toggleCrt();
             QApplication::processEvents();
