@@ -102,6 +102,19 @@ void CrtView::paintEvent(QPaintEvent *)
     if (!m_shown.isNull()) {
         p.drawImage(rect(), m_shown);
     }
+    // 光标顶层叠加（用户报光标伪影：旧光标随余晖残留在旧位置——光标
+    // 不再进快照/余晖，画在 GPU 帧之上，永不产生残影）。Difference
+    // 合成 + 白色 = 逐像素反相（整格反相块 / 机型 3 底缘下划线亮条）
+    if (m_source && m_source->cursorVisible()) {
+        QRect cell = m_source->cursorCellRect();
+        if (!cell.isEmpty()) {
+            if (m_source->cursorUnderline())
+                cell = QRect(cell.x(), cell.bottom() - qMax(2, cell.height() * 18 / 100),
+                             cell.width(), qMax(2, cell.height() * 18 / 100));
+            p.setCompositionMode(QPainter::CompositionMode_Difference);
+            p.fillRect(cell, Qt::white);
+        }
+    }
 }
 
 void CrtView::releaseGpu()
@@ -447,6 +460,12 @@ void CrtView::renderFrame()
         ensureRhi();
         if (!m_ps)
             return;
+        // 重建后跳过本帧的重拍：重建帧会赶上视口布局未就绪（快照失字
+        // = 黑帧），且该黑帧的回读串行压制后续帧 → 用户看到"松 Shift
+        // 黑屏一会"。下一帧（布局已就绪）重拍，黑帧永不产生
+        m_sinceRefresh.invalidate();
+        m_renderDirty = true;
+        return;
     }
 
     QRhiResourceUpdateBatch *u = m_r->nextResourceUpdateBatch();
@@ -459,7 +478,11 @@ void CrtView::renderFrame()
     const bool throttled = !dirty && m_sinceRefresh.isValid()
                            && m_sinceRefresh.elapsed() < 80;
     if (m_forceNow || !throttled) {
-        const bool needRepaint = dirty || m_pending.isNull()
+        // 环境拍同样重拍（旧版环境拍跳过重拍 = 管线重建后的第一帧若
+        // 赶上视口布局未就绪，快照失字且永远不自愈——用户报"松 Shift
+        // 黑屏一会"的残因。环境拍 120ms 一次，全量合成可承受；
+        // 正确性优先于这笔 CPU）
+        const bool needRepaint = dirty || ambient || m_pending.isNull()
             || m_pending.size() != m_texSize;
         if (needRepaint) {
             // P3：增量快照——打字只重画脏区（复用上一帧为底）；无脏区信息
@@ -477,6 +500,21 @@ void CrtView::renderFrame()
                 m_pending.setDevicePixelRatio(devicePixelRatioF() * m_renderScale);
                 m_pending.fill(cfg.palette->bg);
                 m_source->paintTextSnapshot(m_pending);
+            }
+            // 黑帧拦截（用户报"松 Shift 黑屏一会"的根修）：快照顶部
+            // 失字（视口渲染在重建/布局瞬间为空——Qt 内部时序）时不
+            // 上传、标脏下一帧重试——黑帧永不进入余晖历史、永不落地
+            {
+                long mx = 0;
+                for (int y = 0; y < m_pending.height() / 5; ++y)
+                    for (int x = 2; x < m_pending.width() - 30; ++x) {
+                        const QRgb pxx = m_pending.pixel(x, y);
+                        mx = qMax<long>(mx, qRed(pxx) + qGreen(pxx) + qBlue(pxx));
+                    }
+                if (mx < 60 && m_pending.height() > 100) {
+                    m_renderDirty = true;
+                    return; // 重试下一帧
+                }
             }
             QImage up = m_pending.convertToFormat(QImage::Format_RGBA8888);
             up.setDevicePixelRatio(1.0); // 上传按原始像素：QRhi 尊重图像 DPR

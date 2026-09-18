@@ -30,6 +30,10 @@ void SnapshotCompositor::paint(QImage &img) const
         // 有效缩放 = 画笔变换 × 图像 DPR），所以这里绝不能手动再
         // p.scale(dpr)——二次相乘会把内容放大推出画面（右侧滚动条把手
         // 完全消失、文字只剩左上象限的根源），逻辑坐标交给引擎映射。
+        // 强制文档布局就绪：QPlainTextEdit 的布局是惰性的——帧重拍
+        // 可能赶在布局完成前，视口渲染为空（快照失字、"黑屏一会"的
+        // 残因）。documentSize() 触发布局计算后再渲染视口
+        m_e.document()->documentLayout()->documentSize();
         if (m_e.viewport())
             m_e.viewport()->render(&p, m_e.viewport()->pos());
         paintExcitation(p); // 磷粉激发：新字符在文字之上加色增亮（900ms 内）
@@ -57,9 +61,9 @@ void SnapshotCompositor::paint(QImage &img) const
             p.restore();
         }
     } // 画家析构后直接回写像素，避免与光栅引擎缓存交错
-
-    if (cursorBlock)
-        paintCursor(img);
+    // 光标不再进快照（用户报光标伪影：旧光标随余晖残留在旧位置——
+    // 光标 = 瞬态 UI，改由 CrtView 顶层叠加，永不进余晖历史）
+    Q_UNUSED(cursorBlock);
 }
 
 void SnapshotCompositor::paintRegion(QImage &img, const QRect &dirty) const
@@ -95,8 +99,7 @@ void SnapshotCompositor::paintRegion(QImage &img, const QRect &dirty) const
             p.restore();
         }
     }
-    if (cursorBlock)
-        paintCursor(img);
+    Q_UNUSED(cursorBlock);
 }
 
 QRect SnapshotCompositor::computeDirty(int from, int removed, int added) const
@@ -125,6 +128,13 @@ QRect SnapshotCompositor::computeDirty(int from, int removed, int added) const
         below.setTop(firstR.top());
         dirty |= below;
     }
+    // 行号槽补全（用户报：⌘B 换行后的行号不显示，得再换一行前一行的
+    // 才出现）：块几何与"下方至底"都以视口为锚（x ≥ 槽宽），行号槽
+    // 本身永远不在脏区内——换行/插入后下方行号永不重绘，只有光标激发
+    // 光环偶尔擦进槽内，行号才"晚一步"出现。左缘拉到 0、垂直跨度
+    // 不变：行号槽随文字一起重绘（视口/画布在槽内本就无像素，无副作用）
+    if (!dirty.isNull())
+        dirty.setLeft(0);
     return dirty;
 }
 

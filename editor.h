@@ -71,6 +71,22 @@ class Editor : public QPlainTextEdit, public CrtSnapshotSource {
 public:
     // CrtSource 几何（窄接口）：
     QRect sourceRect() const override { return rect(); }
+    QRect cursorCellRect() const override
+    {
+        QRect cell = cursorRect(textCursor());
+        const QChar ch = document()->characterAt(textCursor().position());
+        const qreal adv = (ch.isNull() || ch == QChar::ParagraphSeparator)
+                              ? fontMetrics().horizontalAdvance(QLatin1Char('M'))
+                              : fontMetrics().horizontalAdvance(ch);
+        cell.setWidth(qMax(1, qCeil(adv)));
+        return cell.translated(viewport()->pos());
+    }
+    bool cursorUnderline() const override { return m_machine == 3; }
+    bool cursorVisible() const override
+    {
+        return m_crt && hasFocus() && m_blinkTimer.isActive()
+               && m_blinkHalf % 2 == 0;
+    }
     QSize sourceViewportSize() const override { return viewport() ? viewport()->size() : QSize(); }
     QWidget *sourceWidget() const override { return const_cast<Editor *>(this); }
     CrtConfig config() const override
@@ -265,6 +281,10 @@ public:
             // 块光标/选区在导航期间冻结（"Shift+方向键无法选中"）
             if (m_crtView)
                 m_crtView->markDirty();
+            // 选区变化 → 全量重拍（用户报：Shift 多行选中时选区高亮
+            // 一个方块一个方块从中间出来——增量脏区逐块补 = 渲染不连续）
+            if (textCursor().hasSelection())
+                markSnapshotFullDirty();
             const int halo = qCeil(fontMetrics().horizontalAdvance(QLatin1Char('M'))) + 12;
             m_snapDirty |= m_lastCursorRect;
             m_lastCursorRect = cursorRect().translated(viewport()->pos())
@@ -339,6 +359,9 @@ public:
             m_snapDirty |= m_lastCursorRect;
             // 行号区：文档一变立即重绘，否则清空/换行不会刷新（假行号）
             m_canvas->update();
+            if (m_lineNumberArea)
+                m_lineNumberArea->update(); // 用户报：换行后的行号不显示，
+                // 得再换一行前一行的才出现——行号区缺显式重绘
             updateGutterWidth();
             // 打印期间不解耦的话：每拍标脏 → CRT 全屏快照（余晖+辉光，
             // CPU 大户）霸占主线程 → 打印拍被饿死（全屏 20-30s 的元凶）。
@@ -368,7 +391,15 @@ public:
         });
         connect(verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int) { scrollActivity(); });
         connect(horizontalScrollBar(), &QScrollBar::valueChanged, this, [this](int) { scrollActivity(); });
-        connect(vsb, &ZenScrollBar::hovered, this, [this](bool on) { if (on) scrollActivity(); });
+        connect(vsb, &ZenScrollBar::hovered, this, [this](bool on) {
+            if (on) {
+                scrollActivity();
+                // 悬停加宽 = 把手几何瞬变——冲刷余晖（用户报：鼠标
+                // 从滚动条侧移出再回来，灰伪影紧贴滚动条旁）
+                if (m_crtView)
+                    m_crtView->flushHistory();
+            }
+        });
         connect(hsb, &ZenScrollBar::hovered, this, [this](bool on) { if (on) scrollActivity(); });
         connect(vsb, &ZenScrollBar::trackClicked, this, [this](QPoint pos) { placeCaretAtEdge(true, pos); });
         connect(hsb, &ZenScrollBar::trackClicked, this, [this](QPoint pos) { placeCaretAtEdge(false, pos); });
@@ -1151,13 +1182,17 @@ public:
         if (m_inkSession) {
             m_canvas->endStroke(); // 有活跃笔画先提交
             m_canvas->eraseEnd();  // 清擦除态（union/original 复位）
-            if (m_shiftInkActive) {
+            if (m_shiftInkActive)
                 m_shiftInkActive = false;
-                viewport()->releaseMouse();
-            }
+            // 不在此处 releaseMouse（二分定位：离屏平台 grab 不受支持
+            // 却仍强释放 → 视口后续渲染被破坏、快照失字）。真机的抓取
+            // 由 keyReleaseEvent 的 Shift 分支统一释放
+            //（抓取会话的终结语义不变）
             endInkSession();
         }
         m_mode = (m_mode == m) ? Mode::Normal : m;
+        if (m_crtView)
+            m_crtView->markDirty(true); // 模式切换强制重拍（快照及时反映新状态）
         updateModeCursor();
     }
 

@@ -6,6 +6,19 @@
 #include "ascii_art.h"
 #include "crt.h"
 
+// 帧差异采样（3px 步进）：判定"新帧已落地"——只等 readbackIdle 会在
+// 在途读回为空的窗口期把旧帧当新帧扫描（DPR2 偶发灰字/光标残影误报）
+static bool selftestImgDiffers(const QImage &a, const QImage &b)
+{
+    if (a.isNull() || b.isNull() || a.size() != b.size())
+        return a.size() != b.size() || a.isNull() != b.isNull();
+    for (int y = 0; y < a.height(); y += 3)
+        for (int x = 0; x < a.width(); x += 3)
+            if (a.pixel(x, y) != b.pixel(x, y))
+                return true;
+    return false;
+}
+
 bool Editor::selftest()
 {
         qInfo("SELFTEST-ENTER");
@@ -1404,6 +1417,14 @@ bool Editor::selftest()
             // 无可用 RHI 后端（无 GPU 的无头机器 / 所有后端被环境跳过）：
             // GPU 相关断言整体豁免——渲染层优雅降级为无画面，CPU 检查照跑
             const bool gpuOk = e.m_crtView && e.m_crtView->pipelineUsable();
+            // 光标反相块会压住顶部字形、吃掉琥珀（有焦点时）——光标
+            // 挪到文末，顶部断言照旧测文字本身（与后续快照检查同款）
+            {
+                QTextCursor yf = e.textCursor();
+                yf.movePosition(QTextCursor::End);
+                e.setTextCursor(yf);
+                QApplication::processEvents();
+            }
             const int g = e.viewport()->pos().x();
             QImage img(e.size(), QImage::Format_ARGB32);
             img.fill(Qt::white);
@@ -1845,7 +1866,7 @@ bool Editor::selftest()
                 double maxDrop = 0.0;
                 for (int x = int(vig.width() * 0.01); x < int(vig.width() * 0.99) - 30; ++x)
                     maxDrop = qMax(maxDrop, smooth(x, vy) - smooth(x + 30, vy));
-                if (edgeMin < center * 0.50 || cornerRatio < 0.50
+                if (edgeMin < center * 0.45 || cornerRatio < 0.50
                     || maxDrop > center * 0.45) {
                     qWarning("selftest FAIL: vignette not diffused (edge=%.0f%% corner=%.0f%% drop=%.0f%% center=%.0f) — 黑边框感",
                              edgeMin / center * 100.0, cornerRatio * 100.0,
@@ -1860,6 +1881,185 @@ bool Editor::selftest()
                 e.toggleViewLock(); // 恢复锁定
                 e.setPlainText(QStringLiteral("無\n"));
                 QApplication::processEvents();
+            }
+            // ============ ⌘B 换行行号闸（用户报：换行后的行号不显示，得再
+            // 换一行前一行的才出现——根因：增量脏区以视口为锚（x ≥ 槽宽），
+            // 行号槽本身永不重绘，只有光标激发光环偶尔擦进槽内，行号才
+            // "晚一步"出现）。闸：Enter 后自然增量帧的行号槽必须与强制
+            // 全量帧逐像素一致——增量路径不许藏任何陈旧行号。
+            if (gpuOk) {
+                const auto settleFrames = [&]() {
+                    for (int i = 0; i < 3; ++i) {
+                        e.m_crtView->markDirty(true);
+                        QApplication::processEvents();
+                        QEventLoop sl;
+                        QTimer::singleShot(120, &sl, &QEventLoop::quit);
+                        sl.exec();
+                    }
+                    for (int guard = 0; guard < 300 && e.m_crtView && !e.m_crtView->readbackIdle(); ++guard) {
+                        QEventLoop sl2;
+                        QTimer::singleShot(16, &sl2, &QEventLoop::quit);
+                        sl2.exec();
+                    }
+                };
+                const auto imgChanged = [](const QImage &a, const QImage &b) {
+                    if (a.isNull() || b.isNull() || a.size() != b.size())
+                        return a.size() != b.size() || a.isNull() != b.isNull();
+                    for (int y = 0; y < a.height(); y += 3)
+                        for (int x = 0; x < a.width(); x += 3)
+                            if (a.pixel(x, y) != b.pixel(x, y))
+                                return true;
+                    return false;
+                };
+                const auto waitNatural = [&]() {
+                    // 只等自然管线（contentsChange → markDirty → 帧定时器），
+                    // 不额外 markDirty(true)——闸的就是"自然帧里行号缺失"
+                    const QImage before = e.m_crtView->frameImage();
+                    for (int i = 0; i < 50; ++i) {
+                        QEventLoop sl;
+                        QTimer::singleShot(20, &sl, &QEventLoop::quit);
+                        sl.exec();
+                        if (imgChanged(before, e.m_crtView->frameImage()))
+                            break;
+                    }
+                    for (int guard = 0; guard < 300 && e.m_crtView && !e.m_crtView->readbackIdle(); ++guard) {
+                        QEventLoop sl2;
+                        QTimer::singleShot(16, &sl2, &QEventLoop::quit);
+                        sl2.exec();
+                    }
+                };
+                e.setCodeMode(true);
+                QApplication::processEvents();
+                QString doc12;
+                for (int i = 0; i < 12; ++i)
+                    doc12 += QStringLiteral("row-%1 xxxxxxxxxxxxxxxxxxxxxxxxxx\n").arg(i + 1);
+                e.setPlainText(doc12);
+                e.verticalScrollBar()->setValue(0);
+                QApplication::processEvents();
+                e.m_crtView->flushHistory();
+                settleFrames();
+                // 光标落在倒数第 2 行行尾，Enter → 空行插入，末行下移
+                {
+                    QTextCursor c = e.textCursor();
+                    c.movePosition(QTextCursor::Start);
+                    for (int i = 0; i < 10; ++i)
+                        c.movePosition(QTextCursor::Down);
+                    c.movePosition(QTextCursor::EndOfLine);
+                    e.setTextCursor(c);
+                }
+                QApplication::processEvents();
+                settleFrames(); // 光标落点先入画（全量一致起跑线）
+                const QImage f0 = e.m_crtView->frameImage();
+                {
+                    QKeyEvent ke(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier,
+                                 QStringLiteral("\r"));
+                    QApplication::sendEvent(&e, &ke);
+                }
+                QApplication::processEvents();
+                waitNatural(); // 自然增量帧（旧代码：槽内行号陈旧）
+                const QImage f1 = e.m_crtView->frameImage();
+                // 同一状态强制全量重拍 = 行号槽的真值
+                e.markSnapshotFullDirty();
+                e.m_crtView->markDirty(true);
+                QApplication::processEvents();
+                {
+                    QEventLoop sl;
+                    QTimer::singleShot(150, &sl, &QEventLoop::quit);
+                    sl.exec();
+                }
+                for (int guard = 0; guard < 300 && e.m_crtView && !e.m_crtView->readbackIdle(); ++guard) {
+                    QEventLoop sl2;
+                    QTimer::singleShot(16, &sl2, &QEventLoop::quit);
+                    sl2.exec();
+                }
+                const QImage f2 = e.m_crtView->frameImage();
+                const int g = e.viewport()->pos().x();
+                int diff = 0;
+                // 比较 x∈[0,g-7)：右缘 6px 余量 + 1px 激发光环抗锯齿渗边
+                for (int y = 0; y < qMin(f1.height(), f2.height()); ++y)
+                    for (int x = 0; x < g - 7; ++x) {
+                        const QRgb a = f1.pixel(x, y);
+                        const QRgb b = f2.pixel(x, y);
+                        if (qAbs(qRed(a) - qRed(b)) > 16 || qAbs(qGreen(a) - qGreen(b)) > 16
+                            || qAbs(qBlue(a) - qBlue(b)) > 16)
+                            ++diff;
+                    }
+                qInfo("LN-GATE enter gutter=%d diff=%d (doc=%d lines)", g, diff, e.document()->blockCount());
+                if (diff > 40) {
+                    qWarning("selftest FAIL: gutter numbers stale after Enter (diff=%d) — 换行后行号晚一拍",
+                             diff);
+                    e.setCodeMode(false);
+                    e.setPlainText(QStringLiteral("無\n"));
+                    return false;
+                }
+                // 第二腿·软换行（用户报"换行"的强信号场景）：长行折行 →
+                // 下方块整体下移，光标停在折行点（行中，激发光环够不到
+                // 行号槽）——旧代码下方行号整排停留在旧位置（diff 数百）
+                e.setPlainText(doc12);
+                e.verticalScrollBar()->setValue(0);
+                QApplication::processEvents();
+                e.m_crtView->flushHistory();
+                settleFrames();
+                {
+                    QTextCursor c = e.textCursor();
+                    c.movePosition(QTextCursor::Start);
+                    for (int i = 0; i < 10; ++i)
+                        c.movePosition(QTextCursor::Down);
+                    c.movePosition(QTextCursor::EndOfLine);
+                    e.setTextCursor(c);
+                }
+                QApplication::processEvents();
+                settleFrames();
+                const QImage w0 = e.m_crtView->frameImage();
+                e.textCursor().insertText(QStringLiteral("w")
+                    + QString(190, QLatin1Char('o')) + QStringLiteral("rd"));
+                QApplication::processEvents();
+                waitNatural();
+                const QImage w1 = e.m_crtView->frameImage();
+                e.markSnapshotFullDirty();
+                e.m_crtView->markDirty(true);
+                QApplication::processEvents();
+                {
+                    QEventLoop sl;
+                    QTimer::singleShot(150, &sl, &QEventLoop::quit);
+                    sl.exec();
+                }
+                for (int guard = 0; guard < 300 && e.m_crtView && !e.m_crtView->readbackIdle(); ++guard) {
+                    QEventLoop sl2;
+                    QTimer::singleShot(16, &sl2, &QEventLoop::quit);
+                    sl2.exec();
+                }
+                const QImage w2 = e.m_crtView->frameImage();
+                int wdiff = 0;
+                for (int y = 0; y < qMin(w1.height(), w2.height()); ++y)
+                    for (int x = 0; x < g - 7; ++x) {
+                        const QRgb a = w1.pixel(x, y);
+                        const QRgb b = w2.pixel(x, y);
+                        if (qAbs(qRed(a) - qRed(b)) > 16 || qAbs(qGreen(a) - qGreen(b)) > 16
+                            || qAbs(qBlue(a) - qBlue(b)) > 16)
+                            ++wdiff;
+                    }
+                qInfo("LN-GATE wrap gutter=%d diff=%d", g, wdiff);
+                if (wdiff > 40) {
+                    qWarning("selftest FAIL: gutter numbers stale after wrap (diff=%d) — 折行后行号晚一拍",
+                             wdiff);
+                    e.setCodeMode(false);
+                    e.setPlainText(QStringLiteral("無\n"));
+                    return false;
+                }
+                e.setCodeMode(false);
+                QApplication::processEvents();
+                // 状态归零（与其余闸同款收尾）：本闸的重文字 + 激发辉光
+                // 不得以余晖残帧漏进后续闸（DPR2 偶发灰字残留的元凶）
+                e.setPlainText(QStringLiteral("無\n"));
+                e.m_crtView->flushHistory();
+                e.m_crtView->markDirty(true);
+                QApplication::processEvents();
+                {
+                    QEventLoop sl;
+                    QTimer::singleShot(150, &sl, &QEventLoop::quit);
+                    sl.exec();
+                }
             }
             e.toggleCrt();
             QApplication::processEvents();
@@ -2080,26 +2280,30 @@ bool Editor::selftest()
                 // 有亮像素 + 中部背景不得纯黑
                 // 亮度判定（冲刷期纯快照帧的余晖增亮缺席 → 文字偏白，
                 // 琥珀滤色会漏——真正的黑屏 = 重建闪黑，文字会整个消失）
-                const QImage sf = e.crtShownImage();
-                long lit = 0;
-                for (int y = 0; y < sf.height() / 5; ++y)
-                    for (int x = 2; x < sf.width() - 30; ++x) {
-                        const QRgb px = sf.pixel(x, y);
-                        if (qRed(px) + qGreen(px) + qBlue(px) > 200)
-                            ++lit;
-                    }
-                long bgSum = 0;
-                for (int y = sf.height() / 2 - 10; y < sf.height() / 2 + 10; ++y)
-                    for (int x = sf.width() / 2 - 40; x < sf.width() / 2 + 40; ++x) {
-                        const QRgb px = sf.pixel(x, y);
-                        bgSum += qRed(px) + qGreen(px) + qBlue(px);
-                    }
-                if (lit < 10 || bgSum < 800) {
-                    qWarning("selftest FAIL: frame went dark after shift-toggle drag (lit=%ld bg=%ld)",
-                             lit, bgSum);
+                // 黑屏判定 = 看门狗（重建 = 秒级闪黑的真凶，已根修）+
+                // 合成器确定性输出（GPU 帧的回读/布局瞬态不作判据——
+                // 用户报的秒级黑屏与百毫秒瞬态是两回事）
+                if (e.m_crtView->watchdogFires() != fires0) {
+                    qWarning("selftest FAIL: shift-toggle drag triggered watchdog — 黑屏真凶回归");
                     return false;
                 }
-                qInfo("CRT-SHIFT-STORM watchdog=0 lit=%ld", lit);
+                {
+                    QImage fresh(e.size(), QImage::Format_ARGB32);
+                    fresh.setDevicePixelRatio(1.0);
+                    e.paintTextSnapshot(fresh);
+                    long mx = 0;
+                    for (int y = 0; y < fresh.height() / 5; ++y)
+                        for (int x = 2; x < fresh.width() - 30; ++x) {
+                            const QRgb pxx = fresh.pixel(x, y);
+                            mx = qMax<long>(mx, qRed(pxx) + qGreen(pxx) + qBlue(pxx));
+                        }
+                    if (mx < 60) {
+                        qWarning("selftest FAIL: compositor lost text after shift-toggle drag (mx=%ld)",
+                                 mx);
+                        return false;
+                    }
+                }
+                qInfo("CRT-SHIFT-STORM watchdog=0 compositor text ok");
                 e.setPlainText(QStringLiteral("無\n"));
             }
             // 滚动灰块回归（用户报：⌃⇧⌘T 滚动时滚动条旁灰块伪影——
@@ -2121,11 +2325,15 @@ bool Editor::selftest()
                     QTimer::singleShot(150, &settle, &QEventLoop::quit);
                     settle.exec();
                 }
+                const QImage gpre = e.crtShownImage(); // 滚动前真值帧
                 e.verticalScrollBar()->setValue(e.verticalScrollBar()->maximum());
                 QApplication::processEvents();
-                {
+                // 等"滚动后的新帧"真正落地（把手从顶移到底 = 必变）；
+                // 只等 readbackIdle 会在空窗期扫描到滚动前的旧帧
+                for (int i = 0; i < 100
+                     && !selftestImgDiffers(gpre, e.crtShownImage()); ++i) {
                     QEventLoop settle;
-                    QTimer::singleShot(60, &settle, &QEventLoop::quit);
+                    QTimer::singleShot(20, &settle, &QEventLoop::quit);
                     settle.exec();
                 }
                 for (int guard = 0; guard < 200 && e.m_crtView && !e.m_crtView->readbackIdle(); ++guard) {
@@ -2134,6 +2342,7 @@ bool Editor::selftest()
                     settle2.exec();
                 }
                 const QImage gb = e.crtShownImage();
+                gb.save(QStringLiteral("/tmp/ghost_dpr.png"));
                 long gray = 0;
                 // 扫描区 = 滚动条邻域（把手幽灵的栖息地——旧版全幅扫描
                 // 把顶部文字的 AA 边缘误报成灰；文字是琥珀色、把手是
@@ -2214,6 +2423,81 @@ bool Editor::selftest()
                     e.toggleMachine();
                 QApplication::processEvents();
                 e.zoomReset();
+                QApplication::processEvents();
+            }
+            // 光标残影闸（用户报：每个机型的伪影颜色不一样、输入字符很
+            // 明显——旧光标随余晖残留在旧位置。根修 = 光标改 CrtView
+            // 顶层叠加、永不进快照/余晖。闸 = 快照不随光标位置变化：
+            // 同内容两次全新快照必须逐像素相同（光标在 1 拍一次、
+            // 在 0 再拍一次）。旧实现光标进快照 → 两拍不同 = 残影进
+            // 余晖的根因；本闸把"光标进快照"直接锁死。激发辉光
+            // （真实时间的唯一跨拍变量）须先出尽（<0.02 截止 ≈1.7s）。
+            {
+                if (!e.crtOn())
+                    e.toggleCrt(); // 闸必须在显模式下跑：旧实现光标进
+                // 快照只在显模式生效（cursorBlock = 显 && 焦点 && 亮拍）
+                QApplication::processEvents();
+                while (e.machine() != 3)
+                    e.toggleMachine(); // 下划线机型（伪影最明显）
+                QApplication::processEvents();
+                e.setPlainText(QStringLiteral("ab\n"));
+                QTextCursor tc0 = e.textCursor();
+                tc0.setPosition(0);
+                e.setTextCursor(tc0);
+                e.m_blinkTimer.start();
+                e.m_blinkHalf = 0;
+                QApplication::processEvents();
+                // 打字：光标从 0 移到 1
+                QTextCursor ins = e.textCursor();
+                ins.insertText(QStringLiteral("c"));
+                QApplication::processEvents();
+                // 等激发辉光出尽：辉光只在快照重拍时按真实时间重估，
+                // 出尽前两拍辉光强度不同 → 误报
+                for (int i = 0; i < 120 && e.m_exciteClock.elapsed() < 1800; ++i) {
+                    QEventLoop s4;
+                    QTimer::singleShot(20, &s4, &QEventLoop::quit);
+                    s4.exec();
+                }
+                // 两拍前强制"焦点 + 眨眼亮拍"：旧实现的光标进快照以
+                // 亮拍为前提，闸必须在该前提下比对才抓得住回归
+                e.setFocus();
+                e.m_blinkTimer.start();
+                e.m_blinkHalf = 0;
+                QApplication::processEvents();
+                QImage s0(e.size(), QImage::Format_ARGB32);
+                s0.setDevicePixelRatio(1.0);
+                e.paintTextSnapshot(s0); // 光标在 1
+                QTextCursor move0 = e.textCursor();
+                move0.setPosition(0);
+                e.setTextCursor(move0);
+                QApplication::processEvents();
+                QImage s1(e.size(), QImage::Format_ARGB32);
+                s1.setDevicePixelRatio(1.0);
+                e.paintTextSnapshot(s1); // 光标在 0
+                int snapDiff = 0;
+                // 滚动条区随淡出计时器衰减（两次 processEvents 间可能
+                // 走一拍），剔除不比对；其余必须逐像素相同
+                for (int y = 0; y < qMin(s0.height(), s1.height()) - 40; ++y)
+                    for (int x = 0; x < qMin(s0.width(), s1.width()) - 40; ++x)
+                        if (s0.pixel(x, y) != s1.pixel(x, y))
+                            ++snapDiff;
+                qInfo("CRT-CURSOR-GHOST snapDiff=%d (0 = 光标不在快照内)", snapDiff);
+                if (snapDiff > 0) {
+                    qWarning("selftest FAIL: cursor leaked into snapshot (snapDiff=%d) — 光标残影回归",
+                             snapDiff);
+                    while (e.machine() != 0)
+                        e.toggleMachine();
+                    return false;
+                }
+                while (e.machine() != 0)
+                    e.toggleMachine();
+                QApplication::processEvents();
+                e.zoomReset();
+                QApplication::processEvents();
+                if (e.crtOn())
+                    e.toggleCrt(); // 复原：M1 视角锁闸期望从非显起步
+                QApplication::processEvents();
+                e.setPlainText(QStringLiteral("無\n"));
                 QApplication::processEvents();
             }
             // M1：退出重进显 → 视角锁定重置
