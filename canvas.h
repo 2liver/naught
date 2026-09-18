@@ -125,6 +125,12 @@ public:
             return;
         m_strokes.clear();
         m_activePts.clear();
+        m_activeOutline = QPainterPath();
+        // 复位擦除态（审计加固：清墨后残留 m_eraseActive/union/original
+        // 会让下一擦除会话用陈旧快照回滚）
+        m_eraseActive = false;
+        m_eraseUnion = QPainterPath();
+        m_eraseOriginal.clear();
         invalidateCache();
         update();
     }

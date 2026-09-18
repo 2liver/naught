@@ -645,6 +645,93 @@ bool Editor::selftest()
             e.toggleMode(Editor::Mode::Normal);
             QApplication::processEvents();
         }
+        // 纯 Shift 跨模式闸（子代理审计的复现配方：鼠标事件一律
+        // NoButton + ShiftModifier——旧闸全程带左键从未进入
+        // m_shiftInkActive 纯 Shift 会话路径）
+        {
+            const Qt::KeyboardModifiers sh = Qt::ShiftModifier;
+            QWidget *vp = e.viewport();
+            const auto shiftMove = [&](const QPointF &p) {
+                QMouseEvent mv(QEvent::MouseMove, p, vp->mapToGlobal(p.toPoint()),
+                               Qt::NoButton, Qt::NoButton, sh);
+                QApplication::sendEvent(vp, &mv);
+                QApplication::processEvents();
+            };
+            // 序列 1：涂→擦（Shift 不松）——橡皮必须擦掉刚画的笔
+            e.setPlainText(QString());
+            e.clearInk();
+            e.toggleMode(Editor::Mode::Draw);
+            const QPointF a1(vp->width() * 0.2, vp->height() * 0.4);
+            const QPointF a2(vp->width() * 0.5, vp->height() * 0.4);
+            shiftMove(a1);
+            shiftMove(a2);
+            // ⌘E（Shift 不松）——toggleMode 终结会话、提交活跃笔画
+            QKeyEvent ke(QEvent::KeyPress, Qt::Key_E, Qt::ControlModifier | sh);
+            QApplication::sendEvent(&e, &ke);
+            QApplication::processEvents();
+            const int s1 = int(e.inkPaths().size());
+            if (s1 < 1) {
+                qWarning("selftest FAIL: pure-shift draw did not commit (ink=%d)", s1);
+                e.clearInk();
+                e.toggleMode(Editor::Mode::Normal);
+                return false;
+            }
+            shiftMove(a1);
+            shiftMove(a2);
+            const int s2 = int(e.inkPaths().size());
+            qInfo("CRT-PURESHIFT seq1 ink %d -> %d", s1, s2);
+            if (s2 >= s1) {
+                qWarning("selftest FAIL: pure-shift draw->erase did not erase (%d -> %d)",
+                         s1, s2);
+                e.clearInk();
+                e.toggleMode(Editor::Mode::Normal);
+                return false;
+            }
+            // 序列 2：擦→涂→擦（数据丢失闸）——中间新笔不得被回滚清空
+            e.clearInk();
+            e.toggleMode(Editor::Mode::Draw);
+            const QPointF b1(vp->width() * 0.3, vp->height() * 0.6);
+            const QPointF b2(vp->width() * 0.6, vp->height() * 0.6);
+            QMouseEvent p1(QEvent::MouseButtonPress, b1, vp->mapToGlobal(b1.toPoint()),
+                           Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(vp, &p1);
+            QMouseEvent m1(QEvent::MouseMove, b2, vp->mapToGlobal(b2.toPoint()),
+                           Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(vp, &m1);
+            QMouseEvent r1(QEvent::MouseButtonRelease, b2, vp->mapToGlobal(b2.toPoint()),
+                           Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(vp, &r1);
+            const int base = int(e.inkPaths().size());
+            // 擦（Shift 会话）
+            e.toggleMode(Editor::Mode::Erase);
+            shiftMove(b1);
+            shiftMove(b2);
+            // 涂新笔（Shift 会话——不松 Shift 换模式）
+            QKeyEvent kd(QEvent::KeyPress, Qt::Key_D, Qt::ControlModifier | sh);
+            QApplication::sendEvent(&e, &kd);
+            QApplication::processEvents();
+            shiftMove(QPointF(vp->width() * 0.45, vp->height() * 0.7));
+            shiftMove(QPointF(vp->width() * 0.55, vp->height() * 0.7));
+            const int mid = int(e.inkPaths().size());
+            // 再擦（Shift 会话）
+            QKeyEvent ke2(QEvent::KeyPress, Qt::Key_E, Qt::ControlModifier | sh);
+            QApplication::sendEvent(&e, &ke2);
+            QApplication::processEvents();
+            shiftMove(QPointF(vp->width() * 0.45, vp->height() * 0.7));
+            shiftMove(QPointF(vp->width() * 0.55, vp->height() * 0.7));
+            const int fin = int(e.inkPaths().size());
+            qInfo("CRT-PURESHIFT seq2 base=%d mid=%d fin=%d", base, mid, fin);
+            if (fin >= base) {
+                qWarning("selftest FAIL: cross-mode stale replay rolled back content (base=%d fin=%d) — 数据丢失回归",
+                         base, fin);
+                e.clearInk();
+                e.toggleMode(Editor::Mode::Normal);
+                return false;
+            }
+            e.clearInk();
+            e.toggleMode(Editor::Mode::Normal);
+            QApplication::processEvents();
+        }
         // 纯擦除行为回归（用户五轮拍板：填实功能已移除——所有情况
         // 都必须是纯橡皮擦）：
         // (a) 笔刷口径比空心小 → 纯橡皮擦（圈心保持空心）

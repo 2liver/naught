@@ -1143,6 +1143,20 @@ public:
 
     void toggleMode(Mode m)
     {
+        // 切换前终结进行中的会话（子代理状态机审计的根修）：
+        // 旧版只切模式不清会话——纯 Shift 画的笔画滞留 m_activePts
+        //（橡皮看不见 = 擦不掉）；陈旧的 m_eraseActive/m_eraseOriginal
+        // 残留（新会话不重捕快照 → 整块回滚 = 用户报的"换画笔清空
+        // 内容且无法复原"的数据丢失）
+        if (m_inkSession) {
+            m_canvas->endStroke(); // 有活跃笔画先提交
+            m_canvas->eraseEnd();  // 清擦除态（union/original 复位）
+            if (m_shiftInkActive) {
+                m_shiftInkActive = false;
+                viewport()->releaseMouse();
+            }
+            endInkSession();
+        }
         m_mode = (m_mode == m) ? Mode::Normal : m;
         updateModeCursor();
     }
