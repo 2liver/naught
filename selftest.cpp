@@ -677,6 +677,83 @@ bool Editor::selftest()
             e.setPlainText(QStringLiteral("無\n"));
             QApplication::processEvents();
         }
+        // 多实心撤销粒度（用户报：多个"填实"一次全撤，无时间线）。
+        // 画两个小环 + 各擦一下填实 → 撤销必须一次只撤一个实心
+        {
+            e.setPlainText(QString());
+            e.clearInk();
+            QWidget *vp = e.viewport();
+            e.toggleMode(Editor::Mode::Draw);
+            const auto ringAt = [&](const QPointF &c, qreal rad) {
+                const QPointF s0(c.x() + rad, c.y());
+                QMouseEvent pr(QEvent::MouseButtonPress, s0, vp->mapToGlobal(s0.toPoint()),
+                               Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                QApplication::sendEvent(vp, &pr);
+                for (int a = 30; a <= 360; a += 30) {
+                    const qreal r = a * 3.14159265 / 180.0;
+                    const QPointF p(c.x() + rad * qCos(r), c.y() + rad * qSin(r));
+                    QMouseEvent mv(QEvent::MouseMove, p, vp->mapToGlobal(p.toPoint()),
+                                   Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                    QApplication::sendEvent(vp, &mv);
+                }
+                QMouseEvent re(QEvent::MouseButtonRelease, s0, vp->mapToGlobal(s0.toPoint()),
+                               Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+                QApplication::sendEvent(vp, &re);
+            };
+            ringAt(QPointF(vp->width() * 0.3, vp->height() * 0.5), 18.0);
+            ringAt(QPointF(vp->width() * 0.7, vp->height() * 0.5), 18.0);
+            e.toggleMode(Editor::Mode::Erase);
+            const auto fillAt = [&](const QPointF &c) {
+                // 单笔拖动 = 一次橡皮会话（真实用户的"擦一下"）
+                const QPointF p0(c.x() - 6, c.y());
+                QMouseEvent pr(QEvent::MouseButtonPress, p0, vp->mapToGlobal(p0.toPoint()),
+                               Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                QApplication::sendEvent(vp, &pr);
+                for (int dx = -3; dx <= 6; dx += 3) {
+                    const QPointF p(c.x() + dx, c.y());
+                    QMouseEvent mv(QEvent::MouseMove, p, vp->mapToGlobal(p.toPoint()),
+                                   Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                    QApplication::sendEvent(vp, &mv);
+                }
+                const QPointF p1(c.x() + 6, c.y());
+                QMouseEvent re(QEvent::MouseButtonRelease, p1, vp->mapToGlobal(p1.toPoint()),
+                               Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+                QApplication::sendEvent(vp, &re);
+            };
+            fillAt(QPointF(vp->width() * 0.3, vp->height() * 0.5));
+            fillAt(QPointF(vp->width() * 0.7, vp->height() * 0.5));
+            e.toggleMode(Editor::Mode::Normal);
+            QApplication::processEvents();
+            // 撤一次：只应撤掉后一个填实（环2 的洞回来），环1 的实心还在
+            {
+                QKeyEvent kz(QEvent::KeyPress, Qt::Key_Z, Qt::ControlModifier);
+                QApplication::sendEvent(&e, &kz);
+                QApplication::processEvents();
+            }
+            const QImage ck = [&] {
+                QImage img(vp->size() * 2, QImage::Format_ARGB32);
+                img.fill(Qt::transparent);
+                img.setDevicePixelRatio(2.0);
+                QPainter p(&img);
+                p.translate(e.viewport()->pos() * 2);
+                e.m_canvas->render(&p);
+                p.end();
+                return img;
+            }();
+            const QPoint c1(int(vp->width() * 0.3 * 2), int(vp->height() * 0.5 * 2));
+            const QPoint c2(int(vp->width() * 0.7 * 2), int(vp->height() * 0.5 * 2));
+            const bool solid1 = qAlpha(ck.pixel(c1)) > 8;
+            const bool solid2 = qAlpha(ck.pixel(c2)) > 8;
+            qInfo("CRT-FILL-UNDO after1: solid1=%d solid2=%d", int(solid1), int(solid2));
+            // 时间线语义：环2 的填实被撤（洞回来），环1 的填实仍在
+            if (!solid1 || solid2) {
+                qWarning("selftest FAIL: fill undo granularity wrong (solid1=%d solid2=%d)",
+                         int(solid1), int(solid2));
+                return false;
+            }
+            e.clearInk();
+            QApplication::processEvents();
+        }
         // 涂模式开着打字（用户报：笔刷期间打字光标行为/换行不准）：
         // 涂/擦模式必须完全不干扰文本编辑——插入位置、换行、光标
         // 落点与普通模式一致
