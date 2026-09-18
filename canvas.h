@@ -34,6 +34,7 @@ public:
     {
         m_strokes = strokes;
         m_activePts.clear();
+        invalidateCache();
         update();
     }
 
@@ -48,6 +49,7 @@ public:
     void setInk(const QColor &c)
     {
         m_ink = c;
+        invalidateCache(); // 缓存按旧颜色烘的——换色必须重烘
         update();
     }
 
@@ -76,6 +78,8 @@ public:
     void setScrollOffset(const QPointF &o)
     {
         m_offset = o;
+        // 滚动只平移 blit，不重烘（审计风险 1：旧版每次滚动整窗重烘
+        // = 方向键/滚动卡顿的主因）
         update();
     }
 
@@ -102,6 +106,7 @@ public:
             return;
         m_strokes.append(outlineOf(m_activePts, m_brush));
         m_activePts.clear();
+        invalidateCache();
     }
 
     void clearAll()
@@ -110,6 +115,7 @@ public:
             return;
         m_strokes.clear();
         m_activePts.clear();
+        invalidateCache();
         update();
     }
 
@@ -181,8 +187,10 @@ public:
             for (int k = subs.size() - 1; k >= 0; --k)
                 m_strokes.insert(i, InkStroke{width, subs.at(k)});
         }
-        if (changed)
+        if (changed) {
+            invalidateCache();
             update();
+        }
     }
 
     // 保留曲线元素地把路径拆成子路径，并把被包含的子路径（洞界）并回
@@ -245,15 +253,11 @@ protected:
         p.setRenderHint(QPainter::Antialiasing);
         p.save();
         p.translate(QPointF(m_vpOffset) - m_offset); // 笔迹：文档坐标（随滚动）
-        // 可见区裁剪：只画与窗口相交的笔迹（滚动/打字时的大笔量文档关键）
-        const QRectF viewDoc{QPointF(m_offset), QSizeF(size())};
-        for (const InkStroke &s : m_strokes) {
-            if (!s.path.boundingRect().intersects(viewDoc))
-                continue;
-            p.setPen(Qt::NoPen);
-            p.setBrush(m_ink);
-            p.drawPath(s.path);
-        }
+        // 笔迹烘焙缓存：paintEvent 只 blit + 画活跃笔画——每帧成本 O(1)，
+        // 不再随笔画数线性增长（用户报：越画越卡）
+        if (m_cache.isNull())
+            rebuildCache();
+        p.drawPixmap(m_cacheOrigin, m_cache);
         drawStroke(p, m_activePts, m_brush);
         p.restore();
 
@@ -276,6 +280,30 @@ protected:
     }
 
 private:
+    void invalidateCache() { m_cache = QPixmap(); }
+
+    void rebuildCache()
+    {
+        QRectF bounds;
+        for (const InkStroke &s : m_strokes)
+            bounds |= s.path.boundingRect();
+        if (bounds.isEmpty())
+            bounds = QRectF(QPointF(0, 0), QSizeF(size()));
+        const QSize cacheSz(qMax(1, int(bounds.width()) + 2),
+                            qMax(1, int(bounds.height()) + 2));
+        m_cache = QPixmap(cacheSz);
+        m_cache.fill(Qt::transparent);
+        m_cacheOrigin = bounds.topLeft() - QPointF(1, 1);
+        QPainter p(&m_cache);
+        p.setRenderHint(QPainter::Antialiasing);
+        p.translate(-m_cacheOrigin); // 笔迹在文档坐标——烘焙进文档空间
+        for (const InkStroke &s : m_strokes) {
+            p.setPen(Qt::NoPen);
+            p.setBrush(m_ink);
+            p.drawPath(s.path);
+        }
+    }
+
     void drawStroke(QPainter &p, const QVector<QPointF> &pts, qreal width) const
     {
         if (pts.isEmpty())
@@ -292,6 +320,8 @@ private:
     QPoint m_vpOffset;
     QVector<InkStroke> m_strokes;
     QVector<QPointF> m_activePts;
+    QPixmap m_cache; // 笔迹烘焙缓存（只随内容变化重烘；滚动平移 blit）
+    QPointF m_cacheOrigin; // 缓存在文档坐标的原点
     QPointF m_eraseLast;
     bool m_eraseActive = false;
     bool m_fpVisible = false;

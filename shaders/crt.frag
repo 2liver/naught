@@ -137,6 +137,17 @@ void main()
         col = mix(col, blur4, corner * 0.35);
     }
 
+    // 常驻字体光效（用户拍板保留的"Shift 笔刷发光"移植）：轻帐篷
+    // 模糊 18% 混合——像素字保持锐利核心的同时带一圈极淡光晕（旧
+    // Shift 会话半分辨率的朦胧质感；18% 不糊分辨率，用户后续微调）
+    {
+        const vec2 off = 1.0 / ubuf.texSize;
+        vec3 tent = sampleAt(cuv) * 0.5
+                  + (sampleAt(cuv + vec2( off.x, 0.0)) + sampleAt(cuv - vec2( off.x, 0.0))
+                   + sampleAt(cuv + vec2(0.0,  off.y)) + sampleAt(cuv + vec2(0.0, -off.y))) * 0.125;
+        col = mix(col, tent, 0.18);
+    }
+
     // 辉光叠加：max(col, 小图线性采样 × alpha)——与 Crt::phosphorBloom
     // 的 max 叠加同模型（CPU 版最近邻放大，此处线性放大更平滑）。
     // 叠加发生在栅网之前：辉光与内容一同被掩膜/扫描线调制（与 CPU

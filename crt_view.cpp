@@ -422,13 +422,9 @@ void CrtView::renderFrame()
     if (m_readbackInFlight)
         return;
     const CrtConfig cfg = m_source->config(); // 每帧配置值快照
-    // 输入突发期链节流：打字/删除连发时链按 ~20fps 节流（50ms 起拍
-    // 间隔）——GPU/回读不被逐键压垮，主线程有余量处理输入法提交
-    //（用户报：显模式删字/落字卡一秒；节流后脏旗保留，停手即补齐）
-    if ((cfg.typing || cfg.drawing) && m_chainClock.isValid()
-        && m_chainClock.elapsed() < 50)
-        return;
-    m_chainClock.start();
+    // 无链节流（用户三轮拍板：按下必须即时反馈——旧版 50ms 起拍间隔
+    // 把按键延迟叠到 100ms+，是"负优化"）。突发期 GPU/回读的压力
+    // 由逐帧串行 + 半分辨率承担
     // P1 脏驱动：无变化且未到环境拍 → 整链跳过。环境拍 120ms 保底
     // 滚动带/颗粒/余晖的持续推进（余晖在 GPU 按时间衰减，零 CPU 重活）
     const bool dirty = m_renderDirty || m_forceNow;
@@ -440,11 +436,10 @@ void CrtView::renderFrame()
     // 滚动期半分辨率：运动掩蔽下 2×2 下采样不可感知，回读数据量 ÷4、
     // GPU 填充 ÷4；掩膜/扫描线锚定的屏幕栅格随目标减半（滚动中不可见），
     // 停稳后 settle 标全量、回全分辨率重拍自愈
-    // 半分辨率：滚动 + 画刷会话（涂/擦按住拖动）。画刷会话随落笔/
-    // 抬笔切换（会话边界各一次管线重建，远轻于会话内逐 move 的全
-    // 分辨率链+2.7MB 回读——显模式笔刷卡顿的直接修法）；输入突发
-    // 期不做（打字节流已由 50ms 起拍间隔承担，且重建正是要避免的冻结）
-    m_renderScale = (cfg.scrolling || cfg.drawing) ? 0.5 : 1.0;
+    // 半分辨率只用于滚动（滚动会话低频、运动掩蔽下不可感知）。画刷
+    // 会话不再切换（用户三轮报：Shift 笔刷松键黑屏一会——半分辨率
+    // 切换 = 每会话边界各一次整管线重建 = 黑屏元凶，负优化回退）
+    m_renderScale = cfg.scrolling ? 0.5 : 1.0;
     const QSize want(qMax(1, int(width() * devicePixelRatioF() * m_renderScale)),
                      qMax(1, int(height() * devicePixelRatioF() * m_renderScale)));
     if (want != m_texSize) {
@@ -458,7 +453,11 @@ void CrtView::renderFrame()
 
     // 快照：合成真实组件（80ms 节流；force 立即）。环境拍（无脏）复用
     // 上一拍快照——文本不重拍，GPU 侧余晖照常推进
-    const bool throttled = m_sinceRefresh.isValid() && m_sinceRefresh.elapsed() < 80;
+    // 快照节流只拦环境拍（无脏时复用上一拍）；脏帧（打字/删除/选区）
+    // 即时重拍——增量脏区便宜，所见即所得（旧版 80ms 节流把按键
+    // 的落字延迟到 ~100ms，用户报"不是所见即所得"）
+    const bool throttled = !dirty && m_sinceRefresh.isValid()
+                           && m_sinceRefresh.elapsed() < 80;
     if (m_forceNow || !throttled) {
         const bool needRepaint = dirty || m_pending.isNull()
             || m_pending.size() != m_texSize;

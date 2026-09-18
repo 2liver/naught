@@ -287,9 +287,13 @@ public:
             // 撤销/重做驱动的 contentsChange 不入日志（否则撤销会
             // 被记成新操作并清空重做日志 → 重做失效）
             if (!m_inUndoRedo && document()->availableUndoSteps() > 0) {
+                // 程序性重写（setPlainText/清空）会清空文档撤销栈——
+                // 日志同步清空（审计风险 2c：陈条目导致空撤）
                 m_undoOps.append(true);
-                if (m_undoOps.size() > 200)
-                    m_undoOps.removeFirst();
+                m_redoOps.clear();
+            } else if (!m_inUndoRedo && removed > 0
+                       && document()->availableUndoSteps() == 0) {
+                m_undoOps.clear();
                 m_redoOps.clear();
             }
             // M3：手动编辑 = 字符画回归普通文本（程序打印/替换不受影响）
@@ -1650,8 +1654,18 @@ public:
     qreal crtGridSize() const
     {
         const int cols = (m_machine == 0) ? 80 : (m_machine == 1) ? 64 : 40;
-        return qMax(6.0, qreal(viewport()->width()) / cols
-                         / (m_machine == 0 ? 1.0 : 1.25));
+        if (m_machine != 2)
+            return qMax(6.0, qreal(viewport()->width()) / cols
+                             / (m_machine == 0 ? 1.0 : 1.25));
+        // C64（用户三轮拍板）：全屏 = 封顶 16（像素 20px）——"正常"尺子；
+        // 窗口化 = 尺子 ×（窗口宽/屏宽）——严格按全屏比例缩小对齐，
+        // 永远小于全屏字号。旧版"移除封顶"把全屏好字号一起拖大 = 负优化
+        qreal screenW = 1.0;
+        if (auto *scr = QGuiApplication::primaryScreen())
+            screenW = qMax(1.0, qreal(scr->availableGeometry().width()));
+        const qreal full = qMin(screenW / 50.0, 16.0);
+        const qreal ratio = qBound(0.25, qreal(viewport()->width()) / screenW, 1.0);
+        return qMax(6.0, full * ratio);
     }
     // 网格像素字号（activeFont 之后）——自检断言口径
     int crtGridPixelSize() const
@@ -2348,7 +2362,10 @@ private:
         m_undoOps.append(false);
         if (m_inkUndo.size() > 100) {
             m_inkUndo.removeFirst();
-            m_undoOps.removeFirst(); // 日志与墨迹栈锁步截断
+            // 删日志里最早的墨迹条目（不是队首——中间夹着文字步）
+            const int idx = m_undoOps.indexOf(false);
+            if (idx >= 0)
+                m_undoOps.removeAt(idx);
         }
         m_inkRedo.clear();
         m_redoOps.clear();

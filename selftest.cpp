@@ -571,6 +571,112 @@ bool Editor::selftest()
             e.clearInk();
             QApplication::processEvents();
         }
+        // 撤销时间线精确回归（用户报：画一笔→打字→擦掉笔迹后撤销
+        // 不按原路撤回）。确定性序列，逐撤销断言状态：
+        //   画一笔(ink) → 打字(text) → 擦掉笔迹(ink)
+        //   撤销1 = 擦除还原（笔迹回来）→ 撤销2 = 字删除 → 撤销3 = 笔迹消失
+        {
+            e.setPlainText(QStringLiteral("起\n"));
+            e.clearInk();
+            QApplication::processEvents();
+            // 1) 画一笔
+            e.toggleMode(Editor::Mode::Draw);
+            QWidget *vp = e.viewport();
+            const QPointF p1(vp->width() * 0.25, vp->height() * 0.4);
+            const QPointF p2(vp->width() * 0.55, vp->height() * 0.4);
+            QMouseEvent pr(QEvent::MouseButtonPress, p1, vp->mapToGlobal(p1.toPoint()),
+                           Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(vp, &pr);
+            QMouseEvent mv(QEvent::MouseMove, p2, vp->mapToGlobal(p2.toPoint()),
+                           Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(vp, &mv);
+            QMouseEvent re(QEvent::MouseButtonRelease, p2, vp->mapToGlobal(p2.toPoint()),
+                           Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(vp, &re);
+            e.toggleMode(Editor::Mode::Normal);
+            QApplication::processEvents();
+            const int ink1 = int(e.inkPaths().size());
+            if (ink1 != 1) {
+                qWarning("selftest FAIL: timeline stroke count %d", ink1);
+                return false;
+            }
+            // 2) 打字
+            QTextCursor tc = e.textCursor();
+            tc.setPosition(qMax(0, e.toPlainText().size() - 1));
+            e.setTextCursor(tc);
+            tc.insertText(QStringLiteral("字"));
+            QApplication::processEvents();
+            if (!e.toPlainText().startsWith(QStringLiteral("起字"))) {
+                qWarning("selftest FAIL: timeline typing");
+                return false;
+            }
+            // 3) 擦掉笔迹（同坐标）
+            e.toggleMode(Editor::Mode::Erase);
+            QMouseEvent ep(QEvent::MouseButtonPress, p1, vp->mapToGlobal(p1.toPoint()),
+                           Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(vp, &ep);
+            QMouseEvent em(QEvent::MouseMove, p2, vp->mapToGlobal(p2.toPoint()),
+                           Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(vp, &em);
+            QMouseEvent er2(QEvent::MouseButtonRelease, p2, vp->mapToGlobal(p2.toPoint()),
+                            Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(vp, &er2);
+            e.toggleMode(Editor::Mode::Normal);
+            QApplication::processEvents();
+            if (int(e.inkPaths().size()) != 0) {
+                qWarning("selftest FAIL: timeline erase left %d paths", int(e.inkPaths().size()));
+                return false;
+            }
+            // 撤销1：擦除还原 → 笔迹回来、字还在
+            {
+                QKeyEvent kz(QEvent::KeyPress, Qt::Key_Z, Qt::ControlModifier);
+                QApplication::sendEvent(&e, &kz);
+                QApplication::processEvents();
+            }
+            if (int(e.inkPaths().size()) != 1
+                || !e.toPlainText().startsWith(QStringLiteral("起字"))) {
+                qWarning("selftest FAIL: timeline undo#1 wrong (ink=%d text=[%s])",
+                         int(e.inkPaths().size()),
+                         qPrintable(QString(e.toPlainText()).left(6)));
+                return false;
+            }
+            // 撤销2：字删除 → 笔迹还在、字没了
+            {
+                QKeyEvent kz(QEvent::KeyPress, Qt::Key_Z, Qt::ControlModifier);
+                QApplication::sendEvent(&e, &kz);
+                QApplication::processEvents();
+            }
+            if (int(e.inkPaths().size()) != 1
+                || !e.toPlainText().startsWith(QStringLiteral("起"))) {
+                qWarning("selftest FAIL: timeline undo#2 wrong (ink=%d text=[%s])",
+                         int(e.inkPaths().size()),
+                         qPrintable(QString(e.toPlainText()).left(6)));
+                return false;
+            }
+            // 撤销3：笔迹消失
+            {
+                QKeyEvent kz(QEvent::KeyPress, Qt::Key_Z, Qt::ControlModifier);
+                QApplication::sendEvent(&e, &kz);
+                QApplication::processEvents();
+            }
+            if (int(e.inkPaths().size()) != 0) {
+                qWarning("selftest FAIL: timeline undo#3 wrong (ink=%d)", int(e.inkPaths().size()));
+                return false;
+            }
+            // 重做1：笔迹回来
+            {
+                QKeyEvent ky(QEvent::KeyPress, Qt::Key_Y, Qt::ControlModifier);
+                QApplication::sendEvent(&e, &ky);
+                QApplication::processEvents();
+            }
+            if (int(e.inkPaths().size()) != 1) {
+                qWarning("selftest FAIL: timeline redo#1 wrong (ink=%d)", int(e.inkPaths().size()));
+                return false;
+            }
+            e.clearInk();
+            e.setPlainText(QStringLiteral("無\n"));
+            QApplication::processEvents();
+        }
         // 涂模式开着打字（用户报：笔刷期间打字光标行为/换行不准）：
         // 涂/擦模式必须完全不干扰文本编辑——插入位置、换行、光标
         // 落点与普通模式一致
@@ -974,14 +1080,20 @@ bool Editor::selftest()
                 while (e.machine() != 2)
                     e.toggleMachine();
                 QApplication::processEvents();
-                const int wWin = e.width();               // 窗口化宽度
-                e.resize(qMax(wWin + 200, wWin * 3 / 2), e.height()); // 模拟全屏宽
+                // 窗口化/全屏宽都取屏内比例（offscreen DPR2 下窗口 560
+                // 可能超过逻辑屏宽 400 → 比值钳 1 → 窗口化=全屏 误报）
+                const int screenW = QGuiApplication::primaryScreen()
+                                        ->availableGeometry().width();
+                const int wWin = qMax(200, screenW / 2);
+                const int wFull = qMax(wWin + 60, screenW - 20);
+                const int wOrig = e.width();
+                e.resize(wFull, e.height()); // 模拟全屏宽（屏内）
                 QApplication::processEvents();
                 QKeyEvent kzWin(QEvent::KeyPress, Qt::Key_0, Qt::ControlModifier);
                 QApplication::sendEvent(&e, &kzWin);      // 真实 ⌘0（全屏宽）
                 QApplication::processEvents();
                 const int pxFull = e.document()->defaultFont().pixelSize();
-                e.resize(wWin, e.height());               // 回到窗口化
+                e.resize(wWin, e.height());               // 窗口化（屏内一半）
                 QApplication::processEvents();
                 QKeyEvent kzWin2(QEvent::KeyPress, Qt::Key_0, Qt::ControlModifier);
                 QApplication::sendEvent(&e, &kzWin2);     // 真实 ⌘0（窗口化）
@@ -994,16 +1106,16 @@ bool Editor::selftest()
                     return e.crtGridPixelSize();
                 };
                 if (qAbs(pxWin - c64Want(wWin)) > 1
-                    || qAbs(pxFull - c64Want(wWin * 3 / 2)) > 1
+                    || qAbs(pxFull - c64Want(wFull)) > 1
                     || pxWin >= pxFull) {
-                    qWarning("selftest FAIL: C64 ⌘0 windowed not smaller than fullscreen (win=%d full=%d want %d/%d) — 老bug回归",
-                             pxWin, pxFull, c64Want(wWin), c64Want(wWin * 3 / 2));
+                    qWarning("selftest FAIL: C64 ⌘0 windowed not smaller than fullscreen (win=%d full=%d want %d/%d screen=%d) — 老bug回归",
+                             pxWin, pxFull, c64Want(wWin), c64Want(wFull), screenW);
                     return false;
                 }
                 while (e.machine() != 0)
                     e.toggleMachine();
                 QApplication::processEvents();
-                e.resize(wWin, e.height()); // 恢复窗口宽度（后续打印测试按窗口拟合）
+                e.resize(wOrig, e.height()); // 恢复窗口宽度（后续打印测试按窗口拟合）
                 QApplication::processEvents();
                 e.zoomReset(); // 恢复琥珀网格态（后续画面断言以之为准）
             }
@@ -1722,6 +1834,66 @@ bool Editor::selftest()
                 e.setPlainText(QStringLiteral("無\n"));
                 e.clearInk();
                 QApplication::processEvents();
+            }
+            // Shift 笔刷开关风暴回归（用户报：显模式按住 Shift 画、松开
+            // 黑屏一会——根因 = 画刷会话半分辨率切换触发整管线重建；
+            // 已移除切换。本闸模拟"拖动中以一定间隔开关 Shift"）：
+            // 零看门狗触发 + 全程画面不黑
+            if (gpuOk) {
+                const int fires0 = e.m_crtView->watchdogFires();
+                e.setPlainText(QStringLiteral("無無無無無\n"));
+                e.toggleMode(Editor::Mode::Draw);
+                QWidget *vp = e.viewport();
+                QApplication::processEvents();
+                for (int cyc = 0; cyc < 6; ++cyc) {
+                    const bool shift = (cyc % 2 == 0);
+                    const Qt::KeyboardModifiers mods = shift ? Qt::ShiftModifier : Qt::NoModifier;
+                    for (int k = 0; k < 8; ++k) {
+                        const QPointF pt(vp->width() * (0.2 + 0.05 * k),
+                                         vp->height() * (0.4 + 0.02 * cyc));
+                        QMouseEvent mv(QEvent::MouseMove, pt, vp->mapToGlobal(pt.toPoint()),
+                                       Qt::NoButton, Qt::NoButton, mods);
+                        QApplication::sendEvent(vp, &mv);
+                        QApplication::processEvents();
+                    }
+                }
+                e.toggleMode(Editor::Mode::Normal);
+                QApplication::processEvents();
+                {
+                    QEventLoop settle;
+                    QTimer::singleShot(120, &settle, &QEventLoop::quit);
+                    settle.exec();
+                }
+                QApplication::processEvents();
+                if (e.m_crtView->watchdogFires() != fires0) {
+                    qWarning("selftest FAIL: shift-toggle drag triggered watchdog — 黑屏根因回归");
+                    return false;
+                }
+                // 画面必须仍然点亮（黑屏 = 帧全黑）：文字带（顶部）必须
+                // 有亮像素 + 中部背景不得纯黑
+                // 亮度判定（冲刷期纯快照帧的余晖增亮缺席 → 文字偏白，
+                // 琥珀滤色会漏——真正的黑屏 = 重建闪黑，文字会整个消失）
+                const QImage sf = e.crtShownImage();
+                long lit = 0;
+                for (int y = 0; y < sf.height() / 5; ++y)
+                    for (int x = 2; x < sf.width() - 30; ++x) {
+                        const QRgb px = sf.pixel(x, y);
+                        if (qRed(px) + qGreen(px) + qBlue(px) > 200)
+                            ++lit;
+                    }
+                long bgSum = 0;
+                for (int y = sf.height() / 2 - 10; y < sf.height() / 2 + 10; ++y)
+                    for (int x = sf.width() / 2 - 40; x < sf.width() / 2 + 40; ++x) {
+                        const QRgb px = sf.pixel(x, y);
+                        bgSum += qRed(px) + qGreen(px) + qBlue(px);
+                    }
+                if (lit < 10 || bgSum < 800) {
+                    qWarning("selftest FAIL: frame went dark after shift-toggle drag (lit=%ld bg=%ld)",
+                             lit, bgSum);
+                    return false;
+                }
+                qInfo("CRT-SHIFT-STORM watchdog=0 lit=%ld", lit);
+                e.setPlainText(QStringLiteral("無\n"));
             }
             // M1：退出重进显 → 视角锁定重置
             e.toggleCrt();
