@@ -754,6 +754,76 @@ bool Editor::selftest()
             e.clearInk();
             QApplication::processEvents();
         }
+        // 实心内部穿孔回归（用户报：填实后橡皮无法从内部擦除，只能
+        // 外部入侵。根修 = 洞环条件并回：新打的洞在擦除前是实心 →
+        // 并回保洞；既有空心不并 → 填实功能保留）
+        {
+            e.setPlainText(QString());
+            e.clearInk();
+            QWidget *vp = e.viewport();
+            e.toggleMode(Editor::Mode::Draw);
+            const QPointF c(vp->width() * 0.4, vp->height() * 0.5);
+            const QPointF s0(c.x() + 18, c.y());
+            QMouseEvent pr(QEvent::MouseButtonPress, s0, vp->mapToGlobal(s0.toPoint()),
+                           Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(vp, &pr);
+            for (int a = 30; a <= 360; a += 30) {
+                const qreal r = a * 3.14159265 / 180.0;
+                const QPointF p(c.x() + 18.0 * qCos(r), c.y() + 18.0 * qSin(r));
+                QMouseEvent mv(QEvent::MouseMove, p, vp->mapToGlobal(p.toPoint()),
+                               Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                QApplication::sendEvent(vp, &mv);
+            }
+            QMouseEvent re(QEvent::MouseButtonRelease, s0, vp->mapToGlobal(s0.toPoint()),
+                           Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(vp, &re);
+            // 填实（单笔拖动盖洞界）
+            e.toggleMode(Editor::Mode::Erase);
+            const QPointF f0(c.x() - 6, c.y());
+            QMouseEvent fp(QEvent::MouseButtonPress, f0, vp->mapToGlobal(f0.toPoint()),
+                           Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(vp, &fp);
+            for (int dx = -3; dx <= 6; dx += 3) {
+                const QPointF p(c.x() + dx, c.y());
+                QMouseEvent mv(QEvent::MouseMove, p, vp->mapToGlobal(p.toPoint()),
+                               Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                QApplication::sendEvent(vp, &mv);
+            }
+            const QPointF f1(c.x() + 6, c.y());
+            QMouseEvent fr(QEvent::MouseButtonRelease, f1, vp->mapToGlobal(f1.toPoint()),
+                           Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(vp, &fr);
+            // 实心内部穿孔
+            const QPointF p0(c.x() - 5, c.y());
+            QMouseEvent pp(QEvent::MouseButtonPress, p0, vp->mapToGlobal(p0.toPoint()),
+                           Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(vp, &pp);
+            const QPointF p1(c.x() + 5, c.y());
+            QMouseEvent pm(QEvent::MouseMove, p1, vp->mapToGlobal(p1.toPoint()),
+                           Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(vp, &pm);
+            QMouseEvent pre2(QEvent::MouseButtonRelease, p1, vp->mapToGlobal(p1.toPoint()),
+                             Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(vp, &pre2);
+            e.toggleMode(Editor::Mode::Normal);
+            QApplication::processEvents();
+            QImage pk(vp->size() * 2, QImage::Format_ARGB32);
+            pk.fill(Qt::transparent);
+            pk.setDevicePixelRatio(2.0);
+            QPainter p(&pk);
+            p.translate(e.viewport()->pos() * 2);
+            e.m_canvas->render(&p);
+            p.end();
+            const QPoint centerPix(int(c.x() * 2), int(c.y() * 2));
+            if (qAlpha(pk.pixel(centerPix)) > 8) {
+                qWarning("selftest FAIL: internal punch of solid failed (center alpha=%d)",
+                         qAlpha(pk.pixel(centerPix)));
+                return false;
+            }
+            qInfo("CRT-PUNCH center punched");
+            e.clearInk();
+            QApplication::processEvents();
+        }
         // 涂模式开着打字（用户报：笔刷期间打字光标行为/换行不准）：
         // 涂/擦模式必须完全不干扰文本编辑——插入位置、换行、光标
         // 落点与普通模式一致
@@ -2005,16 +2075,36 @@ bool Editor::selftest()
                 }
                 const QImage gb = e.crtShownImage();
                 long gray = 0;
-                const int xLimit = qMax(10, gb.width() - 24); // 排除滚动条列自身
+                // 扫描区 = 滚动条邻域（把手幽灵的栖息地——旧版全幅扫描
+                // 把顶部文字的 AA 边缘误报成灰；文字是琥珀色、把手是
+                // 中性灰，但字缘混色会踩中阈值）
+                const int barW = qCeil(18.0 * gb.devicePixelRatio());
+                const int xLimit = qMax(10, gb.width() - barW - 8);
+                const int xScan = qMax(10, xLimit - 70);
                 for (int y = 0; y < gb.height(); ++y)
-                    for (int x = 2; x < xLimit; ++x) {
+                    for (int x = xScan; x < xLimit; ++x) {
                         const QRgb px = gb.pixel(x, y);
                         const int r = qRed(px), g = qGreen(px), b = qBlue(px);
                         if (r + g + b > 60 && qAbs(r - g) < 25 && qAbs(g - b) < 25)
                             ++gray; // 中性灰（琥珀是 r≫g≫b，把手灰 r≈g≈b）
                     }
                 if (gray > 30) {
-                    qWarning("selftest FAIL: scrollbar gray ghost after scroll (gray=%ld)", gray);
+                    // 取证：灰像素的 y 分布（10 行一档）
+                    QString dist;
+                    for (int y0 = 0; y0 < gb.height(); y0 += 10) {
+                        long n = 0;
+                        for (int y = y0; y < qMin(gb.height(), y0 + 10); ++y)
+                            for (int x = 2; x < xLimit; ++x) {
+                                const QRgb px = gb.pixel(x, y);
+                                const int r = qRed(px), g = qGreen(px), b = qBlue(px);
+                                if (r + g + b > 60 && qAbs(r - g) < 25 && qAbs(g - b) < 25)
+                                    ++n;
+                            }
+                        if (n > 0)
+                            dist += QStringLiteral("%1:%2;").arg(y0).arg(n);
+                    }
+                    qWarning("selftest FAIL: scrollbar gray ghost after scroll (gray=%ld) ydist=[%s]",
+                             gray, qPrintable(dist));
                     return false;
                 }
                 qInfo("CRT-SCROLL-GHOST gray=%ld", gray);

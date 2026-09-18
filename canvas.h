@@ -158,13 +158,24 @@ public:
             tube.addEllipse(c, m_brush / 2.0, m_brush / 2.0);
         }
         m_eraseLast = c;
+        if (!m_eraseActive)
+            m_eraseOriginal = m_strokes; // 会话起点快照
         m_eraseActive = true;
-        applyErase(tube);
+        // 会话累积并集 + 从起点快照重放全集：任何一步的结果 = 一次性
+        // 全集减法的结果（拆分后再减 ≠ 减后再拆——顺序拖动若在中间
+        // 碎片上继续减，后一段会把前一段打出的洞切碎填回，实心内部
+        // 穿孔失效的根因）
+        m_eraseUnion |= tube;
+        m_strokes = m_eraseOriginal;
+        applyErase(m_eraseUnion);
+        invalidateCache();
+        update();
     }
 
     void eraseEnd()
     {
         m_eraseActive = false;
+        m_eraseUnion = QPainterPath();
     }
 
     void applyErase(const QPainterPath &tube)
@@ -182,7 +193,7 @@ public:
             if (after == before)
                 continue;
             changed = true;
-            const QVector<QPainterPath> subs = splitSubpaths(after);
+            const QVector<QPainterPath> subs = splitSubpaths(after, before);
             m_strokes.removeAt(i);
             for (int k = subs.size() - 1; k >= 0; --k)
                 m_strokes.insert(i, InkStroke{width, subs.at(k)});
@@ -193,17 +204,22 @@ public:
         }
     }
 
-    // 保留曲线元素地把路径拆成子路径。不并洞（用户三轮拍板：擦除后
-    // 的"填实"行为保留为功能——洞界单独成片填充 = 填实效果的来源）
-    static QVector<QPainterPath> splitSubpaths(const QPainterPath &p)
+    // 保留曲线元素地把路径拆成子路径，洞环条件并回（子代理几何审计
+    // 的修法）：只把"本次擦除新打出的洞"并回其容器——判定 = 洞环
+    // 探针点在擦除前(before)是否实心。既有空心（画出来的洞）在
+    // before 里是空心 → 不并回 → 保持独立成片填充 = 填实功能；
+    // 新打的洞在 before 里是实心 → 并回 → 奇偶填充保洞 = 实心内部
+    // 穿孔生效（用户报：实心内部无法直接擦除，只能外部入侵）。
+    static QVector<QPainterPath> splitSubpaths(const QPainterPath &p,
+                                               const QPainterPath &before)
     {
-        QVector<QPainterPath> out;
+        QVector<QPainterPath> loops;
         QPainterPath cur;
         for (int i = 0; i < p.elementCount(); ++i) {
             const QPainterPath::Element &e = p.elementAt(i);
             if (e.isMoveTo()) {
                 if (cur.elementCount() > 0)
-                    out.append(cur);
+                    loops.append(cur);
                 cur = QPainterPath();
                 cur.moveTo(e.x, e.y);
             } else if (e.isLineTo()) {
@@ -215,7 +231,33 @@ public:
             }
         }
         if (cur.elementCount() > 0)
-            out.append(cur);
+            loops.append(cur);
+        QVector<bool> merged(loops.size(), false);
+        QVector<QPainterPath> out;
+        for (int i = 0; i < loops.size(); ++i) {
+            if (merged[i])
+                continue;
+            QPainterPath host = loops.at(i);
+            for (int j = 0; j < loops.size(); ++j) {
+                if (i == j || merged[j])
+                    continue;
+                const QPointF probe = loops.at(j).boundingRect().center();
+                // 只并"闭环的新洞"（擦除前此处实心 + 环闭合）。判别：
+                // 穿孔 = 管段完全在实心内 → 减法产出完整闭合的洞界环；
+                // 填实的碎片 = 管段切碎既有洞界 → 开弧（首尾点分离）。
+                // 只并闭合环：穿孔保洞、填实保留（独立探针验证）
+                const QPainterPath::Element firstE = loops.at(j).elementAt(0);
+                const QPainterPath::Element lastE = loops.at(j).elementAt(
+                    loops.at(j).elementCount() - 1);
+                const bool closed = qAbs(firstE.x - lastE.x) < 1.0
+                                    && qAbs(firstE.y - lastE.y) < 1.0;
+                if (closed && host.contains(probe) && before.contains(probe)) {
+                    host.addPath(loops.at(j));
+                    merged[j] = true;
+                }
+            }
+            out.append(host);
+        }
         return out;
     }
 
@@ -304,6 +346,8 @@ private:
     QPixmap m_cache; // 笔迹烘焙缓存（只随内容变化重烘；滚动平移 blit）
     QPointF m_cacheOrigin; // 缓存在文档坐标的原点
     QPointF m_eraseLast;
+    QPainterPath m_eraseUnion; // 橡皮会话管段并集（从起点快照重放全集）
+    QVector<InkStroke> m_eraseOriginal; // 会话起点笔迹快照
     bool m_eraseActive = false;
     bool m_fpVisible = false;
     bool m_fpErase = false;
