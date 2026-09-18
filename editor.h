@@ -85,6 +85,7 @@ public:
         c.viewMoving = m_crt && m_mouseMoveClock.isValid() && m_mouseMoveClock.elapsed() < 150;
         c.typing = m_crt && m_inputClock.isValid() && m_inputClock.elapsed() < 300;
         c.drawing = m_crt && m_inkSession; // 涂/擦按住期间
+        c.fading = m_crt && m_fadeTimer.isActive(); // 滚动条淡出中
         return c;
     }
     Editor()
@@ -241,7 +242,10 @@ public:
 
         // 光标：闪烁由我们自己驱动（原生闪烁器已关，见 main），保证完整对称——
         // 亮 BLINK_HALF_MS / 灭 BLINK_HALF_MS 为一拍，完成 SLEEP_BLINKS 次后恰好休眠，无残拍
-        m_blinkTimer.setSingleShot(true);
+        // 周期触发（子代理审计：旧版 setSingleShot(true) 但 timeout 处理器
+        // 从不重新 start——唤醒后只亮 750ms 就永久熄灭 = 用户报的
+        // "方向键期间光标进入睡眠、以隐形方式移动"的根因）
+        m_blinkTimer.setSingleShot(false);
         connect(&m_blinkTimer, &QTimer::timeout, this, [this] {
             if (++m_blinkHalf >= SLEEP_BLINKS * 2) {
                 m_blinkTimer.stop(); // 第 N 次闪烁的“灭”拍即休眠
@@ -257,6 +261,10 @@ public:
         connect(this, &QPlainTextEdit::cursorPositionChanged, this, [this] {
             if (!m_crt)
                 return;
+            // 子代理审计：方向键导航只标脏区、从不 markDirty——显模式
+            // 块光标/选区在导航期间冻结（"Shift+方向键无法选中"）
+            if (m_crtView)
+                m_crtView->markDirty();
             const int halo = qCeil(fontMetrics().horizontalAdvance(QLatin1Char('M'))) + 12;
             m_snapDirty |= m_lastCursorRect;
             m_lastCursorRect = cursorRect().translated(viewport()->pos())

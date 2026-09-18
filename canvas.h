@@ -34,6 +34,7 @@ public:
     {
         m_strokes = strokes;
         m_activePts.clear();
+        m_activeOutline = QPainterPath();
         invalidateCache();
         update();
     }
@@ -87,6 +88,8 @@ public:
     {
         m_activePts.clear();
         m_activePts.append(docPos);
+        m_activeOutline = QPainterPath();
+        m_activeOutline.addEllipse(docPos, m_brush / 2.0, m_brush / 2.0);
         update();
     }
 
@@ -96,6 +99,12 @@ public:
             return;
         if (QLineF(m_activePts.last(), docPos).length() >= 2.0) {
             m_activePts.append(docPos);
+            // 增量轮廓：只描新管段并入缓存——平铺式来回画线不再
+            // 每帧重算整条轮廓（旧版 O(n²)：用户报"一根线来回画就会卡"）
+            QPainterPath seg;
+            seg.moveTo(m_activePts.at(m_activePts.size() - 2));
+            seg.lineTo(docPos);
+            m_activeOutline |= strokeOutline(seg, m_brush);
             update();
         }
     }
@@ -104,8 +113,9 @@ public:
     {
         if (m_activePts.isEmpty())
             return;
-        m_strokes.append(outlineOf(m_activePts, m_brush));
+        m_strokes.append(InkStroke{m_brush, m_activeOutline});
         m_activePts.clear();
+        m_activeOutline = QPainterPath();
         invalidateCache();
     }
 
@@ -158,10 +168,8 @@ public:
             tube.addEllipse(c, m_brush / 2.0, m_brush / 2.0);
         }
         m_eraseLast = c;
-        if (!m_eraseActive) {
+        if (!m_eraseActive)
             m_eraseOriginal = m_strokes; // 会话起点快照
-            m_fillSession = isFillStart(c); // 实心化资格：内部起点+口径≈空心
-        }
         m_eraseActive = true;
         // 会话累积并集 + 从起点快照重放全集：任何一步的结果 = 一次性
         // 全集减法的结果（拆分后再减 ≠ 减后再拆——顺序拖动若在中间
@@ -178,28 +186,6 @@ public:
     {
         m_eraseActive = false;
         m_eraseUnion = QPainterPath();
-        m_fillSession = false;
-    }
-
-    // 实心化资格（用户四轮拍板的前置条件）：橡皮落点必须在一个既有
-    // 空心内部（笔迹包围盒包含、路径填充不含 = 空心），且笔刷口径
-    // ≥ 空心的 60%——口径比空心小 → 纯橡皮擦；从外部入侵 → 纯橡皮擦
-    bool isFillStart(const QPointF &pt) const
-    {
-        for (const InkStroke &st : m_strokes) {
-            const QRectF bb = st.path.boundingRect();
-            if (!bb.contains(pt) || st.path.contains(pt))
-                continue; // 不在空心内（外部 or 在实心带上）
-            // 空心 = 包围盒内缩整个笔宽（笔迹带占 ±w/2，两缘各缩 w/2）
-            const QRectF hole = bb.adjusted(st.width, st.width,
-                                            -st.width, -st.width);
-            const qreal holeDim = qMin(hole.width(), hole.height());
-            if (holeDim <= 0.0)
-                continue;
-            if (m_brush >= 0.6 * holeDim)
-                return true;
-        }
-        return false;
     }
 
     void applyErase(const QPainterPath &tube)
@@ -217,8 +203,7 @@ public:
             if (after == before)
                 continue;
             changed = true;
-            const QVector<QPainterPath> subs = splitSubpaths(after, before,
-                                                                  m_fillSession);
+            const QVector<QPainterPath> subs = splitSubpaths(after, before);
             m_strokes.removeAt(i);
             for (int k = subs.size() - 1; k >= 0; --k)
                 m_strokes.insert(i, InkStroke{width, subs.at(k)});
@@ -236,8 +221,7 @@ public:
     // 新打的洞在 before 里是实心 → 并回 → 奇偶填充保洞 = 实心内部
     // 穿孔生效（用户报：实心内部无法直接擦除，只能外部入侵）。
     static QVector<QPainterPath> splitSubpaths(const QPainterPath &p,
-                                               const QPainterPath &before,
-                                               bool fillMode)
+                                               const QPainterPath &before)
     {
         QVector<QPainterPath> loops;
         QPainterPath cur;
@@ -277,11 +261,10 @@ public:
                     loops.at(j).elementCount() - 1);
                 const bool closed = qAbs(firstE.x - lastE.x) < 1.0
                                     && qAbs(firstE.y - lastE.y) < 1.0;
-                // 实心化会话：只并"新洞"（擦除前此处实心）——穿孔保洞、
-                // 既有空心碎片不并 = 填实；纯擦除会话：并所有闭合洞界
-                //（并集语义 = 干净的切，从外部入侵时不会把洞填回）
-                const bool merge = closed && host.contains(probe)
-                                   && (before.contains(probe) || !fillMode);
+                // 纯橡皮擦（用户五轮拍板：移除填实功能——橡皮擦就是
+                // 橡皮擦）：闭合洞界一律并回容器（并集语义 = 干净的切，
+                // 洞不打、空心不填）
+                const bool merge = closed && host.contains(probe);
                 if (merge) {
                     host.addPath(loops.at(j));
                     merged[j] = true;
@@ -362,10 +345,10 @@ private:
     {
         if (pts.isEmpty())
             return;
-        // 与 outlineOf 同一轮廓：作画过程所见 = 松手后所提交，几何唯一
+        // 增量轮廓缓存：作画过程所见 = 松手后所提交，几何唯一且 O(1)
         p.setPen(Qt::NoPen);
         p.setBrush(m_ink);
-        p.drawPath(outlineOf(pts, width).path);
+        p.drawPath(m_activeOutline);
     }
 
     QColor m_ink = QColor(0, 0, 0);
@@ -374,12 +357,12 @@ private:
     QPoint m_vpOffset;
     QVector<InkStroke> m_strokes;
     QVector<QPointF> m_activePts;
+    QPainterPath m_activeOutline; // 活跃笔画增量轮廓缓存（O(1) 作画）
     QPixmap m_cache; // 笔迹烘焙缓存（只随内容变化重烘；滚动平移 blit）
     QPointF m_cacheOrigin; // 缓存在文档坐标的原点
     QPointF m_eraseLast;
     QPainterPath m_eraseUnion; // 橡皮会话管段并集（从起点快照重放全集）
     QVector<InkStroke> m_eraseOriginal; // 会话起点笔迹快照
-    bool m_fillSession = false;            // 实心化会话（内部起点+口径≈空心）
     bool m_eraseActive = false;
     bool m_fpVisible = false;
     bool m_fpErase = false;

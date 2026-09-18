@@ -522,9 +522,9 @@ bool Editor::selftest()
             e.clearInk();
             QApplication::processEvents();
         }
-        // 擦除填实功能（用户三轮拍板保留 + 四轮前置条件）：画闭合
-        // 空心 + 橡皮从空心内部开始擦（口径 ≈ 空心大小）= 填满。
-        // 本闸锁定该功能：小环 + 内部覆盖洞界拖动 → 圈心必须填实
+        // 纯橡皮擦回归（用户五轮拍板：移除填实功能——橡皮擦就是橡皮
+        // 擦，不具备填充功能）。小环 + 内部覆盖洞界的拖动 = 干净的
+        // 切，圈心保持空心
         {
             e.setPlainText(QString());
             e.clearInk();
@@ -545,7 +545,7 @@ bool Editor::selftest()
             QMouseEvent re(QEvent::MouseButtonRelease, s0, vp->mapToGlobal(s0.toPoint()),
                            Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
             QApplication::sendEvent(vp, &re);
-            // 橡皮从空心内部开始拖（覆盖洞界）
+            // 橡皮从空心内部开始拖（覆盖洞界）——纯擦除：圈心保持空心
             e.toggleMode(Editor::Mode::Erase);
             const QPointF f0(xc.x() - 6, xc.y());
             QMouseEvent fp(QEvent::MouseButtonPress, f0, vp->mapToGlobal(f0.toPoint()),
@@ -571,15 +571,82 @@ bool Editor::selftest()
             e.m_canvas->render(&ip);
             ip.end();
             const QPoint centerPx(int(xc.x() * 2), int(xc.y() * 2));
-            if (qAlpha(exImg.pixel(centerPx)) <= 8) {
-                qWarning("selftest FAIL: erase-fill feature lost (center=%d)",
+            if (qAlpha(exImg.pixel(centerPx)) > 8) {
+                qWarning("selftest FAIL: eraser filled the hollow — 纯橡皮擦回归失败 (center=%d)",
                          qAlpha(exImg.pixel(centerPx)));
                 return false;
             }
             e.clearInk();
             QApplication::processEvents();
         }
-        // 填实前置条件回归（用户四轮拍板）：
+        // 按住 Shift 跨模式复现（用户五轮）：按住 Shift 画完 → 换橡皮
+        // 擦（Shift 全程不松）→ 橡皮必须能擦掉
+        {
+            e.setPlainText(QString());
+            e.clearInk();
+            QWidget *vp = e.viewport();
+            e.toggleMode(Editor::Mode::Draw);
+            const Qt::KeyboardModifiers sh = Qt::ShiftModifier;
+            // 真实 Shift 按下
+            QKeyEvent skp(QEvent::KeyPress, Qt::Key_Shift, Qt::ShiftModifier);
+            QApplication::sendEvent(&e, &skp);
+            QApplication::processEvents();
+            // 按住 Shift 画一笔（m_shiftInkActive 路径）
+            const QPointF p1(vp->width() * 0.2, vp->height() * 0.5);
+            const QPointF p2(vp->width() * 0.5, vp->height() * 0.5);
+            QMouseEvent pr(QEvent::MouseButtonPress, p1, vp->mapToGlobal(p1.toPoint()),
+                           Qt::LeftButton, Qt::LeftButton, sh);
+            QApplication::sendEvent(vp, &pr);
+            QMouseEvent mv(QEvent::MouseMove, p2, vp->mapToGlobal(p2.toPoint()),
+                           Qt::LeftButton, Qt::LeftButton, sh);
+            QApplication::sendEvent(vp, &mv);
+            QMouseEvent re(QEvent::MouseButtonRelease, p2, vp->mapToGlobal(p2.toPoint()),
+                           Qt::LeftButton, Qt::NoButton, sh);
+            QApplication::sendEvent(vp, &re);
+            const int ink1 = int(e.inkPaths().size());
+            // 换橡皮（Shift 不松）
+            QKeyEvent ke(QEvent::KeyPress, Qt::Key_E, Qt::ControlModifier | sh);
+            QApplication::sendEvent(&e, &ke);
+            QApplication::processEvents();
+            // 橡皮拖过同一位置
+            const QPointF e1(vp->width() * 0.2, vp->height() * 0.5);
+            const QPointF e2(vp->width() * 0.5, vp->height() * 0.5);
+            QMouseEvent ep(QEvent::MouseButtonPress, e1, vp->mapToGlobal(e1.toPoint()),
+                           Qt::LeftButton, Qt::LeftButton, sh);
+            QApplication::sendEvent(vp, &ep);
+            QMouseEvent em(QEvent::MouseMove, e2, vp->mapToGlobal(e2.toPoint()),
+                           Qt::LeftButton, Qt::LeftButton, sh);
+            QApplication::sendEvent(vp, &em);
+            QMouseEvent er2(QEvent::MouseButtonRelease, e2, vp->mapToGlobal(e2.toPoint()),
+                            Qt::LeftButton, Qt::NoButton, sh);
+            QApplication::sendEvent(vp, &er2);
+            const int ink2 = int(e.inkPaths().size());
+            // 真实 Shift 松开（跨模式后）
+            QKeyEvent skr(QEvent::KeyRelease, Qt::Key_Shift, Qt::NoModifier);
+            QApplication::sendEvent(&e, &skr);
+            QApplication::processEvents();
+            const int ink3 = int(e.inkPaths().size());
+            qInfo("CRT-SHIFT-ERASE ink1=%d ink2=%d ink3=%d", ink1, ink2, ink3);
+            if (ink3 >= ink1) {
+                qWarning("selftest FAIL: shift-release corrupted eraser result (ink %d -> %d)",
+                         ink1, ink3);
+                e.clearInk();
+                e.toggleMode(Editor::Mode::Normal);
+                return false;
+            }
+            if (ink2 >= ink1) {
+                qWarning("selftest FAIL: shift-held eraser could not erase (ink %d -> %d)",
+                         ink1, ink2);
+                e.clearInk();
+                e.toggleMode(Editor::Mode::Normal);
+                return false;
+            }
+            e.clearInk();
+            e.toggleMode(Editor::Mode::Normal);
+            QApplication::processEvents();
+        }
+        // 纯擦除行为回归（用户五轮拍板：填实功能已移除——所有情况
+        // 都必须是纯橡皮擦）：
         // (a) 笔刷口径比空心小 → 纯橡皮擦（圈心保持空心）
         // (b) 橡皮从外部入侵（不管多大）→ 纯橡皮擦（只切不填）
         {
@@ -718,6 +785,71 @@ bool Editor::selftest()
             e.toggleMode(Editor::Mode::Normal);
             QApplication::processEvents();
             e.setPlainText(QStringLiteral("無\n"));
+        }
+        // 方向键 + Shift 选区回归（用户五轮：Shift+方向键无法选中、
+        // 光标隐形移动——存亡级）。光标定位 → Shift+右 → 断言选区
+        {
+            e.setPlainText(QStringLiteral("abcdefghij\n"));
+            QTextCursor c = e.textCursor();
+            c.setPosition(0);
+            e.setTextCursor(c);
+            QApplication::processEvents();
+            QKeyEvent ka(QEvent::KeyPress, Qt::Key_Right, Qt::ShiftModifier);
+            QApplication::sendEvent(&e, &ka);
+            QApplication::processEvents();
+            QKeyEvent ka2(QEvent::KeyPress, Qt::Key_Right, Qt::ShiftModifier);
+            QApplication::sendEvent(&e, &ka2);
+            QApplication::processEvents();
+            const QTextCursor sel = e.textCursor();
+            if (!sel.hasSelection()
+                || sel.selectionStart() != 0 || sel.selectionEnd() != 2) {
+                qWarning("selftest FAIL: shift+arrow selection broken (sel=%d %d..%d)",
+                         int(sel.hasSelection()), sel.selectionStart(), sel.selectionEnd());
+                return false;
+            }
+            // 纯方向键移动（无 Shift）：首个右箭头 = 折叠选区到尾（Qt
+            // 原生语义），第二个 = 前进一格；期间光标必须保持可见
+            //（宽度 2 = 亮，0 = 休眠/隐形——用户报"隐形移动"）
+            QKeyEvent kb(QEvent::KeyPress, Qt::Key_Right, Qt::NoModifier);
+            QApplication::sendEvent(&e, &kb);
+            QApplication::processEvents();
+            if (e.textCursor().position() != 2) {
+                qWarning("selftest FAIL: arrow collapse broken (pos=%d)",
+                         e.textCursor().position());
+                return false;
+            }
+            QKeyEvent kb2(QEvent::KeyPress, Qt::Key_Right, Qt::NoModifier);
+            QApplication::sendEvent(&e, &kb2);
+            QApplication::processEvents();
+            if (e.textCursor().position() != 3) {
+                qWarning("selftest FAIL: arrow movement broken (pos=%d)",
+                         e.textCursor().position());
+                return false;
+            }
+            // 光标可见性：按键唤醒后原生光标宽度必须 = 2（亮拍），且
+            // 800ms 后仍在闪（旧版单发定时器只亮 750ms 就永久熄灭 =
+            // 用户报的"隐形移动"根因）
+            if (e.cursorWidth() != 2) {
+                qWarning("selftest FAIL: caret invisible after arrows (width=%d)",
+                         e.cursorWidth());
+                return false;
+            }
+            {
+                QEventLoop settle;
+                QTimer::singleShot(820, &settle, &QEventLoop::quit);
+                settle.exec();
+            }
+            QApplication::processEvents();
+            QKeyEvent kb3(QEvent::KeyPress, Qt::Key_Right, Qt::NoModifier);
+            QApplication::sendEvent(&e, &kb3);
+            QApplication::processEvents();
+            if (e.cursorWidth() != 2) {
+                qWarning("selftest FAIL: caret died after 820ms (width=%d) — 隐形移动根因回归",
+                         e.cursorWidth());
+                return false;
+            }
+            e.setPlainText(QStringLiteral("無\n"));
+            QApplication::processEvents();
         }
         // 笔迹统一撤销：画一笔 → Cmd+Z 撤销 → Cmd+Y 复原
         e.setPlainText(QStringLiteral("文字\n"));
