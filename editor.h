@@ -74,14 +74,19 @@ public:
     QRect cursorCellRect() const override
     {
         QRect cell = cursorRect(textCursor());
-        const QChar ch = document()->characterAt(textCursor().position());
-        const qreal adv = (ch.isNull() || ch == QChar::ParagraphSeparator)
-                              ? fontMetrics().horizontalAdvance(QLatin1Char('M'))
-                              : fontMetrics().horizontalAdvance(ch);
-        cell.setWidth(qMax(1, qCeil(adv)));
+        // 满格块（对齐稳定版观感）：一律用字体标准格宽——旧实现用
+        // 光标位字符的推进宽，窄字符（i/l/标点）上块光标缩成细窄
+        // 竖条 = 用户报的"常规光标那种细窄高亮竖线"（非复古满格块）
+        cell.setWidth(qMax(1, qCeil(fontMetrics().horizontalAdvance(QLatin1Char('M')))));
         return cell.translated(viewport()->pos());
     }
     bool cursorUnderline() const override { return m_machine == 3; }
+    bool cursorOnGlyph() const override
+    {
+        const QChar ch = document()->characterAt(textCursor().position());
+        return !ch.isNull() && ch != QChar::ParagraphSeparator;
+    }
+    bool cursorCodeMode() const override { return m_codeMode; }
     bool cursorVisible() const override
     {
         return m_crt && hasFocus() && m_blinkTimer.isActive()

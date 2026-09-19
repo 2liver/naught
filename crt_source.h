@@ -42,6 +42,8 @@ public:
     // 光标叠加（CrtView 顶层绘制——不进余晖历史，无残影）：
     virtual QRect cursorCellRect() const = 0;   // 光标单元格（编辑器坐标）
     virtual bool cursorUnderline() const = 0;   // 机型 3 = 下划线光标
+    virtual bool cursorOnGlyph() const = 0;     // 光标压在字符上（非空位）
+    virtual bool cursorCodeMode() const = 0;    // 编模式（块光标用中性暖白）
     virtual bool cursorVisible() const = 0;     // 焦点 + 眨眼亮拍
     // 几何与挂载：CrtView 必须以编辑器为父窗口（alien 覆盖层）
     virtual QRect sourceRect() const = 0;

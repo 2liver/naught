@@ -197,54 +197,49 @@ void CrtView::paintEvent(QPaintEvent *)
     }
     // 光标顶层叠加（用户报光标伪影：旧光标随余晖残留在旧位置——光标
     // 不再进快照/余晖，画在 GPU 帧之上，永不产生残影）。
-    // 分机型（用户六轮考据 + retrocomputing 考证）：
-    //  C64（机型 2）：真机无硬件光标，KERNAL 屏幕编辑器把光标位字符
-    //   在正常/反相间翻动（无硬光标机器的通行假光标做法）。C64 的
-    //   "反相" = 前景/背景色互换：字格填字符色（浅蓝），字形以底色
-    //   （深蓝）呈现——不是白负片；空格位 = 纯字符色实心块。
-    //  其它块光标机（0/1）：Difference 白反相（炽磷亮块，字形负片）。
-    //  机型 3（IBM PC 5150）：6845 硬光标默认 = 底缘 2-3 扫描线
-    //  下划线（真机 DOS 默认；块状只在插入模式）。
+    // 样式对齐稳定版（用户拍板：稳定版每机型光标都是对的）：
+    //  块光标 = 双色反相（块色填格、字形呈底色——亮块里浮着深色字）；
+    //  5150（机型 3）= 空位下划线亮条、压在字上时仍走块效果（用户：
+    //  "并非下划线在字下"）。编模式块色 = 中性暖白。
     if (m_source && m_source->cursorVisible()) {
         QRect cell = m_source->cursorCellRect();
         if (!cell.isEmpty()) {
-            if (m_source->cursorUnderline()) {
+            const CrtConfig cfg = m_source->config();
+            const Crt::Palette &pp = *cfg.palette;
+            const bool underlineEmpty = cfg.machine == 3 && !m_source->cursorOnGlyph();
+            if (underlineEmpty) {
                 cell = QRect(cell.x(), cell.bottom() - qMax(2, cell.height() * 18 / 100),
                              cell.width(), qMax(2, cell.height() * 18 / 100));
-                p.setCompositionMode(QPainter::CompositionMode_Difference);
-                p.fillRect(cell, Qt::white);
-            } else if (m_source->config().machine == 2) {
-                // C64 真机反相 = 色对调（亮字色填充字格、字形呈底色）
-                if (!m_shown.isNull()) {
-                    const qreal sx = qreal(m_shown.width()) / qMax(1, width());
-                    const qreal sy = qreal(m_shown.height()) / qMax(1, height());
-                    const QRect src = QRect(qFloor(cell.x() * sx), qFloor(cell.y() * sy),
-                                            qCeil(cell.width() * sx), qCeil(cell.height() * sy))
-                                          .intersected(m_shown.rect());
-                    if (!src.isEmpty()) {
-                        QImage sub = m_shown.copy(src);
-                        const Crt::Palette &pp = *m_source->config().palette;
-                        const int bgSum = pp.bg.red() + pp.bg.green() + pp.bg.blue();
-                        const int inkSum = pp.ink.red() + pp.ink.green() + pp.ink.blue();
-                        const int span = qMax(1, inkSum - bgSum);
-                        for (int y = 0; y < sub.height(); ++y) {
-                            uchar *line = sub.scanLine(y);
-                            for (int x = 0; x < sub.width(); ++x) {
-                                const int i = x * 4; // RGBA8888：R,G,B,A
-                                const int sum = line[i] + line[i + 1] + line[i + 2];
-                                // t=0（底色）→ 字符色；t=1（字形）→ 底色
-                                const qreal t = qBound(0.0, qreal(sum - bgSum) / qreal(span), 1.0);
-                                line[i] = uchar(pp.ink.red() + (pp.bg.red() - pp.ink.red()) * t);
-                                line[i + 1] = uchar(pp.ink.green() + (pp.bg.green() - pp.ink.green()) * t);
-                                line[i + 2] = uchar(pp.ink.blue() + (pp.bg.blue() - pp.ink.blue()) * t);
-                            }
+                p.fillRect(cell, pp.cursorBlock); // 白磷满束流下划线亮条
+            } else if (!m_shown.isNull()) {
+                const qreal sx = qreal(m_shown.width()) / qMax(1, width());
+                const qreal sy = qreal(m_shown.height()) / qMax(1, height());
+                const QRect src = QRect(qFloor(cell.x() * sx), qFloor(cell.y() * sy),
+                                        qCeil(cell.width() * sx), qCeil(cell.height() * sy))
+                                      .intersected(m_shown.rect());
+                if (!src.isEmpty()) {
+                    QImage sub = m_shown.copy(src);
+                    const QColor block = m_source->cursorCodeMode()
+                                             ? QColor(0xE8, 0xE8, 0xE0)
+                                             : pp.cursorBlock;
+                    const int bgSum = pp.bg.red() + pp.bg.green() + pp.bg.blue();
+                    const int inkSum = pp.ink.red() + pp.ink.green() + pp.ink.blue();
+                    const int span = qMax(1, inkSum - bgSum);
+                    for (int y = 0; y < sub.height(); ++y) {
+                        uchar *line = sub.scanLine(y);
+                        for (int x = 0; x < sub.width(); ++x) {
+                            const int i = x * 4; // RGBA8888：R,G,B,A
+                            const int sum = line[i] + line[i + 1] + line[i + 2];
+                            // 双色反相（稳定版算法）：t=0 底色→块色；
+                            // t=1 字形→底色（亮块里浮着深色字）
+                            const qreal t = qBound(0.0, qreal(sum - bgSum) / qreal(span), 1.0);
+                            line[i] = uchar(block.red() + (pp.bg.red() - block.red()) * t);
+                            line[i + 1] = uchar(block.green() + (pp.bg.green() - block.green()) * t);
+                            line[i + 2] = uchar(block.blue() + (pp.bg.blue() - block.blue()) * t);
                         }
-                        p.drawImage(cell, sub);
                     }
+                    p.drawImage(cell, sub);
                 }
-            } else {
-                p.setCompositionMode(QPainter::CompositionMode_Difference);
-                p.fillRect(cell, Qt::white);
             }
         }
     }
@@ -587,7 +582,6 @@ void CrtView::renderFrame()
         ++m_watchdogFires;
         ++m_watchdogStreak;
         m_readbackInFlight = false;
-        ++m_readbackGen; // 在途回读作废：迟到回调不覆盖新帧
         m_forceNow = true;
         m_sinceRefresh.invalidate();
         if (m_watchdogStreak >= 3) {
@@ -595,6 +589,10 @@ void CrtView::renderFrame()
             releaseGpu();
             ensureRhi();
             m_watchdogStreak = 0;
+            ++m_readbackGen; // 仅重建时作废在途回读（管线已换）
+            // 轻恢复不作废在途回读（用户报"渲染太慢"的根因之一：
+            // 旧代码每次超时就作废 → 回读永不落地 → 画面不更新；迟到
+            // 帧落地远好过永不落地）
             // 重建失败（后端/纹理创建失败 = 半残状态）→ 本帧放弃，
             // 标脏下一帧重试——旧代码继续跑，拿着空纹理/空批次上传
             // = 段错误（用户报：码一行字 + 方向键落光标闪退）
@@ -686,8 +684,8 @@ void CrtView::renderFrame()
             // 上传、标脏下一帧重试——黑帧永不进入余晖历史、永不落地
             {
                 long mx = 0;
-                for (int y = 0; y < m_pending.height() / 5; ++y)
-                    for (int x = 2; x < m_pending.width() - 30; ++x) {
+                for (int y = 0; y < m_pending.height() / 5; y += 4)
+                    for (int x = 2; x < m_pending.width() - 30; x += 4) {
                         const QRgb pxx = m_pending.pixel(x, y);
                         mx = qMax<long>(mx, qRed(pxx) + qGreen(pxx) + qBlue(pxx));
                     }
