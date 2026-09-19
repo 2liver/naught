@@ -3689,6 +3689,86 @@ bool Editor::selftest()
             }
             qInfo("SEL-REVERSE ok");
         }
+        // ============ Shift+↑/↓ 行式选中闸（用户报：选中一行后 Shift+上
+        // 得到半行——基类按列锚定；标准 = 选区扩展到整行）============
+        {
+            e.setPlainText(QStringLiteral("甲\n乙\n丙\n"));
+            QTextCursor c(e.document());
+            QTextBlock b = e.document()->findBlockByNumber(2);
+            c.setPosition(b.position());
+            c.setPosition(b.position() + b.length() - 1, QTextCursor::KeepAnchor);
+            e.setTextCursor(c); // 选中丙整行（4-5）
+            QKeyEvent ku(QEvent::KeyPress, Qt::Key_Up, Qt::ShiftModifier);
+            QApplication::sendEvent(&e, &ku);
+            const QTextCursor sel = e.textCursor();
+            qInfo("LINE-SEL shiftup=[%d,%d]", sel.selectionStart(), sel.selectionEnd());
+            if (sel.selectionStart() != 2 || sel.selectionEnd() != 5) {
+                qWarning("selftest FAIL: Shift+Up not whole-line [%d,%d] (want 2,5)",
+                         sel.selectionStart(), sel.selectionEnd());
+                return false;
+            }
+            // 反向：Shift+下 缩回整行
+            QKeyEvent kd(QEvent::KeyPress, Qt::Key_Down, Qt::ShiftModifier);
+            QApplication::sendEvent(&e, &kd);
+            const QTextCursor sel2 = e.textCursor();
+            if (sel2.selectionStart() != 4 || sel2.selectionEnd() != 5) {
+                qWarning("selftest FAIL: Shift+Down not whole-line [%d,%d] (want 4,5)",
+                         sel2.selectionStart(), sel2.selectionEnd());
+                return false;
+            }
+        }
+        // ============ NAUGHT_YANSEL：言+撤回+Shift上 选区走查 ============
+        if (qEnvironmentVariableIsSet("NAUGHT_YANSEL")) {
+            qInfo("YANSEL-ENTER");
+            const auto dump = [&](const char *tag) {
+                QTextCursor c = e.textCursor();
+                qInfo("YANSEL %s selStart=%d selEnd=%d hasSel=%d text=[%s]", tag,
+                      c.selectionStart(), c.selectionEnd(), int(c.hasSelection()),
+                      qPrintable(e.toPlainText().replace(QLatin1Char('\n'), QLatin1Char('|'))));
+            };
+            e.setPlainText(QStringLiteral("甲\n乙\n丙\n"));
+            // 选中最下行 丙（整行：从头到尾，不含行尾换行）
+            {
+                QTextCursor c(e.document());
+                QTextBlock b = e.document()->findBlockByNumber(2);
+                c.setPosition(b.position());
+                c.setPosition(b.position() + b.length() - 1, QTextCursor::KeepAnchor);
+                e.setTextCursor(c);
+            }
+            dump("step1-sel-bottom");
+            {
+                QKeyEvent kl(QEvent::KeyPress, Qt::Key_L, Qt::ControlModifier);
+                QApplication::sendEvent(&e, &kl);
+            }
+            dump("step2-yan");
+            {
+                QKeyEvent kz(QEvent::KeyPress, Qt::Key_Z, Qt::ControlModifier);
+                QApplication::sendEvent(&e, &kz);
+            }
+            dump("step3-undo");
+            {
+                QKeyEvent ks(QEvent::KeyPress, Qt::Key_Up, Qt::ShiftModifier);
+                QApplication::sendEvent(&e, &ks);
+            }
+            dump("step4-shiftup");
+            // 对照组：不经言/撤回，直接选中丙 + Shift+上（判断是否是
+            // Qt 基类行为，与言/撤回无关）
+            e.setPlainText(QStringLiteral("甲\n乙\n丙\n"));
+            {
+                QTextCursor c(e.document());
+                QTextBlock b = e.document()->findBlockByNumber(2);
+                c.setPosition(b.position());
+                c.setPosition(b.position() + b.length() - 1, QTextCursor::KeepAnchor);
+                e.setTextCursor(c);
+            }
+            dump("ctrl-sel-bottom");
+            {
+                QKeyEvent ks(QEvent::KeyPress, Qt::Key_Up, Qt::ShiftModifier);
+                QApplication::sendEvent(&e, &ks);
+            }
+            dump("ctrl-shiftup");
+            qInfo("YANSEL-EXIT");
+        }
         // ============ NAUGHT_FONTCHECK：每机型字体核对 ============
         if (qEnvironmentVariableIsSet("NAUGHT_FONTCHECK")) {
             qInfo("FONTCHECK-ENTER");

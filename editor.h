@@ -1988,6 +1988,30 @@ protected:
                 && document()->lastBlock().length() == 1)
                 return;
         }
+        // Shift+↑/↓ = 行式选中（用户报：选中一行后 Shift+上 得到半行——
+        // 基类按列锚定，光标走到上方行的"对应列"而非整行；标准编辑器的
+        // 行式选中 = 选区扩展到整行）。整行对齐：锚点 = 其行行首（向
+        // 下）/行尾（向上），光标 = 其行行尾/行首，不含行尾换行（与
+        // 言/隔的选区约定一致）
+        if ((event->key() == Qt::Key_Up || event->key() == Qt::Key_Down)
+            && event->modifiers() == Qt::ShiftModifier) {
+            QTextCursor c = textCursor();
+            c.movePosition(event->key() == Qt::Key_Up ? QTextCursor::Up
+                                                      : QTextCursor::Down,
+                           QTextCursor::KeepAnchor);
+            const bool forward = c.position() > c.anchor();
+            const QTextBlock bA = document()->findBlock(c.anchor());
+            const QTextBlock bP = document()->findBlock(c.position());
+            const int a = forward ? bA.position()
+                                  : bA.position() + bA.length() - 1;
+            const int p = forward ? bP.position() + bP.length() - 1
+                                  : bP.position();
+            c.setPosition(a);
+            c.setPosition(p, QTextCursor::KeepAnchor);
+            setTextCursor(c);
+            wakeCaret();
+            return;
+        }
         if (event->key() == Qt::Key_Escape && (m_mode != Mode::Normal || m_codeMode)) {
             // 先退工具（画笔），再退视图（编）
             if (m_mode != Mode::Normal) {
