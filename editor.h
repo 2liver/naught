@@ -2041,7 +2041,10 @@ protected:
         // 吞掉只剩半截（用户报"选中上方半行"）。Shift+↓ 保持基类（光标
         // 自然为移动端：向下扩展/向上回缩都正确）
         if (event->key() == Qt::Key_Up
-            && event->modifiers() == Qt::ShiftModifier) {
+            && (event->modifiers() & Qt::ShiftModifier)
+            && !(event->modifiers() & (Qt::ControlModifier | Qt::AltModifier))) {
+            // 容忍 ⌘（按键追踪取证：用户按 ⌘Z 后手指还压在 ⌘ 上，实际
+            // 按键 = ⌘⇧↑——⌘ 是上一快捷键的残留，不得改变选区语义）
             QTextCursor c = textCursor();
             // 真机取证（用户报：选区语义与离屏探针不符，反复确认全新
             // 进程仍复现——把每次 Shift+↑ 的前后状态落盘，供定位）
@@ -2082,6 +2085,17 @@ protected:
                     f.close();
                 }
             }
+            wakeCaret();
+            return;
+        }
+        if (event->key() == Qt::Key_Down
+            && (event->modifiers() & Qt::ShiftModifier)
+            && (event->modifiers() & Qt::MetaModifier)
+            && !(event->modifiers() & (Qt::ControlModifier | Qt::AltModifier))) {
+            // ⌘⇧↓：⌘ 残留剥离 → 按纯 Shift+↓ 的基类语义（向下扩展/回缩）
+            QKeyEvent clone(QEvent::KeyPress, Qt::Key_Down, Qt::ShiftModifier,
+                            event->text());
+            QPlainTextEdit::keyPressEvent(&clone);
             wakeCaret();
             return;
         }
