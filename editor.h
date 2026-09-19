@@ -2010,10 +2010,12 @@ protected:
         }
         // 顶行再按上 = 跳文首；底行再按下 = 跳文末（用户要求的方向键
         // 边界跳跃：光标到最上行后继续按"上"→ 首行的首字符之前；
-        // 到最下行后继续按"下"→ 尾行的尾字符之后）
+        // 到最下行后继续按"下"→ 尾行的尾字符之后）。允许按住 Shift
+        //（用户报：选区操作后手没抬，按住 Shift 时功能不再触发——
+        // 无选区时 Shift 不影响跳跃；有选区仍走选区扩展分支）
         if (event->key() == Qt::Key_Up
             && !(event->modifiers() & (Qt::ControlModifier | Qt::MetaModifier
-                                       | Qt::AltModifier | Qt::ShiftModifier))) {
+                                       | Qt::AltModifier))) {
             QTextCursor c = textCursor();
             if (!c.hasSelection() && c.blockNumber() == 0 && c.position() > 0) {
                 c.setPosition(0);
@@ -2024,7 +2026,7 @@ protected:
         }
         if (event->key() == Qt::Key_Down
             && !(event->modifiers() & (Qt::ControlModifier | Qt::MetaModifier
-                                       | Qt::AltModifier | Qt::ShiftModifier))) {
+                                       | Qt::AltModifier))) {
             QTextCursor c = textCursor();
             const int endPos = document()->characterCount() - 1;
             if (!c.hasSelection() && c.blockNumber() == document()->blockCount() - 2

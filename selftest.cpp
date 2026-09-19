@@ -3706,6 +3706,22 @@ bool Editor::selftest()
                          e.textCursor().position());
                 return false;
             }
+            // Shift 按住腿（用户报：按住 Shift 时功能不再触发——无选区
+            // 时 Shift 不影响跳跃）
+            {
+                QTextCursor c = e.textCursor();
+                c.movePosition(QTextCursor::Start);
+                e.setTextCursor(c);
+            }
+            {
+                QKeyEvent ku(QEvent::KeyPress, Qt::Key_Up, Qt::ShiftModifier);
+                QApplication::sendEvent(&e, &ku);
+            }
+            if (e.textCursor().position() != 0) {
+                qWarning("selftest FAIL: Shift+Up at top not to pos 0 (%d)",
+                         e.textCursor().position());
+                return false;
+            }
             // 下跳：光标到文末（尾字符之后）
             {
                 QTextCursor c = e.textCursor();
