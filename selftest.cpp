@@ -1876,6 +1876,10 @@ bool Editor::selftest()
             //   3. 下半帧不得出现远超背景基线的亮行（镜像倒影 = 亮文本行）
             // 判定全部用亮度 (r+g+b)——琥珀/C64 蓝底同口径（暴力跨机型）
             for (const int violentMachine : { 0, 2 }) {
+                if (!gpuOk) {
+                    qWarning("selftest SKIP: no usable RHI backend — violent geometry gate skipped");
+                    break;
+                }
                 auto waitReadback = [&] {
                     for (int guard = 0; guard < 300 && e.m_crtView && !e.m_crtView->readbackIdle(); ++guard) {
                         QEventLoop settle;
