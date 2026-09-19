@@ -124,6 +124,7 @@ private:
     bool m_rhiUnavailable = false; // 管线创建失败标志（限时：3s 后重试，不永久死亡）
     QElapsedTimer m_rhiDeadAt;      // 置位时刻（超时后 ensureRhi 复活）
     QElapsedTimer m_darkSince;      // 黑帧拦截起始时刻（>1.5s 连续 = 放弃拦截，如实上传）
+    int m_prevTopLum = -1;          // 上一非拦截快照的顶部亮度（拦截 = 只拦"突然变暗"）
     QElapsedTimer m_lastLanded;     // 最近一次回读落地时刻（画面活性心跳）
     QTimer m_diagTimer;             // 冻结诊断心跳（2s）
     bool m_diagDumped = false;      // 每段冻结只落盘一次

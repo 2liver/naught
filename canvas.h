@@ -116,7 +116,7 @@ public:
         m_strokes.append(InkStroke{m_brush, m_activeOutline});
         m_activePts.clear();
         m_activeOutline = QPainterPath();
-        invalidateCache();
+        bakeStroke(m_strokes.last()); // 增量烘焙：只烘新笔画覆盖的瓦片
     }
 
     void clearAll()
@@ -296,11 +296,24 @@ protected:
         p.setRenderHint(QPainter::Antialiasing);
         p.save();
         p.translate(QPointF(m_vpOffset) - m_offset); // 笔迹：文档坐标（随滚动）
-        // 笔迹烘焙缓存：paintEvent 只 blit + 画活跃笔画——每帧成本 O(1)，
-        // 不再随笔画数线性增长（用户报：越画越卡）
-        if (m_cache.isNull())
+        // 笔迹烘焙缓存（分块 tile）：paintEvent 只 blit 可见瓦片 + 画
+        // 活跃笔画——每帧成本 O(可见瓦片数)，不随笔画数线性增长
+        //（用户报：越画越卡）。瓦片按笔迹分布分块 = 内存有界（审查：
+        // 旧整幅烘焙在长文档上下各画一笔 = 全文高度 pixmap = OOM）
+        if (m_tiles.isEmpty() && !m_strokes.isEmpty())
             rebuildCache();
-        p.drawPixmap(m_cacheOrigin, m_cache);
+        {
+            const QRectF viewDoc = QRectF(QPointF(0, 0) - QPointF(m_vpOffset) + m_offset,
+                                          QSizeF(size()));
+            const int tx0 = qFloor(viewDoc.left() / kTile), tx1 = qFloor(viewDoc.right() / kTile);
+            const int ty0 = qFloor(viewDoc.top() / kTile), ty1 = qFloor(viewDoc.bottom() / kTile);
+            for (int ty = ty0; ty <= ty1; ++ty)
+                for (int tx = tx0; tx <= tx1; ++tx) {
+                    const auto it = m_tiles.constFind(QPoint(tx, ty));
+                    if (it != m_tiles.constEnd())
+                        p.drawPixmap(QPointF(tx * kTile, ty * kTile), it.value());
+                }
+        }
         drawStroke(p, m_activePts, m_brush);
         p.restore();
 
@@ -323,30 +336,47 @@ protected:
     }
 
 private:
-    void invalidateCache() { m_cache = QPixmap(); }
+    void invalidateCache() { m_tiles.clear(); }
 
+    // 瓦片重烘：清空后逐笔烘（restore/clearAll/擦除/换色路径用）
     void rebuildCache()
     {
-        QRectF bounds;
+        m_tiles.clear();
         for (const InkStroke &s : m_strokes)
-            bounds |= s.path.boundingRect();
-        if (bounds.isEmpty())
-            bounds = QRectF(QPointF(0, 0), QSizeF(size()));
-        const QSize cacheSz(qMax(1, qCeil(bounds.width()) + 2),
-                            qMax(1, qCeil(bounds.height()) + 2));
-        const qreal dpr = window() ? qreal(window()->devicePixelRatioF()) : 1.0;
-        m_cache = QPixmap(QSize(qCeil(cacheSz.width() * dpr), qCeil(cacheSz.height() * dpr)));
-        m_cache.setDevicePixelRatio(dpr); // Retina：1× 烘焙会整片发糊（审查 R2）
-        m_cache.fill(Qt::transparent);
-        m_cacheOrigin = bounds.topLeft() - QPointF(1, 1);
-        QPainter p(&m_cache);
-        p.setRenderHint(QPainter::Antialiasing);
-        p.translate(-m_cacheOrigin); // 笔迹在文档坐标——烘焙进文档空间
-        for (const InkStroke &s : m_strokes) {
-            p.setPen(Qt::NoPen);
-            p.setBrush(m_ink);
-            p.drawPath(s.path);
+            bakeStroke(s);
+    }
+    // 增量烘焙：只烘该笔画覆盖的瓦片（endStroke 用——每笔成本 O(覆盖瓦片)）
+    void bakeStroke(const InkStroke &s)
+    {
+        const QRectF b = s.path.boundingRect().adjusted(-1, -1, 1, 1);
+        const int tx0 = qFloor(b.left() / kTile), tx1 = qFloor(b.right() / kTile);
+        const int ty0 = qFloor(b.top() / kTile), ty1 = qFloor(b.bottom() / kTile);
+        for (int ty = ty0; ty <= ty1; ++ty)
+            for (int tx = tx0; tx <= tx1; ++tx) {
+                QPixmap &pm = tileAt(QPoint(tx, ty));
+                QPainter p(&pm);
+                p.setRenderHint(QPainter::Antialiasing);
+                p.setClipRect(tileRect(QPoint(tx, ty))); // 只画进本瓦片
+                p.setPen(Qt::NoPen);
+                p.setBrush(m_ink);
+                p.drawPath(s.path);
+            }
+    }
+    QRect tileRect(const QPoint &key) const
+    {
+        return QRect(key.x() * kTile, key.y() * kTile, kTile, kTile);
+    }
+    QPixmap &tileAt(const QPoint &key)
+    {
+        auto it = m_tiles.find(key);
+        if (it == m_tiles.end()) {
+            const qreal dpr = window() ? qreal(window()->devicePixelRatioF()) : 1.0;
+            QPixmap pm(QSize(qCeil(kTile * dpr), qCeil(kTile * dpr)));
+            pm.setDevicePixelRatio(dpr); // Retina：1× 烘焙会整片发糊（审查 R2）
+            pm.fill(Qt::transparent);
+            it = m_tiles.insert(key, pm);
         }
+        return it.value();
     }
 
     void drawStroke(QPainter &p, const QVector<QPointF> &pts, qreal width) const
@@ -366,8 +396,8 @@ private:
     QVector<InkStroke> m_strokes;
     QVector<QPointF> m_activePts;
     QPainterPath m_activeOutline; // 活跃笔画增量轮廓缓存（O(1) 作画）
-    QPixmap m_cache; // 笔迹烘焙缓存（只随内容变化重烘；滚动平移 blit）
-    QPointF m_cacheOrigin; // 缓存在文档坐标的原点
+    static constexpr int kTile = 512;      // 瓦片边长（逻辑像素）
+    QHash<QPoint, QPixmap> m_tiles;       // 笔迹烘焙瓦片（键 = 瓦片网格坐标）
     QPointF m_eraseLast;
     QPainterPath m_eraseUnion; // 橡皮会话管段并集（从起点快照重放全集）
     QVector<InkStroke> m_eraseOriginal; // 会话起点笔迹快照

@@ -642,7 +642,12 @@ void CrtView::renderFrame()
                         const QRgb pxx = m_pending.pixel(x, y);
                         mx = qMax<long>(mx, qRed(pxx) + qGreen(pxx) + qBlue(pxx));
                     }
-                if (mx < 60 && m_pending.height() > 100) {
+                // 拦截只针对"从亮突然变暗"（布局瞬态/视口渲染坏）；
+                // 本来就暗的合法帧（空文档/顶部无字）直接放行——
+                // 审查 P3：旧实现按绝对亮度拦 1.5s = 合法暗文档被冻结
+                const bool suddenDark = m_prevTopLum >= 60 && mx < 60;
+                m_prevTopLum = mx >= 60 ? int(mx) : (suddenDark ? m_prevTopLum : int(mx));
+                if (suddenDark && m_pending.height() > 100) {
                     // 文档有字而快照失字 = 源视口渲染坏了（实机 diag
                     // vpLum=15 的同类）：锤视口重绘 + 布局强制，自愈
                     if (m_source->sourceHasText()) {

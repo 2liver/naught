@@ -44,8 +44,11 @@ static OSStatus hotKeyHandler(EventHandlerCallRef, EventRef, void *user)
         stringByAppendingPathComponent:@"Applications"];
     NSArray *all = [[NSFileManager defaultManager]
         contentsOfDirectoryAtPath:appsDir error:nil];
+    // 白名单（审查 R3）：只开官方双版本，误开 naught 2.app/naught-old.app
+    // 等残留副本；未来主版本改名沿用 naught 前缀即可自动纳入
+    NSSet *allow = [NSSet setWithArray:@[ @"naught.app", @"naught-preview.app" ]];
     for (NSString *name in all) {
-        if (![name hasPrefix:@"naught"] || ![name hasSuffix:@".app"])
+        if (![allow containsObject:name])
             continue;
         NSString *app = [appsDir stringByAppendingPathComponent:name];
         NSURL *url = [NSURL fileURLWithPath:app];

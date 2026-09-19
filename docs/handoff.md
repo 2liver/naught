@@ -125,6 +125,13 @@ NAUGHT_FREEZE 探针(五配方 + 三自愈负向验证)留在 selftest 内。**�
 
 待办（下轮）：画布缓存 tile 化（OOM 风险）、agent 通配全开收窄（用户四轮拍板保留）、crt.frag.full/probe 黄金参考与主 shader 脱节。
 
+## 3.12 第十二轮（待办清空）
+
+1. 画布烘焙缓存 → 分块 tile（512 逻辑px）：内存有界（上下各一笔 = 2 瓦片，旧整幅 = 全文高度 pixmap = OOM）；endStroke 增量烘焙（只烘新笔画覆盖的瓦片，每笔 O(覆盖瓦片) 而非 O(全部笔画)）；Retina DPR 按瓦片设置。
+2. agent ⌃⇧⌘N 通配 `naught*.app` → 白名单 {naught.app, naught-preview.app}（误开残留副本修复；未来主版本沿用 naught 前缀自动纳入）。
+3. 黄金参考 crt.frag.full/.probe + 三个探针工具（glshader_probe/rhi_probe/analyze_png）= 与主 shader 脱节的孤儿，已删除（git 历史可恢复）。
+4. 黑帧拦截 → "突然变暗"判定：只拦从亮变暗的帧（布局瞬态/视口坏），本来就暗的合法帧（空文档/顶部无字）直接放行——旧绝对阈值误拦 1.5s 修复。
+
 ## 4. 待修清单(按优先级)
 
 1. **常驻光效微调**:crt.frag 的 18% 帐篷模糊等用户拍板浓度。
