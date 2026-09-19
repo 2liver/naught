@@ -3787,6 +3787,60 @@ bool Editor::selftest()
                 return false;
             }
         }
+        // ============ NAUGHT_EDGE：裸 Shift+↑ 选区 + 底行↓↓ 边界 ============
+        if (qEnvironmentVariableIsSet("NAUGHT_EDGE")) {
+            qInfo("EDGE-ENTER");
+            e.setPlainText(QStringLiteral("甲\n乙\n丙\n"));
+            // ① 裸 Shift+↑（无预选区）→ 必须有选区
+            {
+                QTextCursor c(e.document());
+                c.setPosition(4); // 丙行首
+                e.setTextCursor(c);
+            }
+            {
+                QKeyEvent ks(QEvent::KeyPress, Qt::Key_Up, Qt::ShiftModifier);
+                QApplication::sendEvent(&e, &ks);
+            }
+            const QTextCursor s1 = e.textCursor();
+            qInfo("EDGE shiftup-nosel sel=[%d,%d] hasSel=%d", s1.selectionStart(),
+                  s1.selectionEnd(), int(s1.hasSelection()));
+            // ② ↓↓ 到底行之后 → 位置必须 = 文末
+            {
+                QTextCursor c(e.document());
+                c.movePosition(QTextCursor::Start);
+                e.setTextCursor(c);
+            }
+            for (int i = 0; i < 6; ++i) {
+                QKeyEvent kd(QEvent::KeyPress, Qt::Key_Down, Qt::NoModifier);
+                QApplication::sendEvent(&e, &kd);
+            }
+            const QTextCursor s2 = e.textCursor();
+            qInfo("EDGE downx6 pos=%d endPos=%d blocks=%d", s2.position(),
+                  e.document()->characterCount() - 1, e.document()->blockCount());
+            // ②b 到底(文末)后按住 Shift+↑ → 必须有选区
+            {
+                QKeyEvent ks(QEvent::KeyPress, Qt::Key_Up, Qt::ShiftModifier);
+                QApplication::sendEvent(&e, &ks);
+            }
+            {
+                const QTextCursor s3 = e.textCursor();
+                qInfo("EDGE shiftup-at-end sel=[%d,%d] hasSel=%d pos=%d",
+                      s3.selectionStart(), s3.selectionEnd(),
+                      int(s3.hasSelection()), s3.position());
+            }
+            // ②c 文末按住 Shift+↓↓ → 选区状态
+            {
+                QKeyEvent kd(QEvent::KeyPress, Qt::Key_Down, Qt::ShiftModifier);
+                QApplication::sendEvent(&e, &kd);
+            }
+            {
+                const QTextCursor s4 = e.textCursor();
+                qInfo("EDGE shiftdown-at-end sel=[%d,%d] hasSel=%d pos=%d",
+                      s4.selectionStart(), s4.selectionEnd(),
+                      int(s4.hasSelection()), s4.position());
+            }
+            qInfo("EDGE-EXIT");
+        }
         // ============ NAUGHT_YANSEL：言+撤回+Shift上 选区走查 ============
         if (qEnvironmentVariableIsSet("NAUGHT_YANSEL")) {
             qInfo("YANSEL-ENTER");

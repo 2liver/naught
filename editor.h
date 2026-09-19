@@ -2029,8 +2029,19 @@ protected:
                                        | Qt::AltModifier))) {
             QTextCursor c = textCursor();
             const int endPos = document()->characterCount() - 1;
-            if (!c.hasSelection() && c.blockNumber() == document()->blockCount() - 2
-                && c.position() < endPos) {
+            // 光标所在块之后没有内容块 = 光标已在最下行（稳健版：
+            // 旧判 blockCount-2 在文档尾有多个空块时失效 = 用户报
+            // "下下不会到行尾之后"）
+            QTextBlock after = c.block().next();
+            bool hasContentAfter = false;
+            while (after.isValid()) {
+                if (after.length() > 1) {
+                    hasContentAfter = true;
+                    break;
+                }
+                after = after.next();
+            }
+            if (!c.hasSelection() && !hasContentAfter && c.position() < endPos) {
                 c.setPosition(endPos);
                 setTextCursor(c);
                 wakeCaret();
