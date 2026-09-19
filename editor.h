@@ -192,6 +192,15 @@ public:
 
         // 显的自归位补拍（合并式单发；见 applyZoom）
         m_crtSettleTimer.setSingleShot(true);
+        m_machineSettle.setSingleShot(true);
+        connect(&m_machineSettle, &QTimer::timeout, this, [this] {
+            const bool prev = m_settingAscii;
+            m_settingAscii = true;
+            applyZoom(); // 字体随机器（重排只此一次）
+            if (m_asciiActive)
+                replaceAsciiArt(); // 画布在场 → 按新机器重印
+            m_settingAscii = prev;
+        });
         connect(&m_crtSettleTimer, &QTimer::timeout, this, [this] {
             if (m_crt && m_crtView)
                 m_crtView->markDirty();
@@ -1259,12 +1268,9 @@ public:
         m_machine = (m_machine + 1) % 4; // 琥珀 → 绿磷 → C64 → IBM PC → 琥珀
         const bool prev = m_settingAscii;
         m_settingAscii = true; // 高亮器 rehighlight 会发 contentsChanged——程序操作
-        applyScheme();
-        applyZoom(); // 字体随机器切换（Fusion Pixel ↔ VT323）
+        applyScheme(); // 调色板即时（便宜）
         if (m_crtView)
             m_crtView->flushHistory(); // 旧机磷光幽灵清零：切机瞬间画面即新机
-        if (m_asciiActive)
-            replaceAsciiArt(); // 画布在场 → 按新机器重印（真彩 ↔ 单色即时切换）
         viewport()->update();
         if (m_canvas)
             m_canvas->update();
@@ -1273,6 +1279,10 @@ public:
         if (m_crtView)
             m_crtView->markDirty(true);
         m_settingAscii = prev;
+        // 重活合并（用户报：⌘⇧M 连点切机会卡死一会——旧版每拍一次
+        // 全文档重排 + 画布重印，按住自动重复把主线程排队堵死）。
+        // 字体应用/画布重印推迟到停顿 200ms 后，连点期间只做一次
+        m_machineSettle.start(200);
     }
 
     // 屏幕实体（原实验功能，M4.5 并入）：追随视角解锁（非锁定）时生效
@@ -2933,6 +2943,7 @@ private:
     static inline QString s_c64Family;  // 出厂 C64：Press Start 2P（OFL，qrc）
     static inline QHash<QString, QString> s_registeredFonts; // 已注册字体文件 → 族名（去重缓存）
     QTimer m_crtSettleTimer;
+    QTimer m_machineSettle;
     QTimer m_scrollSettle;  // 滚动停稳计时：结束后补全量快照
     bool m_scrolling = false;
     bool m_crtGridActive = false; // 显·机器原生网格态：resize 重拟合

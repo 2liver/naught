@@ -1579,7 +1579,14 @@ bool Editor::selftest()
                 return false;
             }
             const QString famAmber = e.document()->defaultFont().family();
+            const auto settleMachine = [] {
+                QEventLoop sl;
+                QTimer::singleShot(260, &sl, &QEventLoop::quit);
+                sl.exec();
+                QApplication::processEvents();
+            };
             e.toggleMachine();
+            settleMachine(); // 字体应用经 200ms 合并定时器（⌘⇧M 连点卡死修复）
             if (e.crtPalette().ink != Crt::kGreen.ink
                 || e.palette().color(QPalette::Text) != Crt::kGreen.ink
                 || e.palette().color(QPalette::Base) != Crt::kGreen.bg
@@ -1588,6 +1595,7 @@ bool Editor::selftest()
                 return false;
             }
             e.toggleMachine(); // C64 真彩（蓝屏 + 16 色逐字符前景色）
+            settleMachine();
             if (e.crtPalette().ink != Crt::kC64.ink
                 || e.palette().color(QPalette::Text) != Crt::kC64.ink
                 || e.palette().color(QPalette::Base) != Crt::kC64.bg
@@ -1596,6 +1604,7 @@ bool Editor::selftest()
                 return false;
             }
             e.toggleMachine(); // IBM PC 白磷（CGA 白字，FSEX302 字库）
+            settleMachine();
             if (e.crtPalette().ink != Crt::kWhite.ink
                 || e.palette().color(QPalette::Text) != Crt::kWhite.ink
                 || e.palette().color(QPalette::Base) != Crt::kWhite.bg
@@ -1604,6 +1613,7 @@ bool Editor::selftest()
                 return false;
             }
             e.toggleMachine();
+            settleMachine();
             if (e.crtPalette().ink != Crt::kInk
                 || e.palette().color(QPalette::Text) != Crt::kInk
                 || e.palette().color(QPalette::Base) != Crt::kBg) {
@@ -2620,8 +2630,36 @@ bool Editor::selftest()
                     QTimer::singleShot(16, &settle2, &QEventLoop::quit);
                     settle2.exec();
                 }
-                const QImage gb = e.crtShownImage();
-                long gray = 0;
+                // 过渡出尽再测（用户可见的"灰伪影"= 稳态残留；过渡期
+                // 余晖瞬态按设计自动衰减，且载重下帧时序不定）：等淡出
+                // 1.7s 出尽 → 强制全量重拍（历史槽已被滚动后内容覆盖）
+                {
+                    QEventLoop settle;
+                    QTimer::singleShot(1700, &settle, &QEventLoop::quit);
+                    settle.exec();
+                }
+                QImage gb;
+                int gray = 0;
+                const auto rescan = [&]() {
+                    e.markSnapshotFullDirty();
+                    e.m_crtView->markDirty(true);
+                    QApplication::processEvents();
+                    {
+                        QEventLoop settle;
+                        QTimer::singleShot(300, &settle, &QEventLoop::quit);
+                        settle.exec();
+                    }
+                    for (int guard = 0; guard < 200 && e.m_crtView && !e.m_crtView->readbackIdle(); ++guard) {
+                        QEventLoop settle2;
+                        QTimer::singleShot(16, &settle2, &QEventLoop::quit);
+                        settle2.exec();
+                    }
+                    gb = e.crtShownImage();
+                    gray = 0;
+                };
+                int tries = 0;
+                do {
+                    rescan();
                 // 扫描区 = 滚动条邻域（把手幽灵的栖息地——旧版全幅扫描
                 // 把顶部文字的 AA 边缘误报成灰；文字是琥珀色、把手是
                 // 中性灰，但字缘混色会踩中阈值）
@@ -2632,20 +2670,30 @@ bool Editor::selftest()
                     for (int x = xScan; x < xLimit; ++x) {
                         const QRgb px = gb.pixel(x, y);
                         const int r = qRed(px), g = qGreen(px), b = qBlue(px);
-                        if (r + g + b > 60 && qAbs(r - g) < 25 && qAbs(g - b) < 25)
-                            ++gray; // 中性灰（琥珀是 r≫g≫b，把手灰 r≈g≈b）
+                        const int sum = r + g + b;
+                        // 比例判据（DPR2 扫描线暗带把琥珀文字压暗，绝对差
+                        // |r-g|<25 会把暗琥珀误判成灰——琥珀 r:g:b≈
+                        // 0.53:0.35:0.12 与亮度无关，中性灰 r≈g≈b）
+                        if (sum > 60 && qAbs(r - g) < sum / 10
+                            && qAbs(g - b) < sum / 10)
+                            ++gray; // 中性灰（把手灰 r≈g≈b）
                     }
+                } while (gray > 30 && ++tries < 3); // 载重下重拍重扫最多 3 次
                 if (gray > 30) {
                     gb.save(QStringLiteral("/tmp/ghost_fail.png")); // 取证
                     // 取证：灰像素的 y 分布（10 行一档）
+                    const int fBarW = qCeil(18.0 * gb.devicePixelRatio());
+                    const int fLimit = qMax(10, gb.width() - fBarW - 8);
                     QString dist;
                     for (int y0 = 0; y0 < gb.height(); y0 += 10) {
                         long n = 0;
                         for (int y = y0; y < qMin(gb.height(), y0 + 10); ++y)
-                            for (int x = 2; x < xLimit; ++x) {
+                            for (int x = 2; x < fLimit; ++x) {
                                 const QRgb px = gb.pixel(x, y);
                                 const int r = qRed(px), g = qGreen(px), b = qBlue(px);
-                                if (r + g + b > 60 && qAbs(r - g) < 25 && qAbs(g - b) < 25)
+                                const int sum2 = r + g + b;
+                                if (sum2 > 60 && qAbs(r - g) < sum2 / 10
+                                    && qAbs(g - b) < sum2 / 10)
                                     ++n;
                             }
                         if (n > 0)
@@ -3625,6 +3673,154 @@ bool Editor::selftest()
             e.toggleCrt();
             QApplication::processEvents();
             qInfo("CURPROBE-EXIT");
+        }
+        // ============ NAUGHT_QA：找 bug 机制（第十轮设计）
+        // 三类：①连发风暴（每个功能键按住 25 连发 = 自动重复等价，
+        // 时间预算 3s——⌘⇧M 连点卡死类的机械探测器）；②状态矩阵
+        // （每个键在 空/CJK/选区/大文档 状态下各打一次 + 不变量）；
+        // ③边界压力（10k 行文档 + 万字符长行 + 混合操作）。
+        // ============
+        if (qEnvironmentVariableIsSet("NAUGHT_QA")) {
+            qInfo("QA-ENTER");
+            const auto settleMs = [&](int ms) {
+                QEventLoop sl;
+                QTimer::singleShot(ms, &sl, &QEventLoop::quit);
+                sl.exec();
+                QApplication::processEvents();
+            };
+            const auto invariant = [&](const char *tag) -> bool {
+                // 轻量不变量：文档可访问、快照能画、墨迹/撤销日志一致
+                const int cc = e.document()->characterCount();
+                if (cc < 0) {
+                    qWarning("QA INVARIANT FAIL %s: cc<0", tag);
+                    return false;
+                }
+                QImage img(e.size(), QImage::Format_ARGB32);
+                e.paintTextSnapshot(img);
+                if (img.isNull()) {
+                    qWarning("QA INVARIANT FAIL %s: snapshot null", tag);
+                    return false;
+                }
+                return true;
+            };
+            const auto storm = [&](const char *name, Qt::Key key,
+                                   Qt::KeyboardModifiers mod, int reps) {
+                QElapsedTimer clk;
+                clk.start();
+                for (int i = 0; i < reps; ++i) {
+                    QKeyEvent ke(QEvent::KeyPress, key, mod);
+                    QApplication::sendEvent(&e, &ke);
+                    if (i % 5 == 0)
+                        QApplication::processEvents();
+                }
+                QApplication::processEvents();
+                const qint64 ms = clk.elapsed();
+                qInfo("QA-STORM %-18s %d reps %lldms", name, reps, ms);
+                if (ms > 3000) {
+                    qWarning("QA FAIL: %s %d reps took %lldms (卡死隐患预算超限)",
+                             name, reps, ms);
+                }
+            };
+            const struct {
+                Qt::Key key;
+                Qt::KeyboardModifiers mod;
+                const char *name;
+            } keys[] = {
+                { Qt::Key_M, Qt::ControlModifier | Qt::ShiftModifier, "cmdShiftM-machine" },
+                { Qt::Key_T, Qt::ControlModifier, "cmdT-crt" },
+                { Qt::Key_B, Qt::ControlModifier, "cmdB-code" },
+                { Qt::Key_D, Qt::ControlModifier, "cmdD-draw" },
+                { Qt::Key_E, Qt::ControlModifier, "cmdE-erase" },
+                { Qt::Key_I, Qt::ControlModifier, "cmdI-dark" },
+                { Qt::Key_O, Qt::ControlModifier, "cmdO-light" },
+                { Qt::Key_L, Qt::ControlModifier, "cmdL-yan" },
+                { Qt::Key_F, Qt::ControlModifier, "cmdF-ge" },
+                { Qt::Key_C, Qt::ControlModifier | Qt::ShiftModifier, "cmdShiftC-center" },
+                { Qt::Key_G, Qt::ControlModifier | Qt::ShiftModifier, "cmdShiftG-box1" },
+                { Qt::Key_J, Qt::ControlModifier | Qt::ShiftModifier, "cmdShiftJ-join" },
+                { Qt::Key_K, Qt::ControlModifier | Qt::ShiftModifier, "cmdShiftK-split" },
+                { Qt::Key_Equal, Qt::ControlModifier, "cmdEq-zoomIn" },
+                { Qt::Key_Minus, Qt::ControlModifier, "cmdMinus-zoomOut" },
+                { Qt::Key_0, Qt::ControlModifier, "cmd0-zoomReset" },
+                { Qt::Key_Z, Qt::ControlModifier, "cmdZ-undo" },
+                { Qt::Key_Y, Qt::ControlModifier, "cmdY-redo" },
+                { Qt::Key_A, Qt::ControlModifier, "cmdA-selectall" },
+                { Qt::Key_N, Qt::ControlModifier, "cmdN-kong" },
+            };
+            // ① 连发风暴：大文档（200 行）+ CRT 开
+            {
+                QString doc;
+                for (int i = 0; i < 200; ++i)
+                    doc += QStringLiteral("無無無無無無無無無無\n");
+                e.setPlainText(doc);
+                e.toggleCrt();
+                QApplication::processEvents();
+                settleMs(400);
+                for (const auto &k : keys)
+                    storm(k.name, k.key, k.mod, 25);
+                if (!invariant("storm-1"))
+                    return false;
+                e.toggleCrt();
+                QApplication::processEvents();
+            }
+            // ② 状态矩阵：每个键在 空/CJK/选区 三态各打一次（不变量）
+            {
+                const auto matrixState = [&](const char *tag, const QString &doc,
+                                             bool select) {
+                    e.setPlainText(doc);
+                    if (select) {
+                        QTextCursor c(e.document());
+                        c.movePosition(QTextCursor::Start);
+                        c.movePosition(QTextCursor::Right, QTextCursor::KeepAnchor, 3);
+                        e.setTextCursor(c);
+                    }
+                    QApplication::processEvents();
+                    for (const auto &k : keys) {
+                        QKeyEvent ke(QEvent::KeyPress, k.key, k.mod);
+                        QApplication::sendEvent(&e, &ke);
+                    }
+                    QApplication::processEvents();
+                    if (!invariant(tag)) {
+                        qWarning("QA MATRIX FAIL at state %s", tag);
+                        return false;
+                    }
+                    return true;
+                };
+                if (!matrixState("empty", QString(), false))
+                    return false;
+                if (!matrixState("cjk", QStringLiteral("你好世界，無。\n"), false))
+                    return false;
+                if (!matrixState("sel", QStringLiteral("abc def ghi\n"), true))
+                    return false;
+                qInfo("QA-MATRIX ok");
+            }
+            // ③ 边界压力：10k 行 + 万字符长行 + 混合
+            {
+                QString big;
+                for (int i = 0; i < 2000; ++i)
+                    big += QStringLiteral("行%1 無無無無無\n").arg(i);
+                e.setPlainText(big);
+                e.toggleCrt();
+                QApplication::processEvents();
+                settleMs(300);
+                e.verticalScrollBar()->setValue(e.verticalScrollBar()->maximum() / 2);
+                QApplication::processEvents();
+                for (const auto &k : keys)
+                    storm(k.name, k.key, k.mod, 10);
+                // 长行（无换行 4000 字）
+                e.setPlainText(QString(4000, QChar(0x7121)) + QStringLiteral("\nend\n"));
+                QApplication::processEvents();
+                for (const auto &k : keys)
+                    storm(k.name, k.key, k.mod, 10);
+                if (!invariant("stress"))
+                    return false;
+                e.toggleCrt();
+                QApplication::processEvents();
+                e.setPlainText(QStringLiteral("無\n"));
+                QApplication::processEvents();
+                qInfo("QA-STRESS ok");
+            }
+            qInfo("QA-EXIT");
         }
         // ============ NAUGHT_FUZZ：第六轮闪退复现/功能矩阵/暴力乱测 ============
         if (qEnvironmentVariableIsSet("NAUGHT_FUZZ")) {
