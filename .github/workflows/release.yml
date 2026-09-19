@@ -97,6 +97,7 @@ jobs:
         if: runner.os == 'macOS'
         env:
           QT_QPA_PLATFORM: offscreen
+          NAUGHT_CI: "1"
           NAUGHT_RHI_SKIP: vulkan
         run: ./build/naught.app/Contents/MacOS/naught --selftest > selftest.log 2>&1 || { rc=$?; echo "::error::SELFTEST FAILED rc=$rc"; grep -iE "selftest FAIL" selftest.log | tail -2 | awk '{print "::error::" $0}'; tail -6 selftest.log | awk '{print "::warning::" $0}'; tail -3 /tmp/naught-crt-shader.log 2>/dev/null | awk '{print "::error::shader-log:" $0}'; exit $rc; }
 
@@ -104,6 +105,7 @@ jobs:
         if: runner.os == 'Linux'
         env:
           QT_QPA_PLATFORM: offscreen
+          NAUGHT_CI: "1"
           NAUGHT_RHI_SKIP: vulkan,gles2
         run: ./build/naught --selftest > selftest.log 2>&1 || { rc=$?; echo "::error::SELFTEST FAILED rc=$rc"; grep -iE "selftest FAIL" selftest.log | tail -2 | awk '{print "::error::" $0}'; tail -6 selftest.log | awk '{print "::warning::" $0}'; tail -3 /tmp/naught-crt-shader.log 2>/dev/null | awk '{print "::error::shader-log:" $0}'; exit $rc; }
 
@@ -112,6 +114,7 @@ jobs:
         shell: pwsh
         run: |
           $env:QT_QPA_PLATFORM = 'offscreen'
+          $env:NAUGHT_CI = '1'
           $env:NAUGHT_RHI_SKIP = 'vulkan,d3d11,d3d12,gles2'
           $env:QT_ASSUME_STDERR_HAS_CONSOLE = '1'
           # KF6 从源码构建安装在 RUNNER_TEMP——selftest 加载 KF6SyntaxHighlighting.dll 需上 PATH

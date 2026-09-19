@@ -222,6 +222,11 @@ public:
                 m_asciiPrinting = false;
                 endAsciiEditBlock(); // 整轮移除+重印 = 一步撤销（防逐行残步）
                 m_settingAscii = false;
+                if (m_asciiReprintPending) {
+                    // 打印期间有切编/缩放要求重印：整轮打完再补一次
+                    m_asciiReprintPending = false;
+                    replaceAsciiArt();
+                }
                 // 打印结束：CRT 一次性追拍（打印期间已解耦，见下）
                 if (m_crtView) {
                     m_crtView->markDirty();
@@ -1723,6 +1728,13 @@ public:
     {
         if (!m_asciiActive || m_asciiImage.isNull())
             return;
+        if (m_asciiPrinting) {
+            // 打印进行中：不杀半截画布（快速切编/缩放会把打印反复
+            // 重置，Windows 实测最后一拍被杀 → 画布吃字）。挂起，
+            // 打印收尾后补一次重印
+            m_asciiReprintPending = true;
+            return;
+        }
         endAsciiEditBlock(); // 上一轮打印块收口（中断时不留开块）
         m_asciiPrintTimer.stop();
         m_asciiPrinting = false;
@@ -3309,7 +3321,8 @@ private:
     QString m_c64User;      // C64 的手选字体（会话内，空 = 出厂）
     QImage m_asciiImage;         // M3：字符画源图
     bool m_asciiActive = false;  // 字符画在场且未被手动编辑
-    bool m_settingAscii = false; // 程序替换期间置位（抑制反激活）
+    bool m_settingAscii = false;
+    bool m_asciiReprintPending = false; // 打印中收到重印请求 → 收尾后补一次 // 程序替换期间置位（抑制反激活）
     qreal m_asciiScale = 1.0;    // 画布倍率（网格行列随倍率）
     int m_asciiBaseCols = 0;     // 插入时刻的基准列数（视口宽/字宽）
     int m_asciiStart = 0;        // 字符画在文档中的起止位置（原位替换用）
