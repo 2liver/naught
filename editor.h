@@ -1988,26 +1988,21 @@ protected:
                 && document()->lastBlock().length() == 1)
                 return;
         }
-        // Shift+↑/↓ = 行式选中（用户报：选中一行后 Shift+上 得到半行——
-        // 基类按列锚定，光标走到上方行的"对应列"而非整行；标准编辑器的
-        // 行式选中 = 选区扩展到整行）。整行对齐：锚点 = 其行行首（向
-        // 下）/行尾（向上），光标 = 其行行尾/行首，不含行尾换行（与
-        // 言/隔的选区约定一致）
-        if ((event->key() == Qt::Key_Up || event->key() == Qt::Key_Down)
+        // Shift+↑ 选区扩展语义（用户拍板）：光标 = 移动端（上端），锚点
+        // 锁在原选区**远端（下端）**——选区 = 上一行对应列起的半截 + 原
+        // 来的整行。旧基类把光标留在原选区下端、锚点在上端 → 原选区被
+        // 吞掉只剩半截（用户报"选中上方半行"）。Shift+↓ 保持基类（光标
+        // 自然为移动端：向下扩展/向上回缩都正确）
+        if (event->key() == Qt::Key_Up
             && event->modifiers() == Qt::ShiftModifier) {
             QTextCursor c = textCursor();
-            c.movePosition(event->key() == Qt::Key_Up ? QTextCursor::Up
-                                                      : QTextCursor::Down,
-                           QTextCursor::KeepAnchor);
-            const bool forward = c.position() > c.anchor();
-            const QTextBlock bA = document()->findBlock(c.anchor());
-            const QTextBlock bP = document()->findBlock(c.position());
-            const int a = forward ? bA.position()
-                                  : bA.position() + bA.length() - 1;
-            const int p = forward ? bP.position() + bP.length() - 1
-                                  : bP.position();
-            c.setPosition(a);
-            c.setPosition(p, QTextCursor::KeepAnchor);
+            if (c.hasSelection()) {
+                const int bottom = qMax(c.anchor(), c.position());
+                const int top = qMin(c.anchor(), c.position());
+                c.setPosition(bottom);   // 先落锚点（下端）
+                c.setPosition(top, QTextCursor::KeepAnchor); // 光标到上端
+            }
+            c.movePosition(QTextCursor::Up, QTextCursor::KeepAnchor);
             setTextCursor(c);
             wakeCaret();
             return;

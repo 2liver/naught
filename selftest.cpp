@@ -3707,13 +3707,32 @@ bool Editor::selftest()
                          sel.selectionStart(), sel.selectionEnd());
                 return false;
             }
-            // 反向：Shift+下 缩回整行
+            // 反向：Shift+下 缩回原选区
             QKeyEvent kd(QEvent::KeyPress, Qt::Key_Down, Qt::ShiftModifier);
             QApplication::sendEvent(&e, &kd);
             const QTextCursor sel2 = e.textCursor();
             if (sel2.selectionStart() != 4 || sel2.selectionEnd() != 5) {
                 qWarning("selftest FAIL: Shift+Down not whole-line [%d,%d] (want 4,5)",
                          sel2.selectionStart(), sel2.selectionEnd());
+                return false;
+            }
+            // 列锚定腿（用户语义：上一行对应列起的半截 + 原来的整行）：
+            // 长行选中间几列，Shift+上 = 上一行同列起 + 原选区
+            e.setPlainText(QStringLiteral("aaaa\nbbbbb\nccccc\n"));
+            {
+                QTextCursor c3(e.document());
+                c3.setPosition(12); // c 的第 2 列
+                c3.setPosition(14, QTextCursor::KeepAnchor); // 选 cc（列 1-2）
+                e.setTextCursor(c3);
+            }
+            QKeyEvent ku2(QEvent::KeyPress, Qt::Key_Up, Qt::ShiftModifier);
+            QApplication::sendEvent(&e, &ku2);
+            const QTextCursor sel3 = e.textCursor();
+            qInfo("LINE-SEL column shiftup=[%d,%d]", sel3.selectionStart(), sel3.selectionEnd());
+            // 期望 6-14：b 的第 2 列(6)起 + 原选区(12-14)
+            if (sel3.selectionStart() != 6 || sel3.selectionEnd() != 14) {
+                qWarning("selftest FAIL: Shift+Up column anchor [%d,%d] (want 6,14)",
+                         sel3.selectionStart(), sel3.selectionEnd());
                 return false;
             }
         }
