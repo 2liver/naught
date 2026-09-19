@@ -93,8 +93,13 @@ public:
     bool sourceHasText() const override { return document()->characterCount() > 2; }
     bool cursorVisible() const override
     {
-        return m_crt && hasFocus() && m_blinkTimer.isActive()
-               && m_blinkHalf % 2 == 0;
+        // 选区期间光标常亮（用户报：Shift 选中时只有光标那一格"透视+
+        // 衣服缓慢渲染"——根因 = 光标眨眼 750ms 亮灭交替 + 两拍后休眠，
+        // 选区上光标时有时无被误读为渲染慢；选区 = 活跃编辑态，光标
+        // 常亮，选区结束后恢复眨眼）
+        return m_crt && hasFocus()
+               && (textCursor().hasSelection()
+                   || (m_blinkTimer.isActive() && m_blinkHalf % 2 == 0));
     }
     QSize sourceViewportSize() const override { return viewport() ? viewport()->size() : QSize(); }
     QWidget *sourceWidget() const override { return const_cast<Editor *>(this); }
@@ -299,13 +304,23 @@ public:
             // 块光标/选区在导航期间冻结（"Shift+方向键无法选中"）
             if (m_crtView)
                 m_crtView->markDirty();
-            // 选区变化 → 全量重拍（用户报：Shift 多行选中时选区高亮
-            // 一个方块一个方块从中间出来——增量脏区逐块补 = 渲染不连续）
-            // + 余晖冲刷（用户报：选中的渲染"慢一拍"像先内衣后衣服——
-            // 余晖 max 混合把选中前的旧文字压在新区上，旧字衰减完才露
-            // 出干净反白；选区 = 状态跳变，与换机/视角跳变同款清零）
+            // 选区变化 → 选区整体区域入脏区 + 余晖冲刷。
+            // ①全量重拍的教训（用户报：逐字慢选渲染慢约 1 秒——每键
+            //   重画整窗，自动重复 15-30 发/秒把帧队列积压到秒级）；
+            // ②旧版只标光标点脏区的教训（Shift 多行选中一块一块从
+            //   中间出来）。正解 = 选区整体包围（含中间整行全宽）一次
+            //   画全，每拍只画选区几行。
+            // ③余晖冲刷（用户报：选区渲染像"先内衣后衣服"——余晖 max
+            //   混合把选中前的旧文字压在新区上；选区 = 状态跳变清零）
             if (textCursor().hasSelection()) {
-                markSnapshotFullDirty();
+                const QTextCursor c = textCursor();
+                QTextCursor sa = c, sb = c;
+                sa.setPosition(c.selectionStart());
+                sb.setPosition(c.selectionEnd());
+                QRect sel = cursorRect(sa).united(cursorRect(sb));
+                sel.setLeft(0); // 中间整行 = 全宽选中
+                sel.setRight(viewport()->width());
+                m_snapDirty |= sel.translated(viewport()->pos());
                 if (m_crtView)
                     m_crtView->flushHistory();
             }
