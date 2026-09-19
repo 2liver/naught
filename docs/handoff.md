@@ -20,8 +20,8 @@ macOS 写作应用「無」(naught),C++/Qt 6.9.3。核心卖点 = 「显」(Cmd+
 - **main 分支 = 受保护,禁止强推**(GH006)。v0.3.15 起 main = preview 合并线(Shift+方向键选区语义全面修复 + CRT 修复沉淀)。旧稳定线 `e2222df`(revert 提交)打标签 `v0.3.14-stable` 存历史。
 - **v0.3.14 = 历史稳定版**(多平台发布:macOS DMG/zip + Windows zip + Linux AppImage,三平台 CI 全绿),GitHub Release 页保留。
 - **preview 分支 = 新功能预览工作线**,后续修复仍先提交 preview,稳定后用户确认再合 main。
-- **启动台双版本**:~/Applications/naught.app =「無」稳定版 v0.3.14;~/Applications/naught-preview.app =「無·预览」预览版(独立 bundle ID com.2liver.naught.preview——同 ID 会被 LaunchServices 覆盖注册,只显示一个)。构建目录已加 .noindex(防 Spotlight 把 build 的 naught.app 抢注)。
-- **⌃⇧⌘N 愿景(用户五轮记录)**:当前代理(naught_agent.mm)枚举 ~/Applications 下 naught*.app 前缀逐个 LSOpen——双版本时代同时召唤两个。**预览版将来替换为主版本时,保持 naught 前缀即可自动召唤它**(改名成别的要同步改代理枚举前缀)。
+- **启动台单版本**(v0.3.15 统一):~/Applications/naught.app =「無」正式版 0.3.15(com.2liver.naught)。预览版 naught-preview.app 已退役删除(LaunchServices 反注册 + 偏好/存档状态清理)。构建目录已加 .noindex(防 Spotlight 把 build 的 naught.app 抢注)。
+- **⌃⇧⌘N 愿景(用户五轮记录)**:代理(naught_agent.mm)枚举 ~/Applications 下 naught*.app 前缀逐个 LSOpen——单版本时代即召唤唯一正式版(改名成别的要同步改代理枚举前缀)。
 - CI:release 管线只对指向 main 尖端的 tag 全量构建发布;preview 的 tag 不会自动发版。
 
 ## 2. 用户三轮反馈全记录(都是要修的)
