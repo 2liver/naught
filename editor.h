@@ -1279,6 +1279,13 @@ public:
         if (m_crtView)
             m_crtView->markDirty(true);
         m_settingAscii = prev;
+        // 换机自动对齐机型原生网格（用户要求：等同自动 ⌘0）——字体
+        // 尺寸随机型即刻正确（80/64/40 列网格公式），字体的实际应用
+        // 走下方合并定时器（重排只做一次）
+        if (m_crt) {
+            m_size = crtGridSize();
+            m_crtGridActive = true;
+        }
         // 重活合并（用户报：⌘⇧M 连点切机会卡死一会——旧版每拍一次
         // 全文档重排 + 画布重印，按住自动重复把主线程排队堵死）。
         // 字体应用/画布重印推迟到停顿 200ms 后，连点期间只做一次
