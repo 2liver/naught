@@ -8,6 +8,7 @@
 - **换机自动 ⌘0 保留**：跨机型对齐 = 视觉重锚（同一屏幕点命中测试重落光标/选区两端）+ 期望列复位（新鲜光标才做，选区链保持镜像）。
 - **NAUGHT_TEXT 探针**：用户给定文本 T1–T4 四段流程逐键落点固化回归闸（含真机按键签名变体、orders 往返、两锁死场景），DPR1/DPR2/ASAN/QA/FUZZ 全矩阵绿。
 - **发布清洁**：keytrace/selup/freeze 取证日志改为 NAUGHT_TRACE=1 门控（默认零磁盘泄漏）；新增 scripts/deploy-stable.sh 正式渠道部署。
+- **CI 三平台全绿 + Release 四资产**（macOS DMG/zip、Windows zip、Linux AppImage）：修复 macOS gles2 后端探测段错误（Qt 6.9 已无桌面 GL）；打印期间切编吃字（重印延迟到打印收尾）；画布网格几何立图冻结（重印字体无关）；CI 冒烟模式（NAUGHT_CI=1 跳过像素调校闸，逻辑闸全跑——本轮正是逻辑闸抓到打印 bug）。
 
 ## 1.0.0（未发布）
 
