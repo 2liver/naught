@@ -155,11 +155,14 @@ void CrtView::diagHeartbeat()
         .arg(int(m_frameTimer.isActive()))
         .arg(vpSize).arg(vpLum).arg(pendLum)
         .arg(m_watchdogFires).arg(m_watchdogStreak);
-    // 固定 /tmp：macOS 下 QDir::tempPath = /var/folders/.../T（用户找不到）
-    QFile f(QStringLiteral("/tmp/naught-freeze-diag.log"));
-    if (f.open(QIODevice::Append | QIODevice::Text)) {
-        f.write(line.toUtf8());
-        f.close();
+    // 固定 /tmp：macOS 下 QDir::tempPath = /var/folders/.../T（用户找不到）。
+    // 发布版默认关；NAUGHT_TRACE=1 时落盘取证
+    if (qEnvironmentVariableIsSet("NAUGHT_TRACE")) {
+        QFile f(QStringLiteral("/tmp/naught-freeze-diag.log"));
+        if (f.open(QIODevice::Append | QIODevice::Text)) {
+            f.write(line.toUtf8());
+            f.close();
+        }
     }
     qWarning("%s", qPrintable(line));
     // 自愈锤：视口重绘（可能打破"视口渲染为空"）+ 快照作废全量重拍

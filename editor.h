@@ -2025,9 +2025,9 @@ protected:
 
     void keyPressEvent(QKeyEvent *event) override
     {
-        // 真机按键追踪（取证期临时埋点：定位"Shift+↑ 分支未执行"——
+        // 真机按键追踪（发布版默认关；NAUGHT_TRACE=1 时落盘取证——
         // 记录每个键 + 修饰符 + 应用路径，旋转保留最近 300 条）
-        {
+        if (qEnvironmentVariableIsSet("NAUGHT_TRACE")) {
             static int keyCount = 0;
             if (++keyCount % 50 == 1) {
                 QFile fk(QStringLiteral("/tmp/naught-keytrace.log"));
@@ -2150,9 +2150,9 @@ protected:
                 wakeCaret();
                 return;
             }
-            // 真机取证（用户报：选区语义与离屏探针不符，反复确认全新
-            // 进程仍复现——把每次 Shift+↑ 的前后状态落盘，供定位）
-            {
+            // 真机取证（发布版默认关；NAUGHT_TRACE=1 时把每次 Shift+↑
+            // 的前后状态落盘，供定位）
+            if (qEnvironmentVariableIsSet("NAUGHT_TRACE")) {
                 const QTextCursor pre = c;
                 const QTextBlock bPre = document()->findBlock(pre.selectionStart());
                 const QTextBlock bPreE = document()->findBlock(pre.selectionEnd());
@@ -2232,12 +2232,14 @@ protected:
                 const QTextCursor now = textCursor();
                 if (now.position() != m_selPath.last())
                     m_selPath.append(now.position()); // 入栈 = 镜像回弹依据
-                QFile f(QStringLiteral("/tmp/naught-selup-diag.log"));
-                if (f.open(QIODevice::Append | QIODevice::Text)) {
-                    f.write(QStringLiteral("SELUP after=[%1,%2 a=%3 p=%4]\n")
-                        .arg(now.selectionStart()).arg(now.selectionEnd())
-                        .arg(now.anchor()).arg(now.position()).toUtf8());
-                    f.close();
+                if (qEnvironmentVariableIsSet("NAUGHT_TRACE")) {
+                    QFile f(QStringLiteral("/tmp/naught-selup-diag.log"));
+                    if (f.open(QIODevice::Append | QIODevice::Text)) {
+                        f.write(QStringLiteral("SELUP after=[%1,%2 a=%3 p=%4]\n")
+                            .arg(now.selectionStart()).arg(now.selectionEnd())
+                            .arg(now.anchor()).arg(now.position()).toUtf8());
+                        f.close();
+                    }
                 }
             }
             wakeCaret();
