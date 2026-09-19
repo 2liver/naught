@@ -2070,12 +2070,13 @@ protected:
             // 容忍 ⌘（按键追踪取证：用户按 ⌘Z 后手指还压在 ⌘ 上，实际
             // 按键 = ⌘⇧↑——⌘ 是上一快捷键的残留，不得改变选区语义）
             QTextCursor c = textCursor();
-            // 回撤（用户报：从行中出发 Shift↓ 下移选区再 Shift↑ 返回，
-            // 没返回光标处而是奔更上行——选区围绕光标落点复原）：上一
-            // 次是下移 → 这次上移 = 原路返回（基类语义，光标即移动端）
+            // 回撤（用户拍板：从别的选区回归光标，应先是一个"只有光标、
+            // 无选区"的状态——选区围绕光标落点复原，一步收拢回落点；
+            // 再按才是新的扩展）
             if (m_shiftSelDir == 1 && c.hasSelection()) {
-                moveCursor(QTextCursor::Up, QTextCursor::KeepAnchor);
-                m_shiftSelDir = -1;
+                c.setPosition(c.anchor()); // 选区清空，光标回落点
+                setTextCursor(c);
+                m_shiftSelDir = 0;
                 wakeCaret();
                 return;
             }
@@ -2150,8 +2151,16 @@ protected:
             && (event->modifiers() & Qt::ShiftModifier)
             && !(event->modifiers() & Qt::MetaModifier)
             && !(event->modifiers() & (Qt::ControlModifier | Qt::AltModifier))) {
-            // 纯 Shift+↓：尾行且无选区 → 选到文末（用户报"尾行没选区"）
+            // 纯 Shift+↓：尾行且无选区 → 选到文末（用户报"尾行没选区"）；
+            // 有选区且上一次是上移 = 回撤（整行粒度收拢，块尾到块尾）
             QTextCursor c = textCursor();
+            if (c.hasSelection() && m_shiftSelDir == -1) {
+                c.setPosition(c.anchor()); // 回撤：一步收拢回落点（同 Shift+↑）
+                setTextCursor(c);
+                m_shiftSelDir = 0;
+                wakeCaret();
+                return;
+            }
             if (!c.hasSelection()) {
                 const int endPos = document()->characterCount() - 1;
                 QTextBlock after = c.block().next();
@@ -2172,7 +2181,7 @@ protected:
                     return;
                 }
             }
-            // 其余情形 = 基类（向下扩展/回缩）
+            m_shiftSelDir = 1; // 其余情形 = 基类（向下扩展），记方向
         }
         if (event->key() == Qt::Key_Down
             && (event->modifiers() & Qt::ShiftModifier)

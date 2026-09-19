@@ -3794,13 +3794,15 @@ bool Editor::selftest()
                          sel.selectionStart(), sel.selectionEnd());
                 return false;
             }
-            // 反向：Shift+下 缩回原选区
+            // 反向：Shift+下 = 回撤一步收拢回落点（用户拍板：先"只有光标
+            // 无选区"，再按才是新扩展）
             QKeyEvent kd(QEvent::KeyPress, Qt::Key_Down, Qt::ShiftModifier);
             QApplication::sendEvent(&e, &kd);
             const QTextCursor sel2 = e.textCursor();
-            if (sel2.selectionStart() != 4 || sel2.selectionEnd() != 5) {
-                qWarning("selftest FAIL: Shift+Down not whole-line [%d,%d] (want 4,5)",
-                         sel2.selectionStart(), sel2.selectionEnd());
+            if (sel2.hasSelection() || sel2.position() != 5) {
+                qWarning("selftest FAIL: Shift+Down reversal not collapse-to-anchor "
+                         "[%d,%d] pos=%d (want no-sel pos=5)",
+                         sel2.selectionStart(), sel2.selectionEnd(), sel2.position());
                 return false;
             }
             // 列锚定腿（用户语义：上一行对应列起的半截 + 原来的整行）：
@@ -4061,6 +4063,81 @@ bool Editor::selftest()
                   sel.selectionStart(), sel.selectionEnd(),
                   e.cursorRect().x(), selStartCell.x());
             qInfo("ALIGN-EXIT");
+        }
+        // ============ NAUGHT_EXACT：用户原话配方逐字复现 ============
+        if (qEnvironmentVariableIsSet("NAUGHT_EXACT")) {
+            qInfo("EXACT-ENTER");
+            const auto settleMs = [&](int ms) {
+                QEventLoop sl;
+                QTimer::singleShot(ms, &sl, &QEventLoop::quit);
+                sl.exec();
+                QApplication::processEvents();
+            };
+            const auto dump = [&](const char *tag) {
+                QTextCursor c = e.textCursor();
+                qInfo("EXACT %s sel=[%d,%d] anchor=%d pos=%d text=[%s]",
+                      tag, c.selectionStart(), c.selectionEnd(), c.anchor(), c.position(),
+                      qPrintable(e.toPlainText().left(30)
+                                     .replace(QLatin1Char('\n'), QLatin1Char('|'))));
+            };
+            const auto key = [&](Qt::Key k, Qt::KeyboardModifiers m) {
+                QKeyEvent ke(QEvent::KeyPress, k, m);
+                QApplication::sendEvent(&e, &ke);
+                QApplication::processEvents();
+            };
+            e.toggleCrt();
+            QApplication::processEvents();
+            e.show();
+            e.setFocus();
+            e.resize(700, 400);
+            QApplication::processEvents();
+            // 配方1：顶上有空行，光标在非首行（b 行中）
+            e.setPlainText(QStringLiteral("\nbbbbb\nccccc\n"));
+            {
+                QTextCursor c(e.document());
+                c.setPosition(4); // b 行中（第 4 个字符）
+                e.setTextCursor(c);
+            }
+            dump("P1-start");
+            for (int i = 0; i < 3; ++i) {
+                key(Qt::Key_Up, Qt::ShiftModifier);
+                dump("P1-shiftup");
+            }
+            // 配方2：从行中出发 ↓ 下移选区，再 ↑ 返回
+            e.setPlainText(QStringLiteral("aaaa\nbbbbb\nccccc\n"));
+            {
+                QTextCursor c(e.document());
+                c.setPosition(12); // c 行中
+                e.setTextCursor(c);
+            }
+            dump("P2-start");
+            key(Qt::Key_Down, Qt::ShiftModifier);
+            dump("P2-shiftdown");
+            for (int i = 0; i < 2; ++i) {
+                key(Qt::Key_Up, Qt::ShiftModifier);
+                dump("P2-shiftup");
+            }
+            // 配方3：光标在尾符后 → Shift+↑ ×2 → 切机(⌘⇧M) → Shift+↓ ×2
+            e.setPlainText(QStringLiteral("aaaa\nbbbbb\nccccc\n"));
+            {
+                QTextCursor c(e.document());
+                c.setPosition(e.document()->characterCount() - 2); // 尾符后（文末换行前）
+                e.setTextCursor(c);
+            }
+            dump("P3-start");
+            key(Qt::Key_Up, Qt::ShiftModifier);
+            dump("P3-up1");
+            key(Qt::Key_Up, Qt::ShiftModifier);
+            dump("P3-up2");
+            key(Qt::Key_M, Qt::ControlModifier | Qt::ShiftModifier); // ⌘⇧M 换机
+            dump("P3-switch");
+            settleMs(400);
+            dump("P3-settled");
+            key(Qt::Key_Down, Qt::ShiftModifier);
+            dump("P3-down1");
+            key(Qt::Key_Down, Qt::ShiftModifier);
+            dump("P3-down2");
+            qInfo("EXACT-EXIT");
         }
         // ============ NAUGHT_REVERSE：空顶行跳过 + 下移再上返 取证 ============
         if (qEnvironmentVariableIsSet("NAUGHT_REVERSE")) {
