@@ -38,12 +38,25 @@ static void agentLog(NSString *msg)
 static OSStatus hotKeyHandler(EventHandlerCallRef, EventRef, void *user)
 {
     NSString *mainApp = (__bridge NSString *)user;
-    agentLog([@"hotkey fired: opening " stringByAppendingString:mainApp]);
-    NSURL *url = [NSURL fileURLWithPath:mainApp];
-    CFURLRef cfurl = (CFURLRef)CFBridgingRetain(url);
-    const OSStatus rc = LSOpenCFURLRef(cfurl, NULL);
-    CFRelease(cfurl);
-    agentLog([NSString stringWithFormat:@"LSOpen result: %d", (int)rc]);
+    // 双版本（用户四轮拍板）：⌃⇧⌘N 同时召唤 ~/Applications 下全部
+    // naught*.app（稳定版「無」+ 预览版「無·预览」）——每个都 LSOpen
+    NSString *appsDir = [NSHomeDirectory()
+        stringByAppendingPathComponent:@"Applications"];
+    NSArray *all = [[NSFileManager defaultManager]
+        contentsOfDirectoryAtPath:appsDir error:nil];
+    // 白名单（审查 R3）：只开官方双版本，误开 naught 2.app/naught-old.app
+    // 等残留副本；未来主版本改名沿用 naught 前缀即可自动纳入
+    NSSet *allow = [NSSet setWithArray:@[ @"naught.app", @"naught-preview.app" ]];
+    for (NSString *name in all) {
+        if (![allow containsObject:name])
+            continue;
+        NSString *app = [appsDir stringByAppendingPathComponent:name];
+        NSURL *url = [NSURL fileURLWithPath:app];
+        CFURLRef cfurl = (CFURLRef)CFBridgingRetain(url);
+        const OSStatus rc = LSOpenCFURLRef(cfurl, NULL);
+        CFRelease(cfurl);
+        agentLog([NSString stringWithFormat:@"opened %@ (%d)", app, (int)rc]);
+    }
     return noErr;
 }
 

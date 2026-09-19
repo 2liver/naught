@@ -71,6 +71,35 @@ class Editor : public QPlainTextEdit, public CrtSnapshotSource {
 public:
     // CrtSource 几何（窄接口）：
     QRect sourceRect() const override { return rect(); }
+    QRect cursorCellRect() const override
+    {
+        QRect cell = cursorRect(textCursor());
+        // 块宽 = max(标准格宽, 光标位字符的推进宽)：窄字符（i/l/标点）
+        // 用满格块（防细窄竖条），宽字符（CJK 双格）整字覆盖（用户报
+        // "压在字上压不全、只有半边字"——旧版两版各错一边，取 max 两边都对）
+        const QChar ch = document()->characterAt(textCursor().position());
+        const qreal charAdv = (ch.isNull() || ch == QChar::ParagraphSeparator)
+                                  ? 0.0
+                                  : fontMetrics().horizontalAdvance(ch);
+        const qreal cellAdv = fontMetrics().horizontalAdvance(QLatin1Char('M'));
+        cell.setWidth(qMax(1, qCeil(qMax(cellAdv, charAdv))));
+        return cell.translated(viewport()->pos());
+    }
+    bool cursorOnGlyph() const override
+    {
+        const QChar ch = document()->characterAt(textCursor().position());
+        return !ch.isNull() && ch != QChar::ParagraphSeparator;
+    }
+    bool sourceHasText() const override { return document()->characterCount() > 2; }
+    bool cursorVisible() const override
+    {
+        // 选区激活时光标不叠加（用户报：光标那格"透明的、没有选中该有
+        // 的样子"——块光标对已反相的选区二次反相 = 还原成普通字 = 亮块
+        // 里的洞；选区本身就是那一格该有的样子，光标退场，选区结束
+        // 后恢复眨眼块光标）
+        return m_crt && hasFocus() && !textCursor().hasSelection()
+               && m_blinkTimer.isActive() && m_blinkHalf % 2 == 0;
+    }
     QSize sourceViewportSize() const override { return viewport() ? viewport()->size() : QSize(); }
     QWidget *sourceWidget() const override { return const_cast<Editor *>(this); }
     CrtConfig config() const override
@@ -82,6 +111,10 @@ public:
         c.viewLocked = m_viewLock;
         c.screenEntity = m_crt && !m_viewLock;
         c.lastMouse = m_lastMouse;
+        c.viewMoving = m_crt && m_mouseMoveClock.isValid() && m_mouseMoveClock.elapsed() < 150;
+        c.typing = m_crt && m_inputClock.isValid() && m_inputClock.elapsed() < 300;
+        c.drawing = m_crt && m_inkSession; // 涂/擦按住期间
+        c.fading = m_crt && m_fadeTimer.isActive(); // 滚动条淡出中
         return c;
     }
     Editor()
@@ -163,6 +196,10 @@ public:
 
         // 显的自归位补拍（合并式单发；见 applyZoom）
         m_crtSettleTimer.setSingleShot(true);
+        m_machineSettle.setSingleShot(true);
+        connect(&m_machineSettle, &QTimer::timeout, this, [this] {
+            applyMachineSettle();
+        });
         connect(&m_crtSettleTimer, &QTimer::timeout, this, [this] {
             if (m_crt && m_crtView)
                 m_crtView->markDirty();
@@ -238,7 +275,10 @@ public:
 
         // 光标：闪烁由我们自己驱动（原生闪烁器已关，见 main），保证完整对称——
         // 亮 BLINK_HALF_MS / 灭 BLINK_HALF_MS 为一拍，完成 SLEEP_BLINKS 次后恰好休眠，无残拍
-        m_blinkTimer.setSingleShot(true);
+        // 周期触发（子代理审计：旧版 setSingleShot(true) 但 timeout 处理器
+        // 从不重新 start——唤醒后只亮 750ms 就永久熄灭 = 用户报的
+        // "方向键期间光标进入睡眠、以隐形方式移动"的根因）
+        m_blinkTimer.setSingleShot(false);
         connect(&m_blinkTimer, &QTimer::timeout, this, [this] {
             if (++m_blinkHalf >= SLEEP_BLINKS * 2) {
                 m_blinkTimer.stop(); // 第 N 次闪烁的“灭”拍即休眠
@@ -252,8 +292,46 @@ public:
         // P3：光标移动也纳入脏区（旧位置的块光标必须被擦掉——
         // 否则增量快照留下幽灵光标；箭头键移动不触发 contentsChange）
         connect(this, &QPlainTextEdit::cursorPositionChanged, this, [this] {
+            if (!textCursor().hasSelection()) {
+                m_shiftSelDir = 0; // 选区清空 → 方向记忆归零
+                m_selPath.clear(); // 位置栈一并清空
+                m_selBase = -1;
+            } else if (!m_inShiftVert && m_shiftSelDir != 0) {
+                // 链中外部干预（鼠标拖选/撤销恢复/水平方向键等）→ 链失效
+                m_shiftSelDir = 0;
+                m_selPath.clear();
+                m_selBase = -1;
+            }
             if (!m_crt)
                 return;
+            // 子代理审计：方向键导航只标脏区、从不 markDirty——显模式
+            // 块光标/选区在导航期间冻结（"Shift+方向键无法选中"）
+            if (m_crtView)
+                m_crtView->markDirty();
+            // 选区变化 → 选区整体区域入脏区 + 余晖冲刷。
+            // ①全量重拍的教训（用户报：逐字慢选渲染慢约 1 秒——每键
+            //   重画整窗，自动重复 15-30 发/秒把帧队列积压到秒级）；
+            // ②旧版只标光标点脏区的教训（Shift 多行选中一块一块从
+            //   中间出来）。正解 = 选区整体包围（含中间整行全宽）一次
+            //   画全，每拍只画选区几行。
+            // ③余晖冲刷（用户报：选区渲染像"先内衣后衣服"——余晖 max
+            //   混合把选中前的旧文字压在新区上；选区 = 状态跳变清零）
+            if (textCursor().hasSelection()) {
+                if (m_machineSettle.isActive()) {
+                    m_machineSettle.stop();
+                    applyMachineSettle(); // 选区启动前字体落定（列对齐）
+                }
+                const QTextCursor c = textCursor();
+                QTextCursor sa = c, sb = c;
+                sa.setPosition(c.selectionStart());
+                sb.setPosition(c.selectionEnd());
+                QRect sel = cursorRect(sa).united(cursorRect(sb));
+                sel.setLeft(0); // 中间整行 = 全宽选中
+                sel.setRight(viewport()->width());
+                m_snapDirty |= sel.translated(viewport()->pos());
+                if (m_crtView)
+                    m_crtView->flushHistory();
+            }
             const int halo = qCeil(fontMetrics().horizontalAdvance(QLatin1Char('M'))) + 12;
             m_snapDirty |= m_lastCursorRect;
             m_lastCursorRect = cursorRect().translated(viewport()->pos())
@@ -275,8 +353,26 @@ public:
                 return;
             }
             wakeCaret();
-            m_lastWasInk = false;
-            m_undoWasInk = false; // 双栈撤销：文字变化后重做走文档栈（不再误重做笔迹）
+            if (m_crt)
+                m_inputClock.start(); // 输入突发期信号：链节流 + 半分辨率回读
+            // 统一撤销日志（时间序）：真实文字变化 = 一步文字撤销。
+            // 只在文档撤销栈确实记录了这一步时入日志（availableUndoSteps
+            // > 0）——程序性 setPlainText/打印暂停期 = 0，不入日志，
+            // 日志与文档栈永不失步
+            // 撤销/重做驱动的 contentsChange 不入日志（否则撤销会
+            // 被记成新操作并清空重做日志 → 重做失效）
+            if (!m_inUndoRedo && document()->availableUndoSteps() > 0) {
+                // 程序性重写（setPlainText/清空）会清空文档撤销栈——
+                // 日志同步清空（审计风险 2c：陈条目导致空撤）
+                m_undoOps.append(true);
+                m_redoOps.clear();
+                m_inkRedo.clear(); // 审查 P2：文字编辑后墨迹重做栈同步清
+            } else if (!m_inUndoRedo && removed > 0
+                       && document()->availableUndoSteps() == 0) {
+                m_undoOps.clear();
+                m_redoOps.clear();
+                m_inkRedo.clear();
+            }
             // M3：手动编辑 = 字符画回归普通文本（程序打印/替换不受影响）
             if (!m_settingAscii && m_asciiActive) {
                 m_asciiActive = false;
@@ -302,6 +398,13 @@ public:
                 m_excitePos = textCursor().position() - 1;
                 m_exciteClock.start();
             }
+            // 删除时辉光随字退场：激发位落在被删区间内即熄灭——否则
+            // 字删了辉光仍在原地亮 ~1.7s，形状像一个字符幽灵（用户报
+            // "空删后本该被删的字符常驻、渲染不消失"）
+            if (removed > 0 && m_exciteClock.isValid()
+                && m_excitePos >= from && m_excitePos < from + removed) {
+                m_exciteClock.invalidate();
+            }
             m_lastCharCount = cc;
             m_snapDirty |= m_compositor.computeDirty(from, removed, added);
             m_snapDirty |= m_lastCursorRect;
@@ -312,6 +415,9 @@ public:
             m_snapDirty |= m_lastCursorRect;
             // 行号区：文档一变立即重绘，否则清空/换行不会刷新（假行号）
             m_canvas->update();
+            if (m_lineNumberArea)
+                m_lineNumberArea->update(); // 用户报：换行后的行号不显示，
+                // 得再换一行前一行的才出现——行号区缺显式重绘
             updateGutterWidth();
             // 打印期间不解耦的话：每拍标脏 → CRT 全屏快照（余晖+辉光，
             // CPU 大户）霸占主线程 → 打印拍被饿死（全屏 20-30s 的元凶）。
@@ -341,7 +447,15 @@ public:
         });
         connect(verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int) { scrollActivity(); });
         connect(horizontalScrollBar(), &QScrollBar::valueChanged, this, [this](int) { scrollActivity(); });
-        connect(vsb, &ZenScrollBar::hovered, this, [this](bool on) { if (on) scrollActivity(); });
+        connect(vsb, &ZenScrollBar::hovered, this, [this](bool on) {
+            if (on) {
+                scrollActivity();
+                // 悬停加宽 = 把手几何瞬变——冲刷余晖（用户报：鼠标
+                // 从滚动条侧移出再回来，灰伪影紧贴滚动条旁）
+                if (m_crtView)
+                    m_crtView->flushHistory();
+            }
+        });
         connect(hsb, &ZenScrollBar::hovered, this, [this](bool on) { if (on) scrollActivity(); });
         connect(vsb, &ZenScrollBar::trackClicked, this, [this](QPoint pos) { placeCaretAtEdge(true, pos); });
         connect(hsb, &ZenScrollBar::trackClicked, this, [this](QPoint pos) { placeCaretAtEdge(false, pos); });
@@ -382,8 +496,12 @@ public:
         m_scrollSettle.setSingleShot(true);
         connect(&m_scrollSettle, &QTimer::timeout, this, [this] {
             m_scrolling = false;
-            if (m_crtView)
+            if (m_crtView) {
+                // 停稳冲刷余晖历史：滚动期积累的旧把手位置不得在
+                // 停稳后第一帧复活（审计建议 2）
+                m_crtView->flushHistory();
                 m_crtView->markDirty(true);
+            }
         });
         connect(verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int) {
             m_scrolling = true;
@@ -441,6 +559,9 @@ public:
         beginInkSession();
         m_canvas->clearAll();
         endInkSession();
+        markSnapshotFullDirty(); // 墨水进了光栅快照：清墨必须强制重拍，
+        // 否则 80ms 节流窗口内旧墨迹残留在 CRT 画面上（用户擦除后
+        // 画面滞后 = 本行缺失的根修；暴力闸清墨依赖此标脏）
     }
 
     // 言：选中（或当前）每一行头尾加「」，批量校对打钩；空行跳过；
@@ -513,6 +634,10 @@ public:
             if (b == last)
                 break;
         }
+        if (lines.isEmpty())
+            return; // 全是空行（用户报：非首行空行上按 ⌘F 闪退——
+            // 旧代码 lines.last()/first() 空向量越界 = 段错误；
+            // 负向验证：去掉本守卫 → SIGSEGV 复现）
         QVector<int> inserts;
         // 相邻内容行之间：若中间无空行，必插
         for (int i = 0; i + 1 < lines.size(); ++i) {
@@ -525,9 +650,15 @@ public:
             if (below.isValid() && below.length() > 1)
                 inserts.append(lines.last().position() + lines.last().length() - 1);
         }
-        // 首行之前：插在上一行换行符处（若插本行首会劈块，句柄漂移）
-        if (lines.first().position() > 0 && lines.first().previous().length() > 1)
-            inserts.append(lines.first().position() - 1);
+        // 首行之前：非首行插在上一行换行符处（不劈块）；首行没有
+        // 上一行，直接在文档头插换行符（位置 0）——应用按降序，
+        // 0 最后插，不影响此前各插入点（位置法恒有效，无句柄漂移）
+        if (lines.first().position() > 0) {
+            if (lines.first().previous().length() > 1)
+                inserts.append(lines.first().position() - 1);
+        } else {
+            inserts.append(0);
+        }
         if (inserts.isEmpty())
             return;
         std::sort(inserts.begin(), inserts.end(), std::greater<int>());
@@ -1019,26 +1150,40 @@ public:
 
     void undoAll()
     {
-        if (m_lastWasInk && !m_inkUndo.isEmpty()) {
+        // 统一撤销（时间序）：文字与墨迹按发生顺序一个栈内互穿。
+        // 旧双栈靠 m_lastWasInk 猜"上一操作是不是笔迹"——交叉序列
+        //（笔迹→打字→撤销）会跳过笔迹、撤错目标（用户报：撤回的
+        // 并非想撤回的）。日志法逐条精确回放。
+        if (m_undoOps.isEmpty())
+            return;
+        const bool text = m_undoOps.takeLast();
+        m_redoOps.append(text);
+        if (text) {
+            m_inUndoRedo = true;
+            document()->undo();
+            m_inUndoRedo = false;
+        } else if (!m_inkUndo.isEmpty()) {
             const InkOp op = m_inkUndo.takeLast();
             m_inkRedo.append(op);
             m_canvas->restore(op.before);
-            m_undoWasInk = true;
-            return;
         }
-        m_undoWasInk = false;
-        document()->undo();
     }
 
     void redoAll()
     {
-        if (m_undoWasInk && !m_inkRedo.isEmpty()) {
+        if (m_redoOps.isEmpty())
+            return;
+        const bool text = m_redoOps.takeLast();
+        m_undoOps.append(text);
+        if (text) {
+            m_inUndoRedo = true;
+            document()->redo();
+            m_inUndoRedo = false;
+        } else if (!m_inkRedo.isEmpty()) {
             const InkOp op = m_inkRedo.takeLast();
             m_inkUndo.append(op);
             m_canvas->restore(op.after);
-            return;
         }
-        document()->redo();
     }
 
     bool inkEmpty() const { return m_canvas && m_canvas->snapshot().isEmpty(); }
@@ -1095,7 +1240,26 @@ public:
 
     void toggleMode(Mode m)
     {
+        // 切换前终结进行中的会话（子代理状态机审计的根修）：
+        // 旧版只切模式不清会话——纯 Shift 画的笔画滞留 m_activePts
+        //（橡皮看不见 = 擦不掉）；陈旧的 m_eraseActive/m_eraseOriginal
+        // 残留（新会话不重捕快照 → 整块回滚 = 用户报的"换画笔清空
+        // 内容且无法复原"的数据丢失）
+        if (m_inkSession) {
+            m_canvas->endStroke(); // 有活跃笔画先提交
+            m_canvas->eraseEnd();  // 清擦除态（union/original 复位）
+            const bool hadGrab = m_shiftInkActive;
+            if (m_shiftInkActive)
+                m_shiftInkActive = false;
+            // 真抓取过才释放（审查 R1：不释放会泄漏抓取；无抓取强释放
+            // 会破坏视口渲染——两者都错，只有"有抓取才释放"对）
+            if (hadGrab)
+                viewport()->releaseMouse();
+            endInkSession();
+        }
         m_mode = (m_mode == m) ? Mode::Normal : m;
+        if (m_crtView)
+            m_crtView->markDirty(true); // 模式切换强制重拍（快照及时反映新状态）
         updateModeCursor();
     }
 
@@ -1133,10 +1297,9 @@ public:
         m_machine = (m_machine + 1) % 4; // 琥珀 → 绿磷 → C64 → IBM PC → 琥珀
         const bool prev = m_settingAscii;
         m_settingAscii = true; // 高亮器 rehighlight 会发 contentsChanged——程序操作
-        applyScheme();
-        applyZoom(); // 字体随机器切换（Fusion Pixel ↔ VT323）
-        if (m_asciiActive)
-            replaceAsciiArt(); // 画布在场 → 按新机器重印（真彩 ↔ 单色即时切换）
+        applyScheme(); // 调色板即时（便宜）
+        if (m_crtView)
+            m_crtView->flushHistory(); // 旧机磷光幽灵清零：切机瞬间画面即新机
         viewport()->update();
         if (m_canvas)
             m_canvas->update();
@@ -1145,6 +1308,60 @@ public:
         if (m_crtView)
             m_crtView->markDirty(true);
         m_settingAscii = prev;
+        // 换机自动对齐机型原生网格（自动 ⌘0 保留——用户明确不许移除）：
+        // 字号随机型即刻正确（80/64/40 列网格公式）。跨尺寸的行字符差
+        // 由 applyMachineSettle 的视觉重锚解决（重排后按同一屏幕点重落
+        // 光标/选区两端）
+        if (m_crt) {
+            m_size = crtGridSize();
+            m_crtGridActive = true;
+        }
+        // 重活合并（用户报：⌘⇧M 连点切机会卡死一会——旧版每拍一次
+        // 全文档重排 + 画布重印，按住自动重复把主线程排队堵死）。
+        // 字体应用/画布重印推迟到停顿 200ms 后，连点期间只做一次
+        m_machineSettle.start(200);
+    }
+
+    void applyMachineSettle()
+    {
+        // 换机前的视觉点（自动 ⌘0 保留：每机型字号不同 → 重排 → 行
+        // 字符差。重排后按同一屏幕点命中测试重新落位光标/选区两端 =
+        // 跨机型对齐的根修——用户报"选中的字符与打字光标不对齐"）
+        QPointF curPt, otherPt;
+        const bool hadSel = textCursor().hasSelection();
+        {
+            const QRect r = cursorRect();
+            curPt = r.isValid() ? QPointF(r.center()) : QPointF(-1, -1);
+            if (hadSel) {
+                QTextCursor other = textCursor();
+                other.setPosition(other.anchor());
+                const QRect r2 = cursorRect(other);
+                otherPt = r2.isValid() ? QPointF(r2.center()) : QPointF(-1, -1);
+            }
+        }
+        const bool prev = m_settingAscii;
+        m_settingAscii = true;
+        applyZoom(); // 字体随机器（重排只此一次）
+        if (m_asciiActive)
+            replaceAsciiArt(); // 画布在场 → 按新机器重印
+        m_settingAscii = prev;
+        // 视觉重锚：光标/选区两端落到重排后同一屏幕点的字符
+        if (curPt.x() >= 0) {
+            // 重锚属于链内维护（T4 跨机型镜像依据），不视为外部干预
+            ShiftVertScope sv(m_inShiftVert);
+            QTextCursor ncur = cursorForPosition(curPt.toPoint());
+            if (hadSel && otherPt.x() >= 0) {
+                QTextCursor nother = cursorForPosition(otherPt.toPoint());
+                QTextCursor c = textCursor();
+                c.setPosition(nother.position());
+                c.setPosition(ncur.position(), QTextCursor::KeepAnchor);
+                setTextCursor(c);
+            } else if (textCursor().position() > 0) {
+                QTextCursor c = textCursor();
+                c.setPosition(ncur.position());
+                setTextCursor(c);
+            }
+        }
     }
 
     // 屏幕实体（原实验功能，M4.5 并入）：追随视角解锁（非锁定）时生效
@@ -1580,7 +1797,21 @@ public:
             // 不需要销毁、不需要摘除任何属性——事件分发天然恢复。
             if (m_crtView)
                 m_crtView->hide();
-            viewport()->releaseMouse(); // 防御：抓取会话不跨显模式残留
+            // 不在此处 releaseMouse（第五轮二分定位 + 八轮实机铁证
+            // vpLum=15：无抓取时强释放 → 视口渲染被破坏 → 快照失字 →
+            // 画面冻结/字隐形/删掉的字常驻）。收口与 toggleMode 同款：
+            // 会话终结，真机抓取由 keyReleaseEvent 的 Shift 分支统一释放
+            if (m_shiftInkActive) {
+                m_shiftInkActive = false;
+                if (m_mode == Mode::Draw)
+                    m_canvas->endStroke();
+                else if (m_mode == Mode::Erase)
+                    m_canvas->eraseEnd();
+                endInkSession();
+                viewport()->releaseMouse(); // 真抓取过才释放（审查 R1：
+                // 置 false 后 Shift 释放分支不再放 → 抓取泄漏；此处补放，
+                // 与"无抓取强释放"的对偶都安全）
+            }
             // 仅编模式恢复行号区：非编模式下它是隐藏的残留组件，
             // 无条件 show 会把旧几何的行号叠在首列文字上
             if (m_codeMode && m_lineNumberArea)
@@ -1601,12 +1832,38 @@ public:
 
     void zoom(int delta)
     {
+        m_crtGridActive = false; // 手动缩放退出网格态
         applyAnchoredZoom(m_size + delta); // 缩放字符（字号）——与无图时一致
     }
 
     void zoomTo(qreal size)
     {
         applyAnchoredZoom(size);
+    }
+
+    // CRT 原生网格的单一公式来源：列数（琥珀 80 / 绿磷 64 / C64·IBM 40）
+    // 与窗口宽度 → m_size（activeFont 再乘 1.25 → 像素）。自检断言
+    // 同源调用，不再各自推演（旧版三处重复公式曾各自漂移）。
+    qreal crtGridSize() const
+    {
+        const int cols = (m_machine == 0) ? 80 : (m_machine == 1) ? 64 : 40;
+        if (m_machine != 2)
+            return qMax(6.0, qreal(viewport()->width()) / cols
+                             / (m_machine == 0 ? 1.0 : 1.25));
+        // C64（用户三轮拍板）：全屏 = 封顶 16（像素 20px）——"正常"尺子；
+        // 窗口化 = 尺子 ×（窗口宽/屏宽）——严格按全屏比例缩小对齐，
+        // 永远小于全屏字号。旧版"移除封顶"把全屏好字号一起拖大 = 负优化
+        qreal screenW = 1.0;
+        if (auto *scr = QGuiApplication::primaryScreen())
+            screenW = qMax(1.0, qreal(scr->availableGeometry().width()));
+        const qreal full = qMin(screenW / 50.0, 16.0);
+        const qreal ratio = qBound(0.25, qreal(viewport()->width()) / screenW, 1.0);
+        return qMax(6.0, full * ratio);
+    }
+    // 网格像素字号（activeFont 之后）——自检断言口径
+    int crtGridPixelSize() const
+    {
+        return qMax(6, qRound(crtGridSize() * (m_machine == 0 ? 1.0 : 1.25)));
     }
 
     void zoomReset()
@@ -1617,1528 +1874,22 @@ public:
         }
         if (m_crt) {
             // 显·Cmd+0 = 机器原生网格（原实验·字符网格并入）：琥珀 80 列 /
-            // 绿磷 64 列——真机的"原生分辨率"
-            const int cols = (m_machine == 0) ? 80 : (m_machine == 1) ? 64 : 40;
-            qreal sz = qreal(viewport()->width()) / cols
-                       / (m_machine == 0 ? 1.0 : 1.25);
-            if (m_machine == 2)
-                sz = qMin(sz, 16.0); // C64：真机字符 ≈ 物理 4mm——大窗口不无限放大
-            m_size = qMax(6.0, sz);
+            // 绿磷 64 列 / C64·IBM 40 列——真机的"原生分辨率"。网格态
+            // 跟随窗口宽度（resize 重拟合）。无封顶（旧版 C64 封顶 16 →
+            // 像素 20px）：封顶让窗口 ≥800px 时与全屏字号相等，违反
+            // "窗口化永远小于全屏"（用户明令：窗口模式按全屏比例缩小
+            // 对齐，最起码永远更小）。纯列数网格，字号严格 ∝ 宽度。
+            // 公式单一来源：crtGridPixelSize()（自检同源，不再重复推演）
+            m_size = crtGridSize();
             applyAnchoredZoom(m_size);
+            m_crtGridActive = true;
             return;
         }
         applyAnchoredZoom(m_baseSize);
     }
 
     // 自检（CI/本地验证）：确认 O(1) 缩放、光标最右缘落点、轨道点击转落点均正常。
-    static bool selftest()
-    {
-        qInfo("SELFTEST-ENTER");
-        Editor e;
-        qInfo("SELFTEST-EDITOR-CONSTRUCTED");
-        e.setPlainText(QStringLiteral("無"));
-        const QTextBlock block = e.document()->firstBlock();
-        const qreal h1 = e.document()->documentLayout()->blockBoundingRect(block).height();
-        e.zoomTo(200);
-        const qreal h2 = e.document()->documentLayout()->blockBoundingRect(block).height();
-        if (!(h2 > h1 * 2.0)) {
-            qWarning("selftest FAIL: zoom h1=%f h2=%f", h1, h2);
-            return false;
-        }
-
-        // 累积求"文档 y 处的视觉行行尾"（与 lineEndForY 同一模型，独立实现作真值）
-        auto lineEndAtDocY = [&](qreal docY) -> int {
-            QTextBlock b = e.document()->firstBlock();
-            qreal top = 0;
-            while (b.isValid()) {
-                const QRectF r = e.document()->documentLayout()->blockBoundingRect(b);
-                if (docY < top + r.height()) {
-                    QTextLayout *tl = b.layout();
-                    if (!tl || tl->lineCount() == 0)
-                        return b.position() + b.length() - 1;
-                    const qreal relY = docY - top;
-                    QTextLine ln = tl->lineAt(0);
-                    for (int i = 1; i < tl->lineCount(); ++i) {
-                        const QTextLine l = tl->lineAt(i);
-                        if (relY >= l.y())
-                            ln = l;
-                        else
-                            break;
-                    }
-                    if (ln.textLength() == 0 && b.length() > 1)
-                        return b.position() + b.length() - 1;
-                    if (b == e.document()->lastBlock() && b.length() == 1
-                        && e.document()->characterCount() >= 2)
-                        return e.document()->characterCount() - 2;
-                    return b.position() + ln.textStart() + ln.textLength();
-                }
-                top += r.height();
-                b = b.next();
-            }
-            if (e.document()->lastBlock().length() == 1 && e.document()->characterCount() >= 2)
-                return e.document()->characterCount() - 2;
-            return e.document()->characterCount() - 1;
-        };
-
-        // 光标落点：点击视口最右缘应落在行尾；滚动条轨道点击也应落到行尾
-        e.zoomReset();
-        QString lines;
-        for (int i = 0; i < 40; ++i)
-            lines += QStringLiteral("一二三四五\n");
-        e.setPlainText(lines);
-        e.resize(400, 300);
-        e.show();
-        for (int s = 0; s < 10; ++s) { // 布局沉降：负载高时 resize 竞态（1/6 偶发，加厚）
-            QApplication::processEvents();
-            QEventLoop lp;
-            QTimer::singleShot(10, &lp, &QEventLoop::quit);
-            lp.exec();
-        }
-        const int len = e.document()->firstBlock().length() - 1;
-        QWidget *vp = e.viewport();
-
-        const QPointF edge(vp->width() - 1.0, 10.0);
-        QMouseEvent press(QEvent::MouseButtonPress, edge, vp->mapToGlobal(edge.toPoint()),
-                          Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-        QApplication::sendEvent(vp, &press);
-        if (e.textCursor().positionInBlock() != len) {
-            qWarning("selftest FAIL: viewport edge click lands at %d, want %d",
-                     e.textCursor().positionInBlock(), len);
-            return false;
-        }
-
-        e.moveCursor(QTextCursor::Start);
-        for (int s = 0; s < 3; ++s) { // 滚动条轨道点击前再沉降（范围/几何竞态）
-            QApplication::processEvents();
-            QEventLoop lp;
-            QTimer::singleShot(10, &lp, &QEventLoop::quit);
-            lp.exec();
-        }
-        ZenScrollBar *bar = qobject_cast<ZenScrollBar *>(e.verticalScrollBar());
-        if (bar && bar->isVisible()) {
-            const QPoint tp(5, 5);
-            QMouseEvent tpress(QEvent::MouseButtonPress, QPointF(tp), bar->mapToGlobal(tp),
-                               Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-            QApplication::sendEvent(bar, &tpress);
-            if (e.textCursor().positionInBlock() != len) {
-                qWarning("selftest FAIL: track click lands at %d, want %d",
-                         e.textCursor().positionInBlock(), len);
-                return false;
-            }
-        }
-
-        // 放大 + 横向溢出场景：横滚到最右后，点最右缘仍应落到该行行尾
-        e.setPlainText(QStringLiteral("無無無無無無無無無無\n無無無無無無無無無無\n無無無無無無無無無無\n無無無無無無無無無無\n無無無無無無無無無無\n"));
-        e.zoomTo(200);
-        QApplication::processEvents();
-        QScrollBar *hb = e.horizontalScrollBar();
-        if (hb->isVisible()) {
-            hb->setValue(hb->maximum());
-            QApplication::processEvents();
-            e.moveCursor(QTextCursor::Start);
-            bar = qobject_cast<ZenScrollBar *>(e.verticalScrollBar());
-            if (bar && bar->isVisible()) {
-                const QPoint tp(5, 5);
-                QMouseEvent tpress(QEvent::MouseButtonPress, QPointF(tp), bar->mapToGlobal(tp),
-                                   Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-                QApplication::sendEvent(bar, &tpress);
-                if (e.textCursor().positionInBlock() != 10) {
-                    qWarning("selftest FAIL: scrolled track click lands at %d, want 10",
-                             e.textCursor().positionInBlock());
-                    return false;
-                }
-            }
-        }
-        // 满行换行场景：点最右缘应落在该视觉行行尾（而非最后一个字之前）
-        e.zoomReset();
-        QString longLine;
-        for (int i = 0; i < 40; ++i)
-            longLine += QStringLiteral("無");
-        QString wrapped = longLine + QStringLiteral("\n");
-        for (int i = 0; i < 20; ++i)
-            wrapped += QStringLiteral("短行\n");
-        e.setPlainText(wrapped);
-        e.resize(400, 300);
-        e.show();
-        QApplication::processEvents();
-        {
-            QTextBlock blk = e.document()->firstBlock();
-            QTextLayout *tl = blk.layout();
-            if (tl->lineCount() >= 2) {
-                const QTextLine line0 = tl->lineAt(0);
-                const int want = blk.position() + line0.textStart() + line0.textLength();
-                e.moveCursor(QTextCursor::Start);
-                bar = qobject_cast<ZenScrollBar *>(e.verticalScrollBar());
-                if (bar && bar->isVisible()) {
-                    const QPoint tp(5, 5);
-                    QMouseEvent tpress(QEvent::MouseButtonPress, QPointF(tp), bar->mapToGlobal(tp),
-                                       Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-                    QApplication::sendEvent(bar, &tpress);
-                    if (e.textCursor().position() != want) {
-                        qWarning("selftest FAIL: wrapped track click lands at %d, want %d",
-                                 e.textCursor().position(), want);
-                        return false;
-                    }
-                }
-            }
-        }
-        // 增量打字后立刻点最右缘（不结算事件）：落点仍应是该视觉行行尾
-        e.setPlainText(QString());
-        e.resize(400, 300);
-        e.show();
-        QApplication::processEvents();
-        for (int i = 0; i < 40; ++i)
-            e.insertPlainText(QStringLiteral("無"));
-        e.insertPlainText(QStringLiteral("\n"));
-        for (int i = 0; i < 20; ++i)
-            e.insertPlainText(QStringLiteral("短行\n"));
-        e.moveCursor(QTextCursor::Start);
-        bar = qobject_cast<ZenScrollBar *>(e.verticalScrollBar());
-        if (bar && bar->isVisible()) {
-            const QPoint tp(5, 5);
-            QMouseEvent tpress(QEvent::MouseButtonPress, QPointF(tp), bar->mapToGlobal(tp),
-                               Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-            QApplication::sendEvent(bar, &tpress);
-            const int got = e.textCursor().position();
-            // 结算后求真值
-            QApplication::processEvents();
-            QTextBlock blk2 = e.document()->firstBlock();
-            const QTextLine line0b = blk2.layout()->lineAt(0);
-            const int want = blk2.position() + line0b.textStart() + line0b.textLength();
-            if (got != want) {
-                qWarning("selftest FAIL: fresh-typing track click lands at %d, want %d", got, want);
-                return false;
-            }
-        }
-        // 多点扫描：混合文档（首块换行 + 短行 + 空行）各高度点最右缘都应落该行行尾
-        {
-            QString doc3 = longLine + QStringLiteral("\n");
-            for (int i = 0; i < 10; ++i)
-                doc3 += QStringLiteral("短行\n");
-            doc3 += QStringLiteral("\n"); // 空行
-            for (int i = 0; i < 10; ++i)
-                doc3 += QStringLiteral("又一段\n");
-            e.setPlainText(doc3);
-            e.resize(400, 300);
-            e.show();
-            QApplication::processEvents();
-            bar = qobject_cast<ZenScrollBar *>(e.verticalScrollBar());
-            if (bar && bar->isVisible()) {
-                for (int y : {5, 40, 90, 140, 190, 240}) {
-                    e.moveCursor(QTextCursor::Start);
-                    const QPoint tp(5, y);
-                    QMouseEvent tpress(QEvent::MouseButtonPress, QPointF(tp), bar->mapToGlobal(tp),
-                                       Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-                    QApplication::sendEvent(bar, &tpress);
-                    const int got = e.textCursor().position();
-                    const qreal docY = qreal(y);
-                    const int want = lineEndAtDocY(docY);
-                    if (got != want) {
-                        qWarning("selftest FAIL: sweep y=%d lands at %d, want %d", y, got, want);
-                        return false;
-                    }
-                }
-            }
-        }
-        // 光标矩形与方向键：最后一个字符之后的光标应在右侧，行尾按右不跳行首
-        e.setPlainText(QStringLiteral("你好"));
-        {
-            QTextCursor c(e.document());
-            c.setPosition(2); // “好”之后
-            e.setTextCursor(c);
-            const QRect cr = e.cursorRect();
-            if (cr.x() <= 4) {
-                qWarning("selftest FAIL: cursorRect after last char at x=%d", cr.x());
-                return false;
-            }
-            e.moveCursor(QTextCursor::Right);
-            if (e.textCursor().position() != 2) {
-                qWarning("selftest FAIL: Right at end moves to %d, want 2",
-                         e.textCursor().position());
-                return false;
-            }
-        }
-        // 文末回车产生的空行：光标从行尾按右进入空行（标准行为，锁定以防回归）
-        e.setPlainText(QStringLiteral("你好\n"));
-        {
-            QTextCursor c(e.document());
-            c.setPosition(2);
-            e.setTextCursor(c);
-            e.moveCursor(QTextCursor::Right);
-            if (e.textCursor().position() != 3) {
-                qWarning("selftest FAIL: Right across trailing newline moves to %d, want 3",
-                         e.textCursor().position());
-                return false;
-            }
-        }
-        // 文末空行不可入：点余白行高度落最后一个字符之后；行尾按右停在原地
-        bar = qobject_cast<ZenScrollBar *>(e.verticalScrollBar());
-        if (bar) {
-            const QPoint tp(5, 25); // 第二行（余白行）高度
-            QMouseEvent tpress(QEvent::MouseButtonPress, QPointF(tp), bar->mapToGlobal(tp),
-                               Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-            QApplication::sendEvent(bar, &tpress);
-            if (e.textCursor().position() != 2) {
-                qWarning("selftest FAIL: trailing-empty strip click lands at %d, want 2",
-                         e.textCursor().position());
-                return false;
-            }
-        }
-        {
-            QTextCursor c(e.document());
-            c.setPosition(2);
-            e.setTextCursor(c);
-            QKeyEvent kp(QEvent::KeyPress, Qt::Key_Right, Qt::NoModifier);
-            QApplication::sendEvent(&e, &kp);
-            if (e.textCursor().position() != 2) {
-                qWarning("selftest FAIL: Right into trailing empty moves to %d, want 2",
-                         e.textCursor().position());
-                return false;
-            }
-        }
-        // 满行段落：文字区最右缘窄带内点击 = 该视觉行行尾
-        e.setPlainText(longLine + QStringLiteral("\n短行\n短行\n"));
-        e.resize(400, 300);
-        e.show();
-        QApplication::processEvents();
-        {
-            QTextBlock blk = e.document()->firstBlock();
-            QTextLayout *tl = blk.layout();
-            const QTextLine line0 = tl->lineAt(0);
-            const int want = blk.position() + line0.textStart() + line0.textLength();
-            QWidget *vp = e.viewport();
-            const QPointF edge(vp->width() - 2.0, 5.0);
-            QMouseEvent press(QEvent::MouseButtonPress, edge, vp->mapToGlobal(edge.toPoint()),
-                              Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-            QApplication::sendEvent(vp, &press);
-            if (e.textCursor().position() != want) {
-                qWarning("selftest FAIL: full-line edge-zone click lands at %d, want %d",
-                         e.textCursor().position(), want);
-                return false;
-            }
-        }
-        // 编模式：等宽字体 + 行号槽 + 退出复原（ASCII 文档，与真实代码一致）
-        e.setPlainText(QStringLiteral("code1\ncode2\ncode3\ncode4\n"));
-        e.resize(400, 300);
-        e.show();
-        QApplication::processEvents();
-        e.toggleCodeMode();
-        QApplication::processEvents();
-        if (e.document()->defaultFont().family()
-            != QFontDatabase::systemFont(QFontDatabase::FixedFont).family()) {
-            qWarning("selftest FAIL: code mode font is not the fixed font");
-            return false;
-        }
-        if (e.viewport()->pos().x() <= 0) {
-            qWarning("selftest FAIL: code mode gutter missing");
-            return false;
-        }
-        // 基线对齐硬验证：行号与文字共用同一 QTextLayout 基线（结构恒等），
-        // 像素级用同字形比对（行号数字 vs 文字数字），真机/离屏渲染取向无关
-        {
-            QString digitDoc;
-            for (int i = 0; i < 8; ++i)
-                digitDoc += QStringLiteral("111111111111\n");
-            e.setPlainText(digitDoc);
-            QApplication::processEvents();
-            // 光标净化：清焦点后 QPlainTextEdit 隐藏光标，像素比对才纯净
-            e.setFocus();
-            QApplication::processEvents();
-            e.clearFocus();
-            QApplication::processEvents();
-            QImage img(e.size(), QImage::Format_ARGB32);
-            img.fill(Qt::white);
-            e.render(&img);
-            const int g = e.viewport()->pos().x();
-            auto darkRange = [&](int x0, int x1, int y0, int y1) {
-                int lo = -1, hi = -1;
-                for (int y = y0; y < y1; ++y)
-                    for (int x = x0; x < x1; ++x)
-                        if (qGray(img.pixel(x, y)) < 200) { // 行号为浅灰
-                            if (lo < 0)
-                                lo = y;
-                            hi = y;
-                        }
-                return qMakePair(lo, hi);
-            };
-            const auto num = darkRange(2, qMax(3, g - 2), 0, e.height());
-            const auto txt = darkRange(g + 4, g + 120, 0, e.height());
-            qInfo("GUTTER-ALIGN gutter=%d num_y=[%d,%d] text_y=[%d,%d]", g,
-                  num.first, num.second, txt.first, txt.second);
-            if (num.first < 0 || txt.first < 0
-                || qAbs(num.first - txt.first) > 1
-                || qAbs(num.second - txt.second) > 1) {
-                qWarning("selftest FAIL: gutter baselines misaligned: [%d,%d] vs [%d,%d]",
-                         num.first, num.second, txt.first, txt.second);
-                return false;
-            }
-            e.zoomReset();
-        }
-        e.toggleCodeMode();
-        QApplication::processEvents();
-        if (e.viewport()->pos().x() != 0
-            || e.document()->defaultFont().family()
-                != QFontDatabase::systemFont(QFontDatabase::GeneralFont).family()) {
-            qWarning("selftest FAIL: exiting code mode did not restore layout/font");
-            return false;
-        }
-        // 行号随横滚：放大到溢出后，行号区随横向滚动移出屏幕、边距回收、滚回复原
-        {
-            e.setPlainText(QStringLiteral("無無無無無無無無無無無無無無無無無無無無\n第二行\n"));
-            e.resize(400, 300);
-            e.show();
-            QApplication::processEvents();
-            e.toggleCodeMode();
-            QApplication::processEvents();
-            e.zoomTo(96);
-            QApplication::processEvents();
-            QScrollBar *hb = e.horizontalScrollBar();
-            const int w0 = e.gutterWidth();
-            if (hb->isVisible() && hb->maximum() > 0) {
-                hb->setValue(qMin(hb->maximum(), w0 + 8));
-                QApplication::processEvents();
-                if (e.viewport()->pos().x() != qMax(0, w0 - hb->value())) {
-                    qWarning("selftest FAIL: gutter margin did not shrink (vp.x=%d h=%d)",
-                             e.viewport()->pos().x(), hb->value());
-                    return false;
-                }
-                hb->setValue(hb->maximum());
-                QApplication::processEvents();
-                if (e.viewport()->pos().x() != 0) {
-                    qWarning("selftest FAIL: gutter margin not fully reclaimed (vp.x=%d)",
-                             e.viewport()->pos().x());
-                    return false;
-                }
-                hb->setValue(0);
-                QApplication::processEvents();
-                if (e.viewport()->pos().x() != w0) {
-                    qWarning("selftest FAIL: gutter margin not restored (vp.x=%d want %d)",
-                             e.viewport()->pos().x(), w0);
-                    return false;
-                }
-            }
-            e.zoomReset();
-            e.toggleCodeMode();
-            QApplication::processEvents();
-        }
-        // 笔迹统一撤销：画一笔 → Cmd+Z 撤销 → Cmd+Y 复原
-        e.setPlainText(QStringLiteral("文字\n"));
-        {
-            e.toggleMode(Editor::Mode::Draw);
-            QWidget *vp = e.viewport();
-            const QPointF p1(50, 50);
-            QMouseEvent pr(QEvent::MouseButtonPress, p1, vp->mapToGlobal(p1.toPoint()),
-                           Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-            QApplication::sendEvent(vp, &pr);
-            const QPointF p2(90, 50);
-            QMouseEvent mv(QEvent::MouseMove, p2, vp->mapToGlobal(p2.toPoint()),
-                           Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-            QApplication::sendEvent(vp, &mv);
-            QMouseEvent re(QEvent::MouseButtonRelease, p2, vp->mapToGlobal(p2.toPoint()),
-                           Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
-            QApplication::sendEvent(vp, &re);
-            if (e.inkEmpty()) {
-                qWarning("selftest FAIL: stroke not recorded");
-                return false;
-            }
-            QKeyEvent kz(QEvent::KeyPress, Qt::Key_Z, Qt::ControlModifier);
-            QApplication::sendEvent(&e, &kz);
-            if (!e.inkEmpty()) {
-                qWarning("selftest FAIL: Cmd+Z did not undo the stroke");
-                return false;
-            }
-            QKeyEvent ky(QEvent::KeyPress, Qt::Key_Y, Qt::ControlModifier);
-            QApplication::sendEvent(&e, &ky);
-            if (e.inkEmpty()) {
-                qWarning("selftest FAIL: Cmd+Y did not redo the stroke");
-                return false;
-            }
-            e.toggleMode(Editor::Mode::Draw); // 退出模式
-        }
-        // 擦除通道宽度 = 笔刷宽度：像素级验证
-        {
-            e.toggleCodeMode();
-            if (e.codeMode())
-                e.toggleCodeMode(); // 退出编
-            e.setPlainText(QString());
-            e.clearInk(); // 清掉此前测试的笔迹，避免污染通道测量
-            e.resize(400, 300);
-            e.show();
-            QApplication::processEvents();
-            for (int i = 0; i < 30 && e.brushSize() < 40.0; ++i)
-                e.brushUp();
-            const qreal brush = e.brushSize();
-            QWidget *vp = e.viewport();
-            e.toggleMode(Editor::Mode::Draw);
-            {
-                const QPointF p1(50, 80);
-                QMouseEvent pr(QEvent::MouseButtonPress, p1, vp->mapToGlobal(p1.toPoint()),
-                               Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-                QApplication::sendEvent(vp, &pr);
-                for (int x = 54; x <= 250; x += 4) {
-                    const QPointF p2(x, 80);
-                    QMouseEvent mv(QEvent::MouseMove, p2, vp->mapToGlobal(p2.toPoint()),
-                                   Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-                    QApplication::sendEvent(vp, &mv);
-                }
-                const QPointF p2(250, 80);
-                QMouseEvent re(QEvent::MouseButtonRelease, p2, vp->mapToGlobal(p2.toPoint()),
-                               Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
-                QApplication::sendEvent(vp, &re);
-            }
-            e.toggleMode(Editor::Mode::Erase);
-            {
-                const QPointF p1(150, 30);
-                QMouseEvent pr(QEvent::MouseButtonPress, p1, vp->mapToGlobal(p1.toPoint()),
-                               Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-                QApplication::sendEvent(vp, &pr);
-                // 连续事件流（真实触控板行为）
-                for (int y = 34; y <= 130; y += 4) {
-                    const QPointF p2(150, y);
-                    QMouseEvent mv(QEvent::MouseMove, p2, vp->mapToGlobal(p2.toPoint()),
-                                   Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-                    QApplication::sendEvent(vp, &mv);
-                }
-                const QPointF p3(150, 130);
-                QMouseEvent re(QEvent::MouseButtonRelease, p3, vp->mapToGlobal(p3.toPoint()),
-                               Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
-                QApplication::sendEvent(vp, &re);
-            }
-            e.toggleMode(Editor::Mode::Normal);
-            // 数据级验证：残余两段笔迹之间的空隙 = 擦除通道 = 笔刷宽度
-            const auto paths = e.inkPaths();
-            int bestGap = 0;
-            if (paths.size() >= 2) {
-                const qreal leftEnd = paths.first().boundingRect().right();
-                const qreal rightStart = paths.last().boundingRect().left();
-                if (rightStart > leftEnd)
-                    bestGap = int(rightStart - leftEnd);
-            }
-            qInfo("ERASE-CHANNEL gap=%d brush=%f paths=%d", bestGap, brush, int(paths.size()));
-            if (paths.size() >= 2 && qAbs(bestGap - brush) > 6.0) {
-                qWarning("selftest FAIL: erase channel %dpx vs brush %fpx", bestGap, brush);
-            }
-            e.brushDefault();
-        }
-        // 言：选中多行头尾批量加「」（空行跳过），一步撤销，整段保持选中
-        {
-            e.setPlainText(QStringLiteral("甲一\n乙二\n\n丙三\n"));
-            e.selectAll();
-            e.yan();
-            if (e.toPlainText() != QStringLiteral("「甲一」\n「乙二」\n\n「丙三」\n")) {
-                qWarning("selftest FAIL: yan() got [%s]", qPrintable(e.toPlainText()));
-                return false;
-            }
-            if (e.textCursor().selectionStart() != 0
-                || e.textCursor().selectionEnd() != 15) { // 「丙三」」之后、末行换行之前
-                qWarning("selftest FAIL: yan() selection not covering wrapped region (%d,%d)",
-                         e.textCursor().selectionStart(), e.textCursor().selectionEnd());
-                return false;
-            }
-            QKeyEvent kz(QEvent::KeyPress, Qt::Key_Z, Qt::ControlModifier);
-            QApplication::sendEvent(&e, &kz);
-            if (e.toPlainText() != QStringLiteral("甲一\n乙二\n\n丙三\n")) {
-                qWarning("selftest FAIL: yan() not undone in one step");
-                return false;
-            }
-        }
-        // 隔：逐行隔离——选中每一行上下各补空行（幂等），一步撤销
-        {
-            e.setPlainText(QStringLiteral("甲一\n乙二\n丙三\n"));
-            QTextBlock bMid = e.document()->findBlockByNumber(1);
-            QTextCursor cc(e.document());
-            cc.setPosition(bMid.position());
-            cc.setPosition(bMid.position() + bMid.length() - 1, QTextCursor::KeepAnchor);
-            e.setTextCursor(cc);
-            e.ge(); // 单选一行：同旧语义
-            if (e.toPlainText() != QStringLiteral("甲一\n\n乙二\n\n丙三\n")) {
-                qWarning("selftest FAIL: ge() single line got [%s]", qPrintable(e.toPlainText()));
-                return false;
-            }
-            e.ge(); // 幂等
-            if (e.toPlainText() != QStringLiteral("甲一\n\n乙二\n\n丙三\n")) {
-                qWarning("selftest FAIL: ge() not idempotent, got [%s]", qPrintable(e.toPlainText()));
-                return false;
-            }
-            if (e.textCursor().selectionStart() != 4
-                || e.textCursor().selectionEnd() != 6) {
-                qWarning("selftest FAIL: ge() selection lost the block (%d,%d)",
-                         e.textCursor().selectionStart(), e.textCursor().selectionEnd());
-                return false;
-            }
-            QKeyEvent kz(QEvent::KeyPress, Qt::Key_Z, Qt::ControlModifier);
-            QApplication::sendEvent(&e, &kz);
-            if (e.toPlainText() != QStringLiteral("甲一\n乙二\n丙三\n")) {
-                qWarning("selftest FAIL: ge() not undone in one step");
-                return false;
-            }
-            // 用户报告的核心案例：选中前两行（顶行在选区里）——每一行都要被隔离
-            {
-                QTextBlock b0 = e.document()->findBlockByNumber(0);
-                QTextBlock b1 = e.document()->findBlockByNumber(1);
-                QTextCursor cc2(e.document());
-                cc2.setPosition(b0.position());
-                cc2.setPosition(b1.position() + b1.length() - 1, QTextCursor::KeepAnchor);
-                e.setTextCursor(cc2);
-                e.ge();
-                if (e.toPlainText() != QStringLiteral("甲一\n\n乙二\n\n丙三\n")) {
-                    qWarning("selftest FAIL: ge() top-two lines got [%s]", qPrintable(e.toPlainText()));
-                    return false;
-                }
-            }
-            // 五行选中中间三行：每一行独立成岛
-            e.setPlainText(QStringLiteral("一\n二\n三\n四\n五\n"));
-            {
-                QTextBlock b1 = e.document()->findBlockByNumber(1);
-                QTextBlock b3 = e.document()->findBlockByNumber(3);
-                QTextCursor cc3(e.document());
-                cc3.setPosition(b1.position());
-                cc3.setPosition(b3.position() + b3.length() - 1, QTextCursor::KeepAnchor);
-                e.setTextCursor(cc3);
-                e.ge();
-                if (e.toPlainText() != QStringLiteral("一\n\n二\n\n三\n\n四\n\n五\n")) {
-                    qWarning("selftest FAIL: ge() middle-three got [%s]", qPrintable(e.toPlainText()));
-                    return false;
-                }
-                e.ge(); // 全隔离后再跑一次：不变
-                if (e.toPlainText() != QStringLiteral("一\n\n二\n\n三\n\n四\n\n五\n")) {
-                    qWarning("selftest FAIL: ge() second pass not idempotent [%s]", qPrintable(e.toPlainText()));
-                    return false;
-                }
-            }
-            // 选区内含空行：空行本身就是隔板，不重复加
-            e.setPlainText(QStringLiteral("一\n二\n\n三\n"));
-            e.selectAll();
-            e.ge();
-            if (e.toPlainText() != QStringLiteral("一\n\n二\n\n三\n")) {
-                qWarning("selftest FAIL: ge() with inner blank got [%s]", qPrintable(e.toPlainText()));
-                return false;
-            }
-            e.selectAll();
-            e.ge(); // 文首无上行、文末空块已空、内部已隔离 → 全文档幂等
-            if (e.toPlainText() != QStringLiteral("一\n\n二\n\n三\n")) {
-                qWarning("selftest FAIL: ge() full-doc idempotence got [%s]", qPrintable(e.toPlainText()));
-                return false;
-            }
-        }
-        // 言/隔 快捷键通道（Ctrl+L / Ctrl+F）
-        {
-            e.setPlainText(QStringLiteral("丁四\n"));
-            e.moveCursor(QTextCursor::Start);
-            QKeyEvent kl(QEvent::KeyPress, Qt::Key_L, Qt::ControlModifier);
-            QApplication::sendEvent(&e, &kl);
-            if (e.toPlainText() != QStringLiteral("「丁四」\n")) {
-                qWarning("selftest FAIL: Ctrl+L did not call yan()");
-                return false;
-            }
-            // Ctrl+F：文首无上行、文末空块已空 → 语义正确的不动（且不崩溃）
-            QKeyEvent kf(QEvent::KeyPress, Qt::Key_F, Qt::ControlModifier);
-            QApplication::sendEvent(&e, &kf);
-            if (e.toPlainText() != QStringLiteral("「丁四」\n")) {
-                qWarning("selftest FAIL: Ctrl+F at document edge changed text");
-                return false;
-            }
-            // 中间行的 Ctrl+F 才补空行
-            e.setPlainText(QStringLiteral("甲\n乙\n丙\n"));
-            const QTextBlock bm = e.document()->findBlockByNumber(1);
-            QTextCursor cc2(e.document());
-            cc2.setPosition(bm.position());
-            e.setTextCursor(cc2);
-            QKeyEvent kf2(QEvent::KeyPress, Qt::Key_F, Qt::ControlModifier);
-            QApplication::sendEvent(&e, &kf2);
-            if (e.toPlainText() != QStringLiteral("甲\n\n乙\n\n丙\n")) {
-                qWarning("selftest FAIL: Ctrl+F on middle line got [%s]", qPrintable(e.toPlainText()));
-                return false;
-            }
-        }
-        // 先言后隔组合：言保持的选区直接喂给隔（批量校对的完整动线）
-        {
-            e.setPlainText(QStringLiteral("甲\n一\n二\n三\n丙\n"));
-            QTextBlock b1 = e.document()->findBlockByNumber(1);
-            QTextBlock b3 = e.document()->findBlockByNumber(3);
-            QTextCursor cc(e.document());
-            cc.setPosition(b1.position());
-            cc.setPosition(b3.position() + b3.length() - 1, QTextCursor::KeepAnchor);
-            e.setTextCursor(cc);
-            e.yan();
-            e.ge();
-            if (e.toPlainText() != QStringLiteral("甲\n\n「一」\n\n「二」\n\n「三」\n\n丙\n")) {
-                qWarning("selftest FAIL: yan()+ge() pipeline got [%s]", qPrintable(e.toPlainText()));
-                return false;
-            }
-            QKeyEvent kz(QEvent::KeyPress, Qt::Key_Z, Qt::ControlModifier);
-            QApplication::sendEvent(&e, &kz); // 隔一步撤销 → 回到言的成果
-            if (e.toPlainText() != QStringLiteral("甲\n「一」\n「二」\n「三」\n丙\n")) {
-                qWarning("selftest FAIL: pipeline undo step 1 got [%s]", qPrintable(e.toPlainText()));
-                return false;
-            }
-            QKeyEvent kz2(QEvent::KeyPress, Qt::Key_Z, Qt::ControlModifier);
-            QApplication::sendEvent(&e, &kz2); // 再一步 → 言整体撤销
-            if (e.toPlainText() != QStringLiteral("甲\n一\n二\n三\n丙\n")) {
-                qWarning("selftest FAIL: pipeline undo step 2 got [%s]", qPrintable(e.toPlainText()));
-                return false;
-            }
-        }
-        // 锚定缩放：缩放前后锚点下是同一行（指哪大哪）
-        {
-            QString zdoc;
-            for (int i = 0; i < 120; ++i)
-                zdoc += QStringLiteral("锚定缩放测试行 無無無無無無無無無無\n");
-            e.setPlainText(zdoc);
-            e.resize(400, 300);
-            e.show();
-            QApplication::processEvents();
-            e.zoomReset();
-            e.verticalScrollBar()->setValue(60);
-            QApplication::processEvents();
-            const QPointF anchor(200.0, 120.0);
-            e.m_lastMouse = anchor; // 模拟鼠标悬停在锚点
-            const int posBefore = e.positionAtViewport(anchor);
-            e.zoom(12); // 字号翻倍：锚点下仍应是同一行
-            QApplication::processEvents();
-            const int posAfter = e.positionAtViewport(anchor);
-            qInfo("ANCHOR-ZOOM before=%d after=%d drift=%d vbar=%d", posBefore, posAfter,
-                  qAbs(posAfter - posBefore), e.verticalScrollBar()->value());
-            // 指哪大哪的语义 = 锚点下的视觉行不丢：允许行内 x→光标的字号漂移
-            //（9pt→24pt 同一点可差出一行内的字符数），跑飞才是真失败
-            if (qAbs(posAfter - posBefore) > 45) {
-                qWarning("selftest FAIL: anchored zoom drifted too far (%d → %d)",
-                         posBefore, posAfter);
-                return false;
-            }
-            e.m_lastMouse = QPointF(-1, -1);
-            e.zoomReset();
-        }
-        // 显：像素磷光模式——字体/配色/透明视口/画面，开关可逆
-        {
-            while (e.machine() != 0)
-                e.toggleMachine(); // 测试前提：琥珀机（配色断言以 kInk 为准）
-            e.setPlainText(QStringLiteral("無\n"));
-            e.toggleCrt();
-            QApplication::processEvents();
-            const QString fam = e.document()->defaultFont().family();
-            if (fam.isEmpty()
-                || fam == QFontDatabase::systemFont(QFontDatabase::GeneralFont).family()
-                || e.document()->defaultFont().pixelSize() <= 0) {
-                qWarning("selftest FAIL: CRT font not applied (family=[%s])", qPrintable(fam));
-                return false;
-            }
-            if (e.palette().color(QPalette::Text) != Crt::kInk) {
-                qWarning("selftest FAIL: CRT text color not amber (machine=%d)",
-                         e.machine());
-                return false;
-            }
-            if (e.palette().color(QPalette::Base) != Crt::kBg) {
-                qWarning("selftest FAIL: CRT base not the phosphor background");
-                return false;
-            }
-            // M1：视角锁定——进显即锁定，切换翻转，退出重进再次锁定
-            if (!e.crtViewLocked()) {
-                qWarning("selftest FAIL: view lock not default-on");
-                return false;
-            }
-            e.toggleViewLock();
-            if (e.crtViewLocked()) {
-                qWarning("selftest FAIL: view lock toggle failed");
-                return false;
-            }
-            e.toggleViewLock();
-            if (!e.crtViewLocked()) {
-                qWarning("selftest FAIL: view lock re-toggle failed");
-                return false;
-            }
-            // M4.5 并入：显·Cmd+0 = 机器原生网格（80 列）；屏幕实体随
-            // 追随视角解锁生效（screenEntityOn == !locked）
-            e.zoomReset();
-            {
-                const QFont gf = e.document()->defaultFont();
-                const int wantPx = qMax(6, e.viewport()->width() / 80);
-                if (qAbs(gf.pixelSize() - wantPx) > 1) {
-                    qWarning("selftest FAIL: crt Cmd+0 grid size %d want %d",
-                             gf.pixelSize(), wantPx);
-                    return false;
-                }
-            }
-            e.toggleViewLock(); // 解锁 → 屏幕实体生效
-            if (!e.screenEntityOn()) {
-                qWarning("selftest FAIL: screen entity not tied to unlocked view");
-                return false;
-            }
-            e.toggleViewLock(); // 重新锁定 → 实体关（干净完美视角）
-            // M2：切换计算机——默认琥珀，切绿磷（文字/底色/字体随调色板与
-            // 出厂字库），切回
-            if (e.crtPalette().ink != Crt::kInk) {
-                qWarning("selftest FAIL: default machine not amber");
-                return false;
-            }
-            const QString famAmber = e.document()->defaultFont().family();
-            e.toggleMachine();
-            if (e.crtPalette().ink != Crt::kGreen.ink
-                || e.palette().color(QPalette::Text) != Crt::kGreen.ink
-                || e.palette().color(QPalette::Base) != Crt::kGreen.bg
-                || e.document()->defaultFont().family() == famAmber) {
-                qWarning("selftest FAIL: green machine palette/font not applied");
-                return false;
-            }
-            e.toggleMachine(); // C64 真彩（蓝屏 + 16 色逐字符前景色）
-            if (e.crtPalette().ink != Crt::kC64.ink
-                || e.palette().color(QPalette::Text) != Crt::kC64.ink
-                || e.palette().color(QPalette::Base) != Crt::kC64.bg
-                || e.machine() != 2 || !e.colorMachine()) {
-                qWarning("selftest FAIL: C64 machine palette not applied");
-                return false;
-            }
-            e.toggleMachine(); // IBM PC 白磷（CGA 白字，FSEX302 字库）
-            if (e.crtPalette().ink != Crt::kWhite.ink
-                || e.palette().color(QPalette::Text) != Crt::kWhite.ink
-                || e.palette().color(QPalette::Base) != Crt::kWhite.bg
-                || e.machine() != 3) {
-                qWarning("selftest FAIL: white machine palette not applied");
-                return false;
-            }
-            e.toggleMachine();
-            if (e.crtPalette().ink != Crt::kInk
-                || e.palette().color(QPalette::Text) != Crt::kInk
-                || e.palette().color(QPalette::Base) != Crt::kBg) {
-                qWarning("selftest FAIL: amber machine not restored");
-                return false;
-            }
-            // 画面：文字区出现琥珀磷光像素；空区是近黑磷底（不是白）
-            // 先等暖机脉冲走完（黑幕约 0.5s 退尽），否则整屏被压黑
-            {
-                QEventLoop loop;
-                QTimer::singleShot(700, &loop, &QEventLoop::quit);
-                loop.exec();
-            }
-            // 无可用 RHI 后端（无 GPU 的无头机器 / 所有后端被环境跳过）：
-            // GPU 相关断言整体豁免——渲染层优雅降级为无画面，CPU 检查照跑
-            const bool gpuOk = e.m_crtView && e.m_crtView->pipelineUsable();
-            const int g = e.viewport()->pos().x();
-            QImage img(e.size(), QImage::Format_ARGB32);
-            img.fill(Qt::white);
-            if (gpuOk) {
-                e.render(&img); // 新架构：覆盖层是普通 QWidget，render 捕获的就是真实 GPU 帧
-                // GPU 输出经 RGB 掩膜：亮磷光 = R/G 子像素点燃、B 熄灭（琥珀文字
-                // 的 R 与 G 分量分别落在 R/G 掩膜上），不再以原始调色板判色
-                bool lit = false;
-                for (int y = 0; y < e.height() && !lit; ++y)
-                    for (int x = g + 2; x < e.width() - 30 && !lit; ++x) {
-                        const QRgb px = img.pixel(x, y);
-                        if (qRed(px) + qGreen(px) > 200 && qBlue(px) < 100)
-                            lit = true;
-                    }
-                if (!lit) {
-                    qWarning("selftest FAIL: no lit phosphor pixels in CRT render");
-                    return false;
-                }
-                const QRgb bgPx = img.pixel(g + 8, e.height() - 20); // 空行区
-                if (qRed(bgPx) > 90 || qGreen(bgPx) > 80 || qBlue(bgPx) > 60) {
-                    qWarning("selftest FAIL: CRT background not dark (%d,%d,%d)",
-                             qRed(bgPx), qGreen(bgPx), qBlue(bgPx));
-                    return false;
-                }
-            } else {
-                qWarning("selftest SKIP: no usable RHI backend — CRT GPU render checks skipped");
-            }
-            // 快照几何：文字在顶部第一行；此前的涂擦测试留下两个墨水圆点，
-            // 必须同样出现在合成快照里（墨水进光栅 = 显模式下涂/擦可用的回归闸）
-            {
-                // 块状反相光标有焦点时会把首字格反相、吃掉顶部琥珀——
-                // 光标挪到文末，让顶部断言照旧测文字本身
-                QTextCursor endC = e.textCursor();
-                endC.movePosition(QTextCursor::End);
-                e.setTextCursor(endC);
-                QApplication::processEvents();
-                QImage snapImg(e.viewport()->size(), QImage::Format_ARGB32);
-                snapImg.fill(Qt::transparent);
-                e.paintTextSnapshot(snapImg);
-                const QImage snap = snapImg;
-                int topAmber = 0, inkAmber = 0;
-                for (int y = 0; y < snap.height(); ++y)
-                    for (int x = 0; x < snap.width(); ++x) {
-                        const QRgb px = snap.pixel(x, y);
-                        if (qRed(px) > 150 && qGreen(px) > 80 && qBlue(px) < 90) {
-                            if (y < 40) ++topAmber; else ++inkAmber;
-                        }
-                    }
-                qInfo("CRT-SNAP amber top=%d ink=%d", topAmber, inkAmber);
-                if (topAmber < 10 || inkAmber < 500) {
-                    qWarning("selftest FAIL: snapshot composite broken (text top=%d ink=%d)",
-                             topAmber, inkAmber);
-                    return false;
-                }
-            }
-            // 颜色分类取证：琥珀透色（r 主导、g 中量、b 近零——颜色穿过
-            // 竖纹亮度纹理）、暗底、无蓝泛滥（坏管线 = 蓝通道点燃）
-            if (gpuOk) {
-                int amber = 0, blue = 0, dark = 0, other = 0;
-                for (int y = 0; y < e.height(); ++y)
-                    for (int x = g; x < e.width() - 30; ++x) {
-                        const QRgb px = img.pixel(x, y);
-                        const int r = qRed(px), gr = qGreen(px), b = qBlue(px);
-                        if (r > 150 && gr > 100 && b < 90) ++amber;
-                        else if (b > r + 40 && b > gr + 40 && b > 100) ++blue;
-                        else if (r < 60 && gr < 60 && b < 60) ++dark;
-                        else ++other;
-                    }
-                qInfo("CRT-COLORS amber=%d blue=%d dark=%d other=%d", amber, blue, dark, other);
-                if (amber < 500) {
-                    qWarning("selftest FAIL: amber phosphor not lighting (%d)", amber);
-                    return false;
-                }
-                if (blue > 100) {
-                    qWarning("selftest FAIL: blue flood in CRT render (%d)", blue);
-                    return false;
-                }
-            }
-            // 扫描线：同列相邻行底色有明暗差（信息输出，防渲染层位错）
-            if (gpuOk) {
-                auto rowMean = [&](int yMod, int x0, int x1) {
-                    long sum = 0;
-                    int n = 0;
-                    for (int y = yMod + 4; y + 3 < e.height(); y += 3)
-                        for (int x = x0; x < x1; ++x) {
-                            sum += qGray(img.pixel(x, y));
-                            ++n;
-                        }
-                    return n ? double(sum) / n : -1.0;
-                };
-                const double m0 = rowMean(0, g + 8, g + 90);
-                const double m1 = rowMean(1, g + 8, g + 90);
-                qInfo("CRT-SCANLINE rows: %f vs %f", m0, m1);
-            }
-            e.toggleCrt();
-            QApplication::processEvents();
-            if (e.palette().color(QPalette::Base) == Crt::kBg
-                || e.document()->defaultFont().family()
-                    != QFontDatabase::systemFont(QFontDatabase::GeneralFont).family()) {
-                qWarning("selftest FAIL: CRT toggle-off did not restore font/palette");
-                return false;
-            }
-            // M1：退出重进显 → 视角锁定重置
-            e.toggleCrt();
-            QApplication::processEvents();
-            const bool relocked = e.crtViewLocked();
-            e.toggleCrt();
-            QApplication::processEvents();
-            if (!relocked) {
-                qWarning("selftest FAIL: view lock not reset on re-entering CRT");
-                return false;
-            }
-        }
-        // 格式化库（自 AsciiTools 移植）：框/压行/还原/路径树往返/居中
-        {
-            e.setPlainText(QStringLiteral("無无\nA\n"));
-            e.selectAll();
-            e.formatBox(0); // 单线框（字体真实推进对齐）
-            const QString boxed = e.toPlainText();
-            if (!boxed.startsWith(QStringLiteral("┌"))
-                || !boxed.endsWith(QStringLiteral("┘\n"))
-                || !boxed.contains(QStringLiteral("無无"))) {
-                qWarning("selftest FAIL: box render wrong: %s",
-                         boxed.toUtf8().constData());
-                return false;
-            }
-            e.setPlainText(QStringLiteral("一 二\n三\n\n四\n"));
-            e.selectAll();
-            e.joinLinesTo(); // 压行
-            if (e.toPlainText() != QStringLiteral("一 二 三 四")) {
-                qWarning("selftest FAIL: join lines wrong");
-                return false;
-            }
-            e.selectAll();
-            e.restoreLines(); // 还原 = 原样恢复（可逆）
-            if (e.toPlainText() != QStringLiteral("一 二\n三\n\n四\n")) {
-                qWarning("selftest FAIL: restore lines wrong: %s",
-                         e.toPlainText().toUtf8().constData());
-                return false;
-            }
-            e.setPlainText(QStringLiteral("甲。乙！丙？\n"));
-            e.selectAll();
-            e.restoreLines(); // 无记忆、无代码分隔符 → 按句读切
-            if (e.toPlainText() != QStringLiteral("甲。\n乙！\n丙？")) {
-                qWarning("selftest FAIL: prose restore wrong: %s",
-                         e.toPlainText().toUtf8().constData());
-                return false;
-            }
-            e.setPlainText(QStringLiteral("if (a;b) { x; y } z;"));
-            e.selectAll();
-            e.restoreLines(); // 还原（代码语义）
-            if (!e.toPlainText().contains(QStringLiteral("{\n"))) {
-                qWarning("selftest FAIL: restore lines wrong");
-                return false;
-            }
-            e.setPlainText(QStringLiteral("a\nb/c\nb/d/\n"));
-            e.selectAll();
-            e.pathsToTree(); // 路径 → 树
-            const QString tree = e.toPlainText();
-            if (tree != QStringLiteral("├── a\n└── b/\n    ├── c\n    └── d/")) {
-                qWarning("selftest FAIL: pathsToTree wrong: %s",
-                         tree.toUtf8().constData());
-                return false;
-            }
-            e.selectAll();
-            e.treeToPaths(); // 树 → 路径（往返必须还原）
-            if (e.toPlainText() != QStringLiteral("a\nb/c\nb/d/")) {
-                qWarning("selftest FAIL: treeToPaths roundtrip wrong: %s",
-                         e.toPlainText().toUtf8().constData());
-                return false;
-            }
-            e.setPlainText(QStringLiteral("a\nb\\c\nb\\d\\\n"));
-            e.selectAll();
-            e.pathsToTree(); // 反斜杠路径（Windows）同样嵌套
-            if (e.toPlainText() != QStringLiteral("├── a\n└── b/\n    ├── c\n    └── d/")) {
-                qWarning("selftest FAIL: backslash tree wrong: %s",
-                         e.toPlainText().toUtf8().constData());
-                return false;
-            }
-            e.setPlainText(QStringLiteral("無\n"));
-            e.selectAll();
-            e.centerToWidth(); // 居中：左补空格
-            if (!e.toPlainText().startsWith(QLatin1Char(' '))) {
-                qWarning("selftest FAIL: centerToWidth no padding");
-                return false;
-            }
-            e.setPlainText(QStringLiteral("無\n"));
-        }
-        // P3 哨兵：增量重拍与全量重拍像素一致（打一个字 → 脏区重画
-        // → 与全量重画逐字节比对；不一致 = 增量漏画，必须查）
-        {
-            e.setPlainText(QStringLiteral("甲乙丙\n丁戊己\n"));
-            e.markSnapshotFullDirty();
-            const qreal dpr = e.devicePixelRatioF(); // 与真实管线同构：窗口 DPR
-            QImage full1(e.viewport()->size() * dpr, QImage::Format_ARGB32);
-            full1.setDevicePixelRatio(dpr);
-            full1.fill(Qt::black);
-            e.paintTextSnapshot(full1); // 全量基线
-            QImage base = full1.copy(); // 增量底 = 上一帧
-            e.moveCursor(QTextCursor::End);
-            e.insertPlainText(QStringLiteral("無")); // 触发 contentsChange → 脏区
-            const auto snap = e.consumeSnapshotDirty();
-            const QRect dirty = snap.rect;
-            { // 等激发衰减归零（900ms 上限）：时间敏感部分排除出比对
-                QEventLoop lp;
-                QTimer::singleShot(950, &lp, &QEventLoop::quit);
-                lp.exec();
-            }
-            QImage full2(e.viewport()->size() * dpr, QImage::Format_ARGB32);
-            full2.setDevicePixelRatio(dpr);
-            full2.fill(Qt::black);
-            e.paintTextSnapshot(full2); // 全量对照
-            e.paintTextSnapshotRegion(base, dirty); // 增量
-            if (base != full2) {
-                // 定位首个差异像素
-                QString diff;
-                const int w = qMin(base.width(), full2.width());
-                const int h = qMin(base.height(), full2.height());
-                for (int y = 0; y < h && diff.isEmpty(); ++y) {
-                    const uchar *a = base.constScanLine(y);
-                    const uchar *b = full2.constScanLine(y);
-                    for (int x = 0; x < w; ++x) {
-                        if (qAbs(int(a[x*4]) - b[x*4]) > 0
-                            || qAbs(int(a[x*4+1]) - b[x*4+1]) > 0
-                            || qAbs(int(a[x*4+2]) - b[x*4+2]) > 0) {
-                            diff = QStringLiteral("(%1,%2) inc=%3,%4,%5 full=%6,%7,%8 dirty=%9,%10,%11,%12")
-                                .arg(x).arg(y).arg(a[x*4]).arg(a[x*4+1]).arg(a[x*4+2])
-                                .arg(b[x*4]).arg(b[x*4+1]).arg(b[x*4+2])
-                                .arg(dirty.x()).arg(dirty.y()).arg(dirty.width()).arg(dirty.height());
-                            break;
-                        }
-                    }
-                }
-                qWarning("selftest FAIL: incremental snapshot != full snapshot %s",
-                         qPrintable(diff));
-                return false;
-            }
-            e.setPlainText(QStringLiteral("無\n"));
-        }
-        // 撤销基线回归：格式化操作 = 一步撤销（Qt 编辑块合并语义是
-        // 本应用的依赖项——升级 Qt 前必过的哨兵）
-        {
-            e.setPlainText(QStringLiteral("甲\n乙\n丙\n"));
-            e.selectAll();
-            e.formatBox(0); // 框 = 一步撤销
-            const QString boxed2 = e.toPlainText();
-            QKeyEvent ku(QEvent::KeyPress, Qt::Key_Z, Qt::ControlModifier);
-            QApplication::sendEvent(&e, &ku);
-            QApplication::processEvents();
-            if (e.toPlainText() != QStringLiteral("甲\n乙\n丙\n")) {
-                qWarning("selftest FAIL: box not one-undo-step");
-                return false;
-            }
-            e.setPlainText(QStringLiteral("甲乙\n"));
-            e.selectAll();
-            e.centerToWidth();
-            QApplication::sendEvent(&e, &ku);
-            QApplication::processEvents();
-            if (!e.toPlainText().startsWith(QStringLiteral("甲乙"))) {
-                qWarning("selftest FAIL: center not one-undo-step");
-                return false;
-            }
-            e.setPlainText(QStringLiteral("無\n"));
-        }
-        // CRT 管线冒烟（C64 三色栅 + 行扫描激励）：渲两机各一帧落盘，
-        // 供人工/取证核对（shader 编译失败 = 黑帧 + 空图）
-        // 无可用后端（无 GPU 无头机器）时整体豁免——GPU 帧无从产生
-        if (!e.m_crtView || !e.m_crtView->pipelineUsable()) {
-            qWarning("selftest SKIP: no usable RHI backend — CRT GPU smoke skipped");
-        } else {
-            auto waitFrames = [&](int ms) {
-                QElapsedTimer clk;
-                clk.start();
-                while (clk.elapsed() < ms) {
-                    QEventLoop lp;
-                    QTimer::singleShot(30, &lp, &QEventLoop::quit);
-                    lp.exec();
-                }
-            };
-            e.setPlainText(QStringLiteral("無無無 WuWu\nAABBCC 123456\n"));
-            for (int m = 0; m < 4; ++m) { // 四机各渲一帧：亮度横比
-                while (e.machine() != m)
-                    e.toggleMachine();
-                e.toggleCrt();
-                waitFrames(1600);
-                const QImage f = e.crtSnapImage();
-                const QString tag = QStringLiteral("crt_m%1").arg(m);
-                f.save(QStringLiteral("/tmp/") + tag + QStringLiteral(".png"));
-                e.crtShownImage().save(QStringLiteral("/tmp/") + tag + QStringLiteral("_gpu.png"));
-                e.toggleCrt();
-                if (f.isNull() || f.size().isEmpty()) {
-                    qWarning("selftest FAIL: machine %d crt frame empty", m);
-                    return false;
-                }
-            }
-            while (e.machine() != 0)
-                e.toggleMachine(); // 还原琥珀
-        }
-        // M3：图片 → 字符画（纯函数验证：合成左白右黑图 → 粗梯度映射）
-        {
-            QImage simg(64, 32, QImage::Format_ARGB32);
-            simg.fill(Qt::black);
-            {
-                QPainter pp(&simg);
-                pp.fillRect(QRect(0, 0, 32, 32), Qt::white);
-            }
-            const QString art = Ascii::imageToText(simg, 8, 4);
-            const QStringList lines = art.split(QLatin1Char('\n'));
-            if (lines.size() != 4 || lines[0].size() != 8 || lines[3].size() != 8) {
-                qWarning("selftest FAIL: ascii art grid wrong (%lld lines, sizes %lld/%lld)",
-                         qint64(lines.size()), lines.isEmpty() ? -1 : qint64(lines[0].size()),
-                         lines.size() < 4 ? -1 : qint64(lines[3].size()));
-                return false;
-            }
-            if (lines[0].at(0) == QLatin1Char(' ') || lines[0].at(7) != QLatin1Char(' ')) {
-                qWarning("selftest FAIL: ascii art luminance mapping wrong (left='%c' right='%c')",
-                         lines[0].at(0).toLatin1(), lines[0].at(7).toLatin1());
-                return false;
-            }
-            // 编辑器路径冒烟：空文档插入 → 逐行打印出整页字符画；
-            // 非空文档 → 光标处插入（不覆盖）
-            auto waitPrint = [&e] {
-                for (int guard = 0; e.asciiPrintingDbg() && guard < 100; ++guard) {
-                    QEventLoop lp;
-                    QTimer::singleShot(50, &lp, &QEventLoop::quit);
-                    lp.exec(); // 打字机打印 ~35ms/行，等到完
-                }
-            };
-            e.setPlainText(QString());
-            e.loadAsciiImage(simg);
-            waitPrint();
-            {
-                const QString doc = e.toPlainText();
-                const QStringList dl = doc.split(QLatin1Char('\n'));
-                if (dl.size() < 3 || dl[0].isEmpty()) {
-                    qWarning("selftest FAIL: ascii art editor path produced empty doc");
-                    return false;
-                }
-                const QString rampChars = QStringLiteral(" .:*#@.,-~:;=!*#$@");
-                bool onlyRamp = true;
-                QChar badChar;
-                for (const QChar ch : doc) {
-                    if (ch != QLatin1Char('\n') && !rampChars.contains(ch)) {
-                        badChar = ch;
-                        onlyRamp = false;
-                        break;
-                    }
-                }
-                if (!onlyRamp) {
-                    qWarning("selftest FAIL: ascii art editor path has non-ramp chars (first=%04x len=%d)",
-                             badChar.unicode(), int(doc.size()));
-                    return false;
-                }
-            }
-            e.setPlainText(QStringLiteral("無\n"));
-            {
-                e.moveCursor(QTextCursor::End);
-                e.loadAsciiImage(simg);
-                waitPrint();
-                const QString doc = e.toPlainText();
-                if (!doc.startsWith(QStringLiteral("無\n")) || doc.size() < 10) {
-                    qWarning("selftest FAIL: ascii art insert overwrote existing text");
-                    return false;
-                }
-                // 插入后缩放压力段（回归：插入图片后 Cmd+=/- / 捏合闪退）
-                for (int z = 0; z < 4; ++z) {
-                    e.zoom(1);
-                    QApplication::processEvents();
-                }
-                for (int z = 0; z < 4; ++z) {
-                    e.zoom(-1);
-                    QApplication::processEvents();
-                }
-                if (e.toPlainText().size() < 10) {
-                    qWarning("selftest FAIL: ascii art lost after zoom");
-                    return false;
-                }
-                e.setPlainText(QStringLiteral("無\n")); // 还原，防污染后续
-            }
-            // 回归：画布外文字共存 → 切编（Cmd+B）重印不得吞掉画布外文字
-            {
-                e.setPlainText(QStringLiteral("开头文字\n"));
-                e.moveCursor(QTextCursor::End);
-                e.loadAsciiImage(simg);
-                waitPrint();
-                e.toggleCodeMode(); // 切编（用户误报 Cmd+B 吞字符）
-                waitPrint();
-                if (!e.toPlainText().startsWith(QStringLiteral("开头文字\n"))) {
-                    qWarning("selftest FAIL: code toggle ate surrounding text");
-                    return false;
-                }
-                e.toggleCodeMode();
-                waitPrint();
-                if (!e.toPlainText().startsWith(QStringLiteral("开头文字\n"))) {
-                    qWarning("selftest FAIL: code exit ate surrounding text");
-                    return false;
-                }
-                e.setPlainText(QStringLiteral("無\n"));
-            }
-            // 回归（用户事故复现）：空(Cmd+N)清光 → 撤销复原 → 重勾立为图
-            // 必须真正复活画布态（NoWrap 不叠行 + 缩放可用）——不得假勾
-            {
-                e.setPlainText(QStringLiteral("开头文字\n"));
-                e.moveCursor(QTextCursor::End);
-                e.loadAsciiImage(simg);
-                waitPrint();
-                const QString before = e.toPlainText();
-                QKeyEvent kn(QEvent::KeyPress, Qt::Key_N, Qt::ControlModifier);
-                QApplication::sendEvent(&e, &kn); // 空：清空全部文字
-                QApplication::processEvents();
-                if (!e.toPlainText().isEmpty() || e.m_asciiActive) {
-                    qWarning("selftest FAIL: kong did not clear/end art");
-                    return false;
-                }
-                QKeyEvent kz(QEvent::KeyPress, Qt::Key_Z, Qt::ControlModifier);
-                QApplication::sendEvent(&e, &kz); // 撤销 → 复原
-                QApplication::processEvents();
-                if (e.toPlainText() != before) {
-                    qWarning("selftest FAIL: kong undo did not restore doc (%d vs %d)",
-                             int(e.toPlainText().size()), int(before.size()));
-                    return false;
-                }
-                QTextCursor nc = e.textCursor();
-                nc.clearSelection();
-                e.setTextCursor(nc);
-                e.declareArtFromSelection(); // 无选区 → 复选上次范围
-                if (!e.m_asciiActive
-                    || e.lineWrapMode() != QPlainTextEdit::NoWrap) {
-                    qWarning("selftest FAIL: re-declare after kong-undo not engaged");
-                    return false;
-                }
-                e.zoomAsciiCanvas(1.2); // 画布缩放仍应生效
-                waitPrint();
-                if (!e.m_asciiActive || e.toPlainText().isEmpty()) {
-                    qWarning("selftest FAIL: canvas zoom after re-declare failed");
-                    return false;
-                }
-                e.setPlainText(QStringLiteral("無\n"));
-            }
-            // 回归：画布操作不进撤销历史（撤销基线）——Cmd+Z 不得蚕食画布，
-            // 之后打字的撤销照常
-            {
-                e.setPlainText(QString());
-                e.loadAsciiImage(simg);
-                waitPrint();
-                const QString artOnce = e.toPlainText();
-                e.zoomAsciiCanvas(0.8); // 缩小：必产生重印（放大可能触原生上限）
-                waitPrint();
-                if (e.toPlainText() == artOnce) {
-                    qWarning("selftest FAIL: zoom did not reprint");
-                    return false;
-                }
-                QKeyEvent kz2(QEvent::KeyPress, Qt::Key_Z, Qt::ControlModifier);
-                QApplication::sendEvent(&e, &kz2); // Cmd+Z：不得触碰画布
-                QApplication::processEvents();
-                if (e.toPlainText().isEmpty() || !e.m_asciiActive) {
-                    qWarning("selftest FAIL: undo ate art after zoom");
-                    return false;
-                }
-                const QString afterZoom = e.toPlainText();
-                e.moveCursor(QTextCursor::End);
-                QKeyEvent kt(QEvent::KeyPress, Qt::Key_X, Qt::NoModifier);
-                QApplication::sendEvent(&e, &kt); // 画布后打字
-                QApplication::processEvents();
-                QKeyEvent kz3(QEvent::KeyPress, Qt::Key_Z, Qt::ControlModifier);
-                QApplication::sendEvent(&e, &kz3); // 撤销打字：照常可用
-                QApplication::processEvents();
-                if (e.toPlainText() != afterZoom) {
-                    qWarning("selftest FAIL: post-art typing not undoable");
-                    return false;
-                }
-                e.setPlainText(QStringLiteral("無\n"));
-            }
-            // 回归（用户报：打印期间 Cmd+B 会删字符）：打印不等待，
-            // 连续多次切编交错打印拍 → 画布必须一字不少
-            {
-                e.setPlainText(QString());
-                e.loadAsciiImage(simg);
-                waitPrint();
-                const int fullLen = e.toPlainText().size(); // 参考全长
-                e.setPlainText(QStringLiteral("开头文字\n"));
-                e.moveCursor(QTextCursor::End);
-                e.loadAsciiImage(simg); // 打印开始——不等待
-                for (int i = 0; i < 10; ++i) {
-                    QKeyEvent kb(QEvent::KeyPress, Qt::Key_B, Qt::ControlModifier);
-                    QApplication::sendEvent(&e, &kb); // 打印期间切编
-                    QEventLoop lp; // 让打印拍与切编交错
-                    QTimer::singleShot(5, &lp, &QEventLoop::quit);
-                    lp.exec();
-                }
-                waitPrint();
-                if (!e.m_asciiActive || !e.toPlainText().startsWith(QStringLiteral("开头文字\n"))
-                    || e.toPlainText().size() != fullLen + 5) {
-                    qWarning("selftest FAIL: rapid code toggles during print ate text (cc=%d want %d)",
-                             int(e.toPlainText().size()), fullLen + 5);
-                    return false;
-                }
-                e.setPlainText(QStringLiteral("無\n"));
-            }
-            // 回归：打印期间切编（高亮器 rehighlight 曾误触发反激活）→
-            // 画布态存活、退出编存活、无选区立为图可复选上次范围
-            {
-                e.setPlainText(QString());
-                e.loadAsciiImage(simg); // 打印开始
-                e.toggleCodeMode();     // 打印期间切编
-                waitPrint();
-                if (!e.m_asciiActive) {
-                    qWarning("selftest FAIL: code-mode toggle deactivated art");
-                    return false;
-                }
-                e.toggleCodeMode();     // 退出编
-                waitPrint();
-                if (!e.m_asciiActive) {
-                    qWarning("selftest FAIL: code-mode exit deactivated art");
-                    return false;
-                }
-                QTextCursor nc = e.textCursor();
-                nc.clearSelection();
-                e.setTextCursor(nc);
-                e.declareArtFromSelection(); // 无选区 → 复选上次范围
-                if (!e.m_asciiActive) {
-                    qWarning("selftest FAIL: no-selection declare failed");
-                    return false;
-                }
-                e.setPlainText(QStringLiteral("無\n")); // 还原
-            }
-            // C64 真彩路径：颜色与字符一一对应、含黑白两端色
-            {
-                QVector<QRgb> cols;
-                const QString cart = Ascii::imageToTextColors(simg, 8, 4, cols,
-                                                              Crt::kC64Colors);
-                const int chars = cart.count(QStringLiteral("\n")) * -1 + cart.size();
-                if (cols.size() != chars || cols.size() < 20) {
-                    qWarning("selftest FAIL: color art size mismatch (%d vs %d)",
-                             int(cols.size()), chars);
-                    return false;
-                }
-                bool hasWhite = false, hasBlack = false;
-                for (QRgb c : cols) {
-                    if (qRed(c) > 200 && qGreen(c) > 200 && qBlue(c) > 200)
-                        hasWhite = true;
-                    if (qRed(c) < 30 && qGreen(c) < 30 && qBlue(c) < 30)
-                        hasBlack = true;
-                }
-                if (!hasWhite || !hasBlack) {
-                    qWarning("selftest FAIL: color quantization lost black/white");
-                    return false;
-                }
-            }
-            // 「立为图」：任意选区 → 立为图 → 画布缩放（再打印）可用；
-            // 无选区时复选上次范围
-            {
-                e.setPlainText(QStringLiteral("一二三\n四五六\n"));
-                e.selectAll();
-                e.declareArtFromSelection();
-                if (!e.m_asciiActive) {
-                    qWarning("selftest FAIL: declare-art did not activate");
-                    return false;
-                }
-                e.zoomAsciiCanvas(1.2);
-                waitPrint();
-                if (e.toPlainText().isEmpty()) {
-                    qWarning("selftest FAIL: declare-art canvas zoom emptied doc");
-                    return false;
-                }
-                if (!e.m_asciiActive) {
-                    qWarning("selftest FAIL: canvas zoom deactivated art");
-                    return false;
-                }
-                e.zoomAsciiCanvas(1.2); // 第二次画布缩放仍应生效（再打印）
-                waitPrint();
-                if (!e.m_asciiActive || e.toPlainText().isEmpty()) {
-                    qWarning("selftest FAIL: second canvas zoom failed");
-                    return false;
-                }
-                e.setPlainText(QStringLiteral("無\n"));
-            }
-            // 回归（用户报：拖图→摹→压行→还原→立为图→连按换机 = 卡死）
-            // 注：压行/还原走菜单快捷键（自测无菜单栏，直接调方法等价）
-            {
-                e.setPlainText(QString());
-                while (e.machine() != 2)
-                    e.toggleMachine(); // C64
-                e.loadAsciiImage(simg);
-                waitPrint();
-                const QString doc0 = e.toPlainText();
-                e.mo(); // 摹：全选+复制
-                e.joinLinesTo(); // 压行
-                if (e.toPlainText().count(QLatin1Char('\n')) > 2) {
-                    qWarning("selftest FAIL: join did not join");
-                    return false;
-                }
-                e.restoreLines(); // 还原
-                if (e.toPlainText() != doc0) {
-                    qWarning("selftest FAIL: restore did not restore");
-                    return false;
-                }
-                e.selectAll(); // 还原后选区 = 恢复的全文
-                e.declareArtFromSelection(); // 立为图
-                if (e.m_asciiBaseCols > 400) {
-                    qWarning("selftest FAIL: declare baseCols exploded (%d)",
-                             e.m_asciiBaseCols);
-                    return false;
-                }
-                for (int i = 0; i < 8; ++i) {
-                    e.toggleMachine(); // 换机连按（卡死场景）
-                    QApplication::processEvents();
-                }
-                waitPrint();
-                if (!e.toPlainText().isEmpty() && e.m_asciiActive) {
-                    // 画布在场且非空：换机重印应已完成
-                }
-                e.setPlainText(QStringLiteral("無\n"));
-            }
-            // 回归（用户报：格式化→重勾立为图后缩放/换机失效、真彩泄漏）
-            {
-                e.setPlainText(QString());
-                while (e.machine() != 2)
-                    e.toggleMachine(); // C64
-                e.loadAsciiImage(simg);
-                waitPrint();
-                if (e.m_asciiColors.isEmpty()) {
-                    qWarning("selftest FAIL: c64 art produced no colors");
-                    return false;
-                }
-                e.yan(); // 格式化（言）→ 反激活 + 叠行（预期）
-                if (e.m_asciiActive) {
-                    qWarning("selftest FAIL: yan did not deactivate art");
-                    return false;
-                }
-                e.declareArtFromSelection(); // 无选区 → 复选上次范围（恢复路径）
-                if (!e.m_asciiActive) {
-                    qWarning("selftest FAIL: re-declare did not reactivate");
-                    return false;
-                }
-                e.zoomAsciiCanvas(1.2); // 缩放必须可用
-                waitPrint();
-                if (!e.m_asciiActive || e.toPlainText().isEmpty()) {
-                    qWarning("selftest FAIL: zoom after re-declare failed");
-                    return false;
-                }
-                const QString afterZoom = e.toPlainText();
-                e.zoomAsciiCanvas(0.8);
-                waitPrint();
-                if (e.toPlainText() == afterZoom) {
-                    qWarning("selftest FAIL: second zoom after re-declare no-op");
-                    return false;
-                }
-                // 换机不得泄漏真彩：非 C64 机上文档不得再带彩色前景
-                e.yan(); // 再反激活（画布不在场）
-                while (e.machine() != 0)
-                    e.toggleMachine(); // 琥珀
-                QTextCursor fc(e.document());
-                fc.movePosition(QTextCursor::NextCharacter);
-                if (fc.charFormat().foreground().style() != Qt::NoBrush) {
-                    qWarning("selftest FAIL: c64 colors leaked to amber machine");
-                    return false;
-                }
-                e.setPlainText(QStringLiteral("無\n"));
-            }
-        }
-        // 字体管理：空/不存在目录 → 扫描为空；字体文件夹播种后重扫
-        // 必须照常收集族名（去重不得吞掉列表——"换字体无反应"的哨兵）
-        // 循环后族名永不为空（出厂回退）
-        {
-            const QStringList none = Editor::scanFontFamilies(
-                QStringLiteral("/nonexistent-naught-fonts-dir"));
-            if (!none.isEmpty()) {
-                qWarning("selftest FAIL: font scan of missing dir not empty");
-                return false;
-            }
-            e.restoreDefaultFont(); // 先复位：跨运行的持久化选择不污染本测试
-            const QString f0 = e.crtFontFamily();
-            Editor::seedClassicFonts(); // 播种经典库存（去重缓存的哨兵前提）
-            e.cycleCrtFont(+1); // 用户文件夹无论有无字体，族名都必须可用
-            if (e.crtFontFamily().isEmpty()) {
-                qWarning("selftest FAIL: font family empty after cycle");
-                return false;
-            }
-            e.cycleCrtFont(+1); // 第二次循环：重扫必须照常收集（去重不得吞列表）
-            e.restoreDefaultFont();
-            if (e.crtFontFamily() != f0) {
-                qWarning("selftest FAIL: restore default font wrong (%s vs %s)",
-                         qPrintable(e.crtFontFamily()), qPrintable(f0));
-                return false;
-            }
-            e.cycleCrtFont(+1); // 往返：+1 进入用户字体
-            e.cycleCrtFont(-1); // -1 必须回到出厂
-            if (e.crtFontFamily() != f0) {
-                qWarning("selftest FAIL: font cycle round-trip changed family (%s -> %s, want %s)",
-                         qPrintable(f0), qPrintable(e.crtFontFamily()), qPrintable(f0));
-                return false;
-            }
-        }
-        // 真衍射的边差分：合成白块的左右竖直边界各产出一条彩边掩膜
-        {
-            QImage synth(40, 20, QImage::Format_ARGB32);
-            synth.fill(Qt::transparent);
-            QPainter sp(&synth);
-            sp.fillRect(QRect(10, 4, 12, 10), QColor(255, 255, 255, 255));
-            sp.end();
-            const QImage eR = Crt::edgeDiff(synth, +1);
-            const QImage eB = Crt::edgeDiff(synth, -1);
-            int rCols = 0, bCols = 0, rWrong = 0, bWrong = 0;
-            for (int y = 0; y < eR.height(); ++y) {
-                const uchar *rRow = eR.constScanLine(y);
-                const uchar *bRow = eB.constScanLine(y);
-                for (int x = 0; x < eR.width(); ++x) {
-                    if (rRow[x] > 0) {
-                        if (x == 21) ++rCols; else ++rWrong;
-                    }
-                    if (bRow[x] > 0) {
-                        if (x == 10) ++bCols; else ++bWrong;
-                    }
-                }
-            }
-            qInfo("DIFF-EDGE rightCol=%d wrong=%d leftCol=%d wrong=%d",
-                  rCols, rWrong, bCols, bWrong);
-            if (rCols < 8 || bCols < 8 || rWrong > 0 || bWrong > 0) {
-                qWarning("selftest FAIL: edgeDiff columns wrong (R:%d/%d B:%d/%d)",
-                         rCols, rWrong, bCols, bWrong);
-                return false;
-            }
-        }
-        return true;
-    }
+    static bool selftest();
 
 protected:
     void contextMenuEvent(QContextMenuEvent *event) override
@@ -3274,6 +2025,26 @@ protected:
 
     void keyPressEvent(QKeyEvent *event) override
     {
+        // 真机按键追踪（发布版默认关；NAUGHT_TRACE=1 时落盘取证——
+        // 记录每个键 + 修饰符 + 应用路径，旋转保留最近 300 条）
+        if (qEnvironmentVariableIsSet("NAUGHT_TRACE")) {
+            static int keyCount = 0;
+            if (++keyCount % 50 == 1) {
+                QFile fk(QStringLiteral("/tmp/naught-keytrace.log"));
+                fk.open(QIODevice::WriteOnly | QIODevice::Truncate);
+                fk.close();
+                keyCount = 1;
+            }
+            QFile fk(QStringLiteral("/tmp/naught-keytrace.log"));
+            if (fk.open(QIODevice::Append | QIODevice::Text)) {
+                fk.write(QStringLiteral("KEY k=%1 mods=0x%2 auto=%3 app=%4\n")
+                    .arg(int(event->key()))
+                    .arg(int(event->modifiers()), 0, 16)
+                    .arg(int(event->isAutoRepeat()))
+                    .arg(QCoreApplication::applicationDirPath()).toUtf8());
+                fk.close();
+            }
+        }
         wakeCaret();
         if (event->key() == Qt::Key_Tab
             && !(event->modifiers() & (Qt::ControlModifier | Qt::MetaModifier | Qt::AltModifier))) {
@@ -3288,6 +2059,284 @@ protected:
             if (textCursor().position() == document()->characterCount() - 2
                 && document()->lastBlock().length() == 1)
                 return;
+        }
+        // 顶行再按上 = 跳文首；底行再按下 = 跳文末（用户要求的方向键
+        // 边界跳跃：光标到最上行后继续按"上"→ 首行的首字符之前；
+        // 到最下行后继续按"下"→ 尾行的尾字符之后）。仅裸方向键——
+        // Shift 情形归选区分支（用户最新要求：首行 Shift+↑ = 选区）
+        if (event->key() == Qt::Key_Up
+            && !(event->modifiers() & (Qt::ControlModifier | Qt::MetaModifier
+                                       | Qt::AltModifier | Qt::ShiftModifier))) {
+            QTextCursor c = textCursor();
+            if (!c.hasSelection() && c.blockNumber() == 0 && c.position() > 0) {
+                c.setPosition(0);
+                setTextCursor(c);
+                wakeCaret();
+                return;
+            }
+        }
+        if (event->key() == Qt::Key_Down
+            && !(event->modifiers() & (Qt::ControlModifier | Qt::MetaModifier
+                                       | Qt::AltModifier | Qt::ShiftModifier))) {
+            QTextCursor c = textCursor();
+            const int endPos = document()->characterCount() - 1;
+            // 光标所在块之后没有内容块 = 光标已在最下行（稳健版：
+            // 旧判 blockCount-2 在文档尾有多个空块时失效 = 用户报
+            // "下下不会到行尾之后"）
+            QTextBlock after = c.block().next();
+            bool hasContentAfter = false;
+            while (after.isValid()) {
+                if (after.length() > 1) {
+                    hasContentAfter = true;
+                    break;
+                }
+                after = after.next();
+            }
+            if (!c.hasSelection() && !hasContentAfter && c.position() < endPos) {
+                c.setPosition(endPos);
+                setTextCursor(c);
+                wakeCaret();
+                return;
+            }
+        }
+        // Shift+↑ 选区扩展语义（用户拍板）：光标 = 移动端（上端），锚点
+        // 锁在原选区**远端（下端）**——选区 = 上一行对应列起的半截 + 原
+        // 来的整行。旧基类把光标留在原选区下端、锚点在上端 → 原选区被
+        // 吞掉只剩半截（用户报"选中上方半行"）。Shift+↓ 保持基类（光标
+        // 自然为移动端：向下扩展/向上回缩都正确）
+        if (event->key() == Qt::Key_Up
+            && (event->modifiers() & Qt::ShiftModifier)
+            && !(event->modifiers() & (Qt::ControlModifier | Qt::AltModifier))) {
+            // 容忍 ⌘（按键追踪取证：用户按 ⌘Z 后手指还压在 ⌘ 上，实际
+            // 按键 = ⌘⇧↑——⌘ 是上一快捷键的残留，不得改变选区语义）
+            QTextCursor c = textCursor();
+            ShiftVertScope svScope(m_inShiftVert);
+            // 位置栈镜像（用户最新拍板：Shift+方向键 = 一行一行叠/消除，
+            // 无跳变）：每次延伸把光标真实文本位置入栈，反方向严格按栈
+            // 逐行回弹——列锚定在换机字体重排后必然漂移，栈 = 原路。
+            if (c.hasSelection() && m_shiftSelDir == 1) {
+                // 下移链回撤：按栈逐行上弹（T1/T2：上键严格回到上一行）。
+                // 栈 = [锚点, 扩展…]；弹到只剩锚点时先还原原选区基线
+                //（用户：选中 orders → ↓ → ↑ 必须回到原选区），再一次
+                // 回撤才收拢
+                if (m_selPath.size() >= 2) {
+                    m_selPath.pop_back();
+                    if (m_selPath.size() >= 2) {
+                        c.setPosition(m_selPath.last(), QTextCursor::KeepAnchor);
+                    } else if (m_selBase >= 0 && m_selBase != c.anchor()) {
+                        c.setPosition(m_selBase, QTextCursor::KeepAnchor);
+                        m_selBase = c.anchor(); // 基线已消费
+                    } else {
+                        c.setPosition(c.anchor()); // 收拢回锚点
+                        m_selPath.clear();
+                        m_selBase = -1;
+                        m_shiftSelDir = 0;
+                    }
+                    setTextCursor(c);
+                    wakeCaret();
+                    return;
+                }
+                // 无扩展：直接走基线/收拢
+                if (m_selBase >= 0 && m_selBase != c.anchor()) {
+                    c.setPosition(m_selBase, QTextCursor::KeepAnchor);
+                    m_selBase = c.anchor();
+                } else {
+                    c.setPosition(c.anchor());
+                    m_selPath.clear();
+                    m_selBase = -1;
+                    m_shiftSelDir = 0;
+                }
+                setTextCursor(c);
+                wakeCaret();
+                return;
+            }
+            // 真机取证（发布版默认关；NAUGHT_TRACE=1 时把每次 Shift+↑
+            // 的前后状态落盘，供定位）
+            if (qEnvironmentVariableIsSet("NAUGHT_TRACE")) {
+                const QTextCursor pre = c;
+                const QTextBlock bPre = document()->findBlock(pre.selectionStart());
+                const QTextBlock bPreE = document()->findBlock(pre.selectionEnd());
+                QFile f(QStringLiteral("/tmp/naught-selup-diag.log"));
+                if (f.open(QIODevice::Append | QIODevice::Text)) {
+                    f.write(QStringLiteral(
+                        "SELUP wrap=%1 blocks=%2 cc=%3 before=[%4,%5 a=%6 p=%7] "
+                        "beforeBlocks=[%8..%9] line1=%10 line2=%11\n")
+                        .arg(int(lineWrapMode())).arg(document()->blockCount())
+                        .arg(document()->characterCount())
+                        .arg(pre.selectionStart()).arg(pre.selectionEnd())
+                        .arg(pre.anchor()).arg(pre.position())
+                        .arg(bPre.blockNumber()).arg(bPreE.blockNumber())
+                        .arg(bPre.text().left(12)).arg(bPreE.text().left(12))
+                        .toUtf8());
+                    f.close();
+                }
+            }
+            if (c.hasSelection() && m_shiftSelDir == 0) {
+                // 翻转只对"新鲜选区"（dir==0：⌘Z 恢复/刚建立——用户原案
+                // "半截+整行"）；方向明确后（dir==±1）= 位置栈镜像
+                const int bottom = qMax(c.anchor(), c.position());
+                const int top = qMin(c.anchor(), c.position());
+                c.setPosition(bottom);   // 先落锚点（下端）
+                c.setPosition(top, QTextCursor::KeepAnchor); // 光标到上端
+                setTextCursor(c);
+                m_selPath.clear();       // 翻转基线：锚点入栈，光标 = 基线
+                m_selPath.append(bottom);
+                m_selBase = top;
+            }
+            if (c.blockNumber() == 0 && c.position() > 0) {
+                // 首行 Shift+↑：上方无内容 → 选到行首（用户报"首行没选区"；
+                // 用户场景2：选区已在首行（无前导空行文档）再按 ↑ = 光标
+                // 到行首 0 = "o" 前，不许锁死在列映射位）。直接 KeepAnchor
+                // 到 0——先 setPosition(旧位) 会把锚点也收掉（实测选区变
+                // [0,4] 丢锚点）
+                c.setPosition(0, QTextCursor::KeepAnchor);
+                setTextCursor(c);
+                m_shiftSelDir = -1;
+                if (m_selPath.isEmpty()) { // 新链：锚点入栈，光标 = 基线
+                    m_selPath.append(c.anchor());
+                    m_selBase = c.position();
+                } else if (c.position() != m_selPath.last()) {
+                    m_selPath.append(c.position()); // 续链：只追加，保持镜像
+                }
+                wakeCaret();
+                return;
+            }
+            const int prePos = c.position(); // 上移前位置（空块调整的列门槛用）
+            setTextCursor(c);
+            if (m_selPath.isEmpty()) {
+                m_selPath.append(c.anchor()); // 链起点 = 锚点
+                m_selBase = c.position();     // 基线 = 光标（无原选区时 == 锚点）
+            }
+            // 用控件级 moveCursor（视觉列感知）：换机后字体重排，裸
+            // QTextCursor::movePosition 按字符索引移动 = 与光标错位
+            //（用户报：⌘⇧M 后按住 Shift 上下选中行与光标不对齐）
+            moveCursor(QTextCursor::Up, QTextCursor::KeepAnchor);
+            m_shiftSelDir = -1;
+            // 落在空块（如文档前导空行）且来源列 > 0 → 光标挪到换行符
+            // 之后 = 下一行行首（用户 T3："换行符与 o 之间"）；来源列
+            // == 0（已是块首/行首）→ 停在 0 覆盖换行符（用户场景1，
+            // 不许锁死）
+            {
+                QTextCursor adj = textCursor();
+                const QTextBlock ab = document()->findBlock(adj.position());
+                const QTextBlock pb = document()->findBlock(prePos);
+                if (ab.length() <= 1 && adj.position() == ab.position()
+                    && prePos > pb.position()) {
+                    const int np = qMin(ab.position() + 1, document()->characterCount() - 1);
+                    adj.setPosition(adj.anchor());
+                    adj.setPosition(np, QTextCursor::KeepAnchor);
+                    setTextCursor(adj);
+                }
+            }
+            {
+                const QTextCursor now = textCursor();
+                if (now.position() != m_selPath.last())
+                    m_selPath.append(now.position()); // 入栈 = 镜像回弹依据
+                if (qEnvironmentVariableIsSet("NAUGHT_TRACE")) {
+                    QFile f(QStringLiteral("/tmp/naught-selup-diag.log"));
+                    if (f.open(QIODevice::Append | QIODevice::Text)) {
+                        f.write(QStringLiteral("SELUP after=[%1,%2 a=%3 p=%4]\n")
+                            .arg(now.selectionStart()).arg(now.selectionEnd())
+                            .arg(now.anchor()).arg(now.position()).toUtf8());
+                        f.close();
+                    }
+                }
+            }
+            wakeCaret();
+            return;
+        }
+        if (event->key() == Qt::Key_Down
+            && (event->modifiers() & Qt::ShiftModifier)
+            && !(event->modifiers() & Qt::MetaModifier)
+            && !(event->modifiers() & (Qt::ControlModifier | Qt::AltModifier))) {
+            // 纯 Shift+↓：位置栈回撤 / 尾行到文末 / 向下扩展（入栈）
+            QTextCursor c = textCursor();
+            ShiftVertScope svScope(m_inShiftVert);
+            if (c.hasSelection() && m_shiftSelDir == -1) {
+                // 上移链回撤：按栈逐行下弹（跨机型字体重排后列锚定必然
+                // 漂移，栈 = 每步真实文本位置 → 严格原路镜像）
+                if (m_selPath.size() >= 2) {
+                    m_selPath.pop_back();
+                    if (m_selPath.size() >= 2) {
+                        c.setPosition(m_selPath.last(), QTextCursor::KeepAnchor);
+                    } else if (m_selBase >= 0 && m_selBase != c.anchor()) {
+                        c.setPosition(m_selBase, QTextCursor::KeepAnchor);
+                        m_selBase = c.anchor(); // 基线已消费
+                    } else {
+                        c.setPosition(c.anchor()); // 收拢回锚点
+                        m_selPath.clear();
+                        m_selBase = -1;
+                        m_shiftSelDir = 0;
+                    }
+                    setTextCursor(c);
+                    wakeCaret();
+                    return;
+                }
+                // 无扩展：直接走基线/收拢（T4"按两下回尾符"：无原选区
+                // 时基线 == 锚点 → 直接收拢；有原选区时先还原原选区）
+                if (m_selBase >= 0 && m_selBase != c.anchor()) {
+                    c.setPosition(m_selBase, QTextCursor::KeepAnchor);
+                    m_selBase = c.anchor();
+                } else {
+                    c.setPosition(c.anchor());
+                    m_selPath.clear();
+                    m_selBase = -1;
+                    m_shiftSelDir = 0;
+                }
+                setTextCursor(c);
+                wakeCaret();
+                return;
+            }
+            if (!c.hasSelection()) {
+                const int endPos = document()->characterCount() - 1;
+                QTextBlock after = c.block().next();
+                bool hasContentAfter = false;
+                while (after.isValid()) {
+                    if (after.length() > 1) {
+                        hasContentAfter = true;
+                        break;
+                    }
+                    after = after.next();
+                }
+                if (!hasContentAfter && c.position() < endPos) {
+                    // 尾行无选区 → 选到文末（用户报"尾行没选区"）
+                    if (m_selPath.isEmpty()) {
+                        m_selPath.append(c.anchor());
+                        m_selBase = c.position();
+                    }
+                    c.setPosition(c.position());
+                    c.setPosition(endPos, QTextCursor::KeepAnchor);
+                    setTextCursor(c);
+                    m_selPath.append(endPos);
+                    m_shiftSelDir = 1;
+                    wakeCaret();
+                    return;
+                }
+            }
+            if (m_selPath.isEmpty()) {
+                m_selPath.append(c.anchor()); // 链起点 = 锚点
+                m_selBase = c.position();     // 基线 = 原选区光标（回弹还原原选区）
+            }
+            m_shiftSelDir = 1; // 向下扩展，方向 = 下
+            moveCursor(QTextCursor::Down, QTextCursor::KeepAnchor);
+            {
+                const QTextCursor now = textCursor();
+                if (now.position() != m_selPath.last())
+                    m_selPath.append(now.position());
+            }
+            wakeCaret();
+            return;
+        }
+        if (event->key() == Qt::Key_Down
+            && (event->modifiers() & Qt::ShiftModifier)
+            && (event->modifiers() & Qt::MetaModifier)
+            && !(event->modifiers() & (Qt::ControlModifier | Qt::AltModifier))) {
+            // ⌘⇧↓：⌘ 残留剥离 → 重发纯 Shift+↓ 走本类分支（位置栈镜像
+            // 同纯 Shift+↓；直调基类会绕过入栈/回弹 → 栈失同步）
+            QKeyEvent clone(QEvent::KeyPress, Qt::Key_Down, Qt::ShiftModifier,
+                            event->text());
+            QApplication::sendEvent(this, &clone);
+            return;
         }
         if (event->key() == Qt::Key_Escape && (m_mode != Mode::Normal || m_codeMode)) {
             // 先退工具（画笔），再退视图（编）
@@ -3333,13 +2382,17 @@ protected:
                     toggleCrt(); // 显：T 是 Tube / Time——显像管，回到过去
                 return;
             case Qt::Key_M:
-                if (event->modifiers() & Qt::ShiftModifier)
+                if (event->modifiers() & Qt::ShiftModifier) {
                     toggleMachine(); // 显·切换计算机：M = Machine（琥珀 ↔ 绿磷）
-                return;
+                    return;
+                }
+                break; // 裸 ⌘M = 系统最小化，落回基类（同 ⌘A 病根，审查补漏）
             case Qt::Key_A:
-                if (event->modifiers() & Qt::ShiftModifier)
+                if (event->modifiers() & Qt::ShiftModifier) {
                     declareArtFromSelection(); // 立为图：选区 → 字符画源图（可调画布）
-                return;
+                    return;
+                }
+                break; // 裸 ⌘A = 系统全选，落回基类（同病根：无条件 return 吞键）
             case Qt::Key_I:
                 setDark(true); // 阴：I 如冰（阴冷）
                 return;
@@ -3389,6 +2442,72 @@ protected:
             case Qt::Key_ParenRight:
                 brushReset(); // Shift+"0"在 macOS Qt 中报作右括号键
                 return;
+            case Qt::Key_C:
+                if (event->modifiers() & Qt::ShiftModifier) {
+                    centerToWidth(); // 居中（⌘⇧C：原仅菜单 QAction，死键）
+                    return;
+                }
+                break; // 裸 ⌘C = 系统复制，落回基类
+            case Qt::Key_G:
+                if (event->modifiers() & Qt::ShiftModifier) {
+                    formatBox(0); // 单线框
+                    return;
+                }
+                break;
+            case Qt::Key_H:
+                if (event->modifiers() & Qt::ShiftModifier) {
+                    formatBox(1); // 双线框
+                    return;
+                }
+                break;
+            case Qt::Key_U:
+                if (event->modifiers() & Qt::ShiftModifier) {
+                    formatBox(2); // 圆角框
+                    return;
+                }
+                break;
+            case Qt::Key_V:
+                if (event->modifiers() & Qt::ShiftModifier) {
+                    formatBox(3); // 粗线框（⌘⇧V 接管系统"粘贴并匹配样式"）
+                    return;
+                }
+                break; // 裸 ⌘V = 系统粘贴，落回基类
+            case Qt::Key_J:
+                if (event->modifiers() & Qt::ShiftModifier) {
+                    joinLinesTo(); // 压成一行
+                    return;
+                }
+                break;
+            case Qt::Key_K:
+                if (event->modifiers() & Qt::ShiftModifier) {
+                    restoreLines(); // 还原为多行
+                    return;
+                }
+                break;
+            case Qt::Key_P:
+                if (event->modifiers() & Qt::ShiftModifier) {
+                    pathsToTree(); // 路径列表 → 树
+                    return;
+                }
+                break;
+            case Qt::Key_R:
+                if (event->modifiers() & Qt::ShiftModifier) {
+                    treeToPaths(); // 树 → 路径列表
+                    return;
+                }
+                break;
+            case Qt::Key_Comma:
+                if (event->modifiers() & Qt::ShiftModifier) {
+                    cycleCrtFont(-1); // 上一字体
+                    return;
+                }
+                break;
+            case Qt::Key_Period:
+                if (event->modifiers() & Qt::ShiftModifier) {
+                    cycleCrtFont(+1); // 下一字体
+                    return;
+                }
+                break;
             default:
                 break;
             }
@@ -3525,7 +2644,11 @@ protected:
             }
             if (event->type() == QEvent::MouseMove) {
                 const auto *me = static_cast<QMouseEvent *>(event);
+                const QPointF prev = m_lastMouse;
                 m_lastMouse = posOf(me);
+                // 视图移动追踪：位移 > 3px 视为移动（幽灵加速衰减的触发）
+                if ((m_lastMouse - prev).manhattanLength() > 3.0)
+                    m_mouseMoveClock.start();
                 if (m_mode == Mode::Draw || m_mode == Mode::Erase) {
                     m_canvas->setFootprint(true, m_lastMouse, m_mode == Mode::Erase);
                     const bool held = (me->buttons() & Qt::LeftButton)
@@ -3610,16 +2733,27 @@ private:
             pal.setColor(QPalette::Window, pp.bg);
             pal.setColor(QPalette::Base, pp.bg);
             pal.setColor(QPalette::Text, pp.ink);
-            pal.setColor(QPalette::Highlight, QColor(0x5C, 0x3E, 0x00, 0xB0));
-            pal.setColor(QPalette::HighlightedText, pp.ink);
+            // 选区 = 反相视频（真机时代的标记/反白约定，与光标同哲学）：
+            // 块 = 本机墨色、字 = 本机底色——按机型拟真（旧版固定暗琥珀
+            // 0x5C3E00 全机通用，且退出显后泄漏到常规模式 = 用户报）
+            pal.setColor(QPalette::Highlight,
+                         QColor(pp.ink.red(), pp.ink.green(), pp.ink.blue(), 255));
+            // 实心（用户报：逐字慢选出现"透明选中框"——半透明先盖、
+            // 辉光加工后才显实；真机反白标记 = 实心，这里直接做实）
+            pal.setColor(QPalette::HighlightedText, pp.bg);
         } else if (m_dark) {
             pal.setColor(QPalette::Window, QColor(0, 0, 0));
             pal.setColor(QPalette::Base, QColor(0, 0, 0));
             pal.setColor(QPalette::Text, QColor(255, 255, 255));
+            // 常规模式 = 系统标准蓝选区（不再继承显模式的琥珀残留）
+            pal.setColor(QPalette::Highlight, QColor(0x4A, 0x8C, 0xFF));
+            pal.setColor(QPalette::HighlightedText, QColor(255, 255, 255));
         } else {
             pal.setColor(QPalette::Window, QColor(255, 255, 255));
             pal.setColor(QPalette::Base, QColor(255, 255, 255));
             pal.setColor(QPalette::Text, QColor(0, 0, 0));
+            pal.setColor(QPalette::Highlight, QColor(0x4A, 0x8C, 0xFF));
+            pal.setColor(QPalette::HighlightedText, QColor(0, 0, 0));
         }
         setPalette(pal);
 
@@ -3659,6 +2793,28 @@ private:
         if (m_crtView) {
             m_crtView->markDirty(true); // 缩放强制重拍（节流会让新旧帧交叠）
             m_crtSettleTimer.start(400);
+        }
+        // 复位垂直移动的"期望列"（Qt 内部存储，换字体后陈旧 → 用户报
+        // "换机后 Shift+↑ 选区与光标不对齐，左右换字符才恢复"；且全程
+        // 按住 Shift 选区中途换机同样错位 = 有选区也要复位）：一次水平
+        // 微移（Left+Right 净位移零）重算期望列，微移后恢复原选区与
+        // 方向记忆（微移的中间态会清选区/归零方向）
+        {
+            const int anchor = textCursor().anchor();
+            const int pos = textCursor().position();
+            if (pos > 0 && m_shiftSelDir == 0) { // 新鲜光标才复位；选区链保持镜像
+                // 真实按键路径左+右（净零位移）重算 Qt 内部期望列，
+                // 然后用锚点/位置重建选区——绝不能 setTextCursor(旧游标
+                // 副本)：副本携带陈旧的 x，复辟回去 = 复位白做（实证）
+                QKeyEvent kl(QEvent::KeyPress, Qt::Key_Left, Qt::NoModifier);
+                QKeyEvent kr(QEvent::KeyPress, Qt::Key_Right, Qt::NoModifier);
+                QApplication::sendEvent(this, &kl);
+                QApplication::sendEvent(this, &kr);
+                QTextCursor rebuilt = textCursor(); // 新游标 = 新 x
+                rebuilt.setPosition(anchor);
+                rebuilt.setPosition(pos, QTextCursor::KeepAnchor);
+                setTextCursor(rebuilt);
+            }
         }
     }
 
@@ -3797,10 +2953,16 @@ private:
         if (after == m_inkBefore)
             return;
         m_inkUndo.append({m_inkBefore, after});
-        if (m_inkUndo.size() > 100)
+        m_undoOps.append(false);
+        if (m_inkUndo.size() > 100) {
             m_inkUndo.removeFirst();
+            // 删日志里最早的墨迹条目（不是队首——中间夹着文字步）
+            const int idx = m_undoOps.indexOf(false);
+            if (idx >= 0)
+                m_undoOps.removeAt(idx);
+        }
         m_inkRedo.clear();
-        m_lastWasInk = true;
+        m_redoOps.clear();
     }
 
     void resizeEvent(QResizeEvent *event) override
@@ -3809,6 +2971,12 @@ private:
         updateLineNumberArea();
         if (m_crtView)
             m_crtView->syncGeometry(); // 整面覆盖随窗口缩放
+        // 显·机器原生网格态：字号跟随窗口宽度（窗口化/全屏同一公式，
+        // 不再取决于按键瞬间的旧宽度）
+        if (m_crt && m_crtGridActive) {
+            m_crtGridActive = false; // 防递归（zoomReset 触发的 resize）
+            zoomReset();
+        }
     }
 
     void updateLineNumberArea()
@@ -4170,8 +3338,19 @@ private:
     QVector<Canvas::InkStroke> m_inkBefore;
     bool m_inkSession = false;
     bool m_shiftInkActive = false;
-    bool m_lastWasInk = false;
-    bool m_undoWasInk = false;
+    int m_shiftSelDir = 0; // 最近一次 Shift 竖直方向：-1 上 / +1 下 / 0 无
+    QVector<int> m_selPath; // Shift 竖直链位置栈：每步光标文本位置（含基点），反方向逐行回弹
+    int m_selBase = -1; // 链起点基线光标：原选区光标（回弹先还原原选区，再收拢）
+    struct ShiftVertScope { // 链内竖向移动标记：区分本分支改动与外部干预
+        bool &f;
+        explicit ShiftVertScope(bool &flag) : f(flag) { f = true; }
+        ~ShiftVertScope() { f = false; }
+    };
+    bool m_inShiftVert = false; // 竖向分支正在改光标（外部干预 → 作废链）
+
+    QVector<bool> m_undoOps; // 统一撤销日志：true=文字步 false=墨迹步（时间序）
+    QVector<bool> m_redoOps;
+    bool m_inUndoRedo = false; // 撤销/重做重入保护：contentsChange 不入日志
     bool m_codeMode = false;
     int m_gutterWidth = 0;
     QFont m_codeFont;
@@ -4184,8 +3363,12 @@ private:
     static inline QString s_c64Family;  // 出厂 C64：Press Start 2P（OFL，qrc）
     static inline QHash<QString, QString> s_registeredFonts; // 已注册字体文件 → 族名（去重缓存）
     QTimer m_crtSettleTimer;
+    QTimer m_machineSettle;
     QTimer m_scrollSettle;  // 滚动停稳计时：结束后补全量快照
     bool m_scrolling = false;
+    bool m_crtGridActive = false; // 显·机器原生网格态：resize 重拟合
+    QElapsedTimer m_mouseMoveClock; // 鼠标移动时钟：视图移动期幽灵加速衰减
+    QElapsedTimer m_inputClock;     // 输入突发时钟：打字/删除期链节流 + 半分辨率
     SnapshotCompositor m_compositor; // 快照合成器（全量/增量/脏区）
     QRect m_snapDirty;          // P3：增量快照脏区（编辑器坐标）
     bool m_snapFullDirty = true; // 全量标志（滚动/缩放/换机/首次）

@@ -1,123 +1,220 @@
 # 無 (naught)
 
-*Write in vain.*
+*Write in vain.* — 写了也白写,白写也写。
 
-> **naught** /nɔːt/ — one syllable, Old English for *nothing*, *zero*, *無*.
-> To **come to naught** is to dissolve into nothing — 化为乌有.
-> This is a writing app that believes writing should leave no trace:
-> open it, write, close it. Nothing is saved. Nothing persists. When the
-> app dies, a keystroke brings it back — *nothing becomes something*.
+> **naught** /nɔːt/ —— 单音节古英语:无、零、**無**。
+> **come to naught** = 化为乌有。
+> 这是一款相信"写作不必留下痕迹"的写作软件:打开,写,关闭。
+> 不保存、不恢复、不留档。软件死了,一个按键让它活回来——
+> *无中生有*。
 
-**naught** is a zero-UI writing instrument with a faithful optical
-simulation of the phosphor screens of 1975–1982:
+*English version: [README.en.md](README.en.md).*
 
-- **Amber** — Osborne Executive-class P3 phosphor
-- **Green** — IBM 5100 (1975), P1 phosphor
-- **C64** — a Commodore 64 on a shadow-mask color monitor: 16-color
-  PETSCII palette, real dot-triad phosphor mask, per-machine calibrated
-  afterglow
-- **White** — IBM PC 5150 (1981), CGA white
+## 理念
 
-The screen phenomena are simulated, not the machines: beam spot physics,
-edge diffraction, double-exponential phosphor persistence (calibrated to
-P1/P3/P4/P22 decay curves), rolling scan excitation, warm-up, vignette —
-no menus, no options, no saving. Type on a typewriter-speed canvas of
-ASCII art, format with boxes/trees/centering, or simply let go.
+- **极简美学**:页面就是全部。没有工具栏、没有设置窗口、没有多余
+  的任何东西——「無」的界面只有纸。
+- **禅意美学**:写与灭是一体。质感不来自任何可调的东西,全部来自
+  画面本身——扫描线、磷光、余晖像呼吸一样自然起落。打开即写,
+  关闭即无。
+- **死亡驱力**:每一段在这里写下的文字都走向自己的消失。弗洛伊德
+  把这种朝向消解的本能叫作死亡驱力(Todestrieb)——naught 给了它
+  一个按键:**死**(⌃⌘N)。写完即死,文字不留尸体;再按**生**
+  (⌃⇧⌘N),空白的纸无中生有。
+- **伊卡洛斯**:写作者是伊卡洛斯,飞向意义之阳,蜡翼融化,坠回海面。
+  naught 不提供任何存档来缓冲这次坠落——它相信只有不给退路的写作
+  才会飞得够高。坠海即完成,无迹可寻。
+- **ADHD 友好**:为注意力涣散的大脑设计的写作环境——单一任务
+  (没有标签页、没有通知、没有"要不要保存"的对话框)、即时的视觉
+  反馈(磷光辉光、块状光标、打字机节奏)把注意力锚在当下。写坏了
+  也不可惜——反正都会消失,所以没有完美主义陷阱。
 
-### Quick start
+## 这是什么
 
-```sh
-git clone https://github.com/2liver/naught.git
-cd naught
-cmake -B build -DCMAKE_PREFIX_PATH=/path/to/Qt/6.9.3/macos
-cmake --build build
-open build/naught.app
+**naught(無)** 是一台桌面写作仪器:打开就是一张空白纸,写的东西在
+关窗的一刻化为乌有。草稿、灵感、推敲、宣言——一切写出来就是为了
+消失的文字,都在这里。
+
+按下 ⌘T,它又是**一座 1975–1982 年的显像管陈列馆**:屏幕变成那个
+时代的机器。对着 1981 年的 Osborne 琥珀屏码字,写科幻时,显示器
+就是那台时间机器。
+
+| 机 | 原型 | 年代 | 磷粉 | 出厂字体 |
+|---|------|------|------|----------|
+| 琥珀 | Osborne Executive 类便携机(便携写作机鼻祖) | 1981 | P3 琥珀 | Fusion Pixel(缝合怪中文像素字) |
+| 绿磷 | IBM 5100(第一台便携计算机) | 1975 | P1 绿 | VT323 |
+| C64 | Commodore 64 + 彩监(16 色 PETSCII 真彩) | 1982 | P22 三色 | Press Start 2P |
+| 白磷 | IBM PC 5150(CGA 白字) | 1981 | P4 白 | Fixedsys Excelsior |
+
+模拟的是**画面现象,不是机器**:只重现人眼隔着玻璃看显像管的那层
+质感。无声音、无频闪、无任何"模拟器"部件。
+
+## 特别之处
+
+**模拟显像管(「显」)的物理拟真**(配方与模型见
+[docs/crt-filter.md](docs/crt-filter.md)):
+
+- 磷粉余晖:双指数衰减,按机型对照 P1/P3/P4/P22 实测标定;滚动残影
+  原位渐暗,新敲字符激发增亮后回落
+- 束斑物理:亮度越高束斑越宽——亮字核心饱和、四周变软
+- 2px 柔波扫描线、行扫描激励、真高斯辉光、入场暖机(暗→亮→过冲→
+  回落)、滚动刷新带、噪声灰尘、玻璃暗角与对角反光带
+- 光栅衍射:竖直亮边的红/蓝彩边;C64 是圆点三色阴罩(RGB 荧光粉栅,
+  3px 周期逐通道错相)——真彩机的三色结构,单色机没有
+- 块状反相光标:整格闪烁的炽磷亮块,与 I 形光标同拍同睡
+- 追随视角:锁定 = 复现鼠标离开窗口后的"完美视角";解锁 = 观察者
+  跟随鼠标(视差 + 扫描慢放)
+- 全部效果跑在 GPU 上(QRhi·Metal 离屏渲染 + 回读);打字延迟优先
+
+**写作侧的独特件**:
+
+- **打字机速度打印**:字符画逐行敲出(整页约 1.6s),不是一闪而过
+- **画布与文字分层**:画笔/橡皮擦只碰笔迹;笔迹随磷色与阴/阳变色,
+  与文字统一撤销/重做(100 步);按住 Shift 拖动 = 按住笔刷
+- **立为图**(⇧⌘A):选区立为字符画源图,可缩放、重勾;另有隐藏
+  功能:拖图片进窗口即整页字符画
+- **编程高亮**(⌘B):等宽字体 + 行号 + 语法高亮(KF6,可选依赖)——
+  纯草稿,无运行、无保存
+- **言 / 隔**(⌘L / ⌘F):批量校对搭档——行头尾加「」/ 逐行隔空行
+- **文本处理**:四种线框、压行/还原、路径↔树、居中——作用于选区或
+  当前行/全文,一步撤销
+- 字符缩放与笔刷缩放互不干扰、按住加速;锚定缩放"指哪大哪"
+- 字体三级模型:出厂默认(删不掉)/ 经典库存(6 款,可删)/ 暂时
+  默认;自定义字体放进字体文件夹即用
+
+## 快速上手
+
+打开,写。右键(Windows/Linux)或 macOS 菜单栏「项」= 全部功能入口。
+
+```text
+⌘T      模拟显像管(琥珀)    ⇧⌘M  换机(琥珀→绿→C64→白)
+⌘B      编程高亮(等宽+行号+高亮)  Esc  退出画笔/橡皮擦/编程高亮
+⌘N      清空文字(可撤销)    ⌃⌘N  死          ⌃⇧⌘N  生
 ```
 
-`Cmd+T` enters the CRT; `Cmd+Shift+M` cycles machines; `Cmd+N` clears;
-`⌃⌘N` commits suicide; `⌃⇧⌘N` resurrects (a login-item agent,
-installed by `--install`). See below for the full keymap.
+## 快捷键(「项」菜单全表)
 
----
+> macOS 上 ⌘ = Command;Windows/Linux 一律用 Ctrl(死/生 为
+> Ctrl+Win+N 与 Ctrl+Shift+Win+N)。菜单栏仅 macOS 有(「项」);
+> Windows/Linux 的入口是右键菜单,项目一致。
 
-空白。打开即写，关闭即无。
+### 视图
 
-- 右键 / 双指点按：**摹**（全选并复制）· **空**（清空，可撤销）── **阴** · **阳** ── **涂**（画）· **擦**（橡皮擦）· **消**（清空全部笔迹）── **编**（代码：等宽字体 + 行号 + 语法高亮，无运行无保存）── **显**（回到过去：琥珀磷光 CRT 质感）── **言**（选中行头尾批量加「」，空行跳过）· **隔**（选中的每一行上下补空行，幂等）
-- `Ctrl/Cmd + S`：摹　`Ctrl/Cmd + N`：空　`Ctrl/Cmd + Shift + N`：消（N=消除=naught，对应 Cmd+N 清文字）　`Ctrl/Cmd + I`：阴　`Ctrl/Cmd + O`：阳　`Ctrl/Cmd + D`：涂　`Ctrl/Cmd + E`：擦　`Ctrl/Cmd + B`：编　`Ctrl/Cmd + T`：显（T = Tube / Time，回到过去）　`Ctrl/Cmd + L`：言（L 是「」折角）　`Ctrl/Cmd + F`：隔（F 是"分"的声母）　`Esc`：退出模式　`Ctrl/Cmd + Y`：重做
-- 字体缩放与笔刷互不干扰：`Ctrl/Cmd + = / - / 0` 缩放字号（按住加速）；`Ctrl/Cmd + Shift + = / - / 0` 调节笔刷（初始 1.5 × 字号，之后独立）；涂/擦模式下按住 `Shift` 拖动 = 按住笔刷（触控板只负责移动）
-- 画布层与文字分层：涂/擦只碰笔迹、空/撤销只碰文字；笔迹随文字滚动、每笔落笔时锁定笔宽（缩放不影响已画内容）；切换阴/阳/显时笔迹随文字变色；笔迹与文字统一撤销/重做（`Ctrl/Cmd + Z / Y`，上限 100 步）；打字为 I 形光标，涂/擦模式以画布足迹代替系统光标（实心墨点=笔刷直径，空心圆=擦除直径，随阴/阳变色，无尺寸上限）
-- `Ctrl/Cmd + 滚轮`、触控板捏合：缩放；触控板横向平移 / `Shift + 滚轮`：横向滚动
-- **显**是单一模式、零 UI：一键把屏幕变成 1982 年 Osborne Executive 那类琥珀磷光显像管——缝合怪像素字体（Fusion Pixel，OFL）、扫描线、真高斯辉光、磷粉余晖（滚动残影原位渐暗、新字符激发增亮后回落）、竖直亮边的红/蓝衍射彩边（光栅物理）、噪声灰尘、玻璃暗角、入场暖机与滚动刷新带，以及**块状反相光标**（真机时代的整格闪烁块：炽磷亮块 + 字符反相暗显，与 I 形同拍同睡）。无选项、无声音、无频闪；与编、阴/阳正交可叠加，笔迹与行号都跟随磷色
-- 言/隔是批量校对搭档：**言**给选区每一行头尾加「」（空行跳过、一步撤销、之后整段保持选中），**隔**让选中的**每一行**都像单选那样上下各隔出一个空行（逐行隔离，已是空行则不重复加、一步撤销）——先言后隔，逐行核对
-- 启动跟随系统深浅色；选过阴/阳后本次会话生效，关闭即忘
-- 光标：亮 750ms / 灭 750ms 的慢闪，完整闪烁一次后休眠（输入即唤醒，无残拍）；滚动条交互时淡入、闲置约 1.5 秒淡出（与光标同拍）、悬停把手由 10px 长满 18px
-- 窗口边缘自由拉伸，系统原生全屏（macOS 绿灯 / Windows、Linux 最大化）
+| 功能 | 快捷键 |
+|------|--------|
+| 编程高亮(编) | ⌘B |
+| 模拟显像管(显) | ⌘T |
+| 换机(四机循环) | ⇧⌘M |
+| 追随视角锁定 | ⇧⌘T |
+| 机器原生网格(80 列) | 显会话内 ⌘0 |
+| 立为图(选区 → 字符画源图) | ⇧⌘A |
+| 拖入图片 → 字符画 | 拖拽(隐藏功能) |
+| 退出模式(画笔/橡皮擦/编程高亮) | Esc |
+
+### 文本
+
+| 功能 | 快捷键 |
+|------|--------|
+| 言(行头尾加「」,空行跳过) | ⌘L |
+| 隔(逐行隔空行,幂等) | ⌘F |
+| 单线框 / 双线框 / 圆角框 / 粗线框 | ⇧⌘G / ⇧⌘H / ⇧⌘U / ⇧⌘V |
+| 压成一行 / 还原为多行 | ⇧⌘J / ⇧⌘K |
+| 路径列表 → 树 / 树 → 路径列表 | ⇧⌘P / ⇧⌘R |
+| 居中 | ⇧⌘C |
+
+### 工具
+
+| 功能 | 快捷键 |
+|------|--------|
+| 摹(全选并复制) | ⌘S |
+| 空(清空文字,可撤销) | ⌘N |
+| 阴(黑底)/ 阳(白底) | ⌘I / ⌘O |
+| 涂(画笔)/ 擦(橡皮擦) | ⌘D / ⌘E |
+| 消(清空全部笔迹) | ⇧⌘N |
+| 按住笔刷 | 涂/擦中按住 Shift 拖动 |
+
+### 缩放
+
+| 功能 | 快捷键 |
+|------|--------|
+| 字号放大 / 缩小 / 复位 | ⌘= / ⌘- / ⌘0(按住加速) |
+| 笔刷加粗 / 变细 / 复位 | ⇧⌘= / ⇧⌘- / ⇧⌘0 |
+| 自由缩放 | ⌘+滚轮 / 触控板捏合 |
+| 横向滚动 | ⇧+滚轮 / 触控板横向平移 |
+
+### 字体与编辑
+
+| 功能 | 快捷键 |
+|------|--------|
+| 上一字体 / 下一字体 | ⇧⌘, / ⇧⌘. |
+| 恢复默认字体 | 菜单 |
+| 撤销 / 重做 | ⌘Z / ⌘Y |
+| 软 Tab(4 空格) | Tab |
+
+### 生死
+
+| 功能 | 快捷键 |
+|------|--------|
+| 死(立即退出,无保存提示) | ⌃⌘N |
+| 生(全局键重开,登录项代理持有) | ⌃⇧⌘N |
 
 ## 安装
 
-**一条指令（macOS，无需开发环境）**：
+预构建产物在 [Releases](../../releases)。macOS 包未公证:首次打开请
+右键 → 打开;Windows 的 SmartScreen 选"更多信息 → 仍要运行"。
+
+**macOS 一条指令**(装到 `~/Applications`,进入启动台):
 
     curl -fsSL https://raw.githubusercontent.com/2liver/naught/main/install/one.sh | sh
 
-- 自定义安装位置：`… | sh -s -- <目录>`；只有默认的 `~/Applications` 会出现在启动台（macOS 只索引这个目录和 `/Applications`）。
-- 无法访问 GitHub 时先设置代理，例如 `export https_proxy=http://127.0.0.1:7897`。
+自定义目录:`… | sh -s -- <目录>`(仅默认目录会被启动台索引)。无法访问
+GitHub 时先 `export https_proxy=http://127.0.0.1:7897`。
 
-**Windows**（PowerShell 一条指令，装到 `%LOCALAPPDATA%\Naught`）：
+**Windows**(PowerShell 一条指令;强制 TLS 1.2,直连失败自动走镜像):
 
-    $d="$env:LOCALAPPDATA\Naught"; iwr -useb https://github.com/2liver/naught/releases/latest/download/naught-windows.zip -OutFile $env:TEMP\naught.zip; Expand-Archive $env:TEMP\naught.zip $d -Force; Start-Process "$d\naught.exe"
+    [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; $d='D:\naught'; md $d -Force|Out-Null; $base='https://github.com/2liver/naught/releases/download/v0.3.14/naught-windows.zip'; foreach($m in @('','https://gh-proxy.com/','https://ghproxy.net/','https://gh.ddlc.top/')){try{iwr ($m+$base) -OutFile "$d\n.zip" -ErrorAction Stop; break}catch{}}; Expand-Archive "$d\n.zip" -DestinationPath $d -Force
 
-之后可自行把 `naught.exe` 的快捷方式放到桌面、开始菜单或任务栏。
-
-**Linux**（AppImage，单文件）：
+**Linux**(AppImage 单文件):
 
     curl -fsSL https://github.com/2liver/naught/releases/latest/download/naught-linux.AppImage -o ~/.local/bin/naught && chmod +x ~/.local/bin/naught
 
-也可到 [Releases](../../releases) 手动下载 dmg / zip / AppImage。
+## 从源码构建
 
-## 从源码构建（需要 Qt 6 + CMake；语法高亮为可选依赖 KF6 SyntaxHighlighting）
-
-    git clone --depth 1 https://github.com/KDE/extra-cmake-modules.git
-    git clone --depth 1 https://github.com/KDE/syntax-highlighting.git
-    # 两者按常规 CMake 安装到同一前缀（如 ~/kf6），构建时把该前缀加入 CMAKE_PREFIX_PATH
-
-## 从源码构建（需要 Qt 6 + CMake）
+需要 Qt 6.9+(含 ShaderTools)与 CMake。语法高亮为可选依赖
+(KF6 SyntaxHighlighting;未装则「编」退化为等宽 + 行号):
 
     cmake -S . -B build
     cmake --build build
 
-Qt 不在默认路径时：`-DCMAKE_PREFIX_PATH=<Qt 安装目录>/<版本>/<编译器>`。
-macOS 装进启动台：`./install.sh`。
+Qt 不在默认路径时加 `-DCMAKE_PREFIX_PATH=<Qt 安装目录>/<版本>/<编译器>`。
+macOS 装进启动台:`./install.sh`。
 
-## 设计边界
+## 自检与性能
 
-- **桌面专用**（macOS / Windows / Linux）；不做移动端与 Web 端——无界面、无存储的空白纸在手机触屏上没有栖息地。
-- **关闭即无**：不保存、不恢复、不记忆上一次会话；只有本次会话内的阴/阳与撤销历史。
-
-## 性能
-
-- `--selftest`：几何与行为回归门禁，CI 三平台强制通过。
-- `--bench`：本地基准（离屏软件光栅；真机走 GPU 合成，数值更优）：
-  - 多行文档（2000 行）打字 ≈ 0.5 ms/键；缩放 ≈ 0.2 ms/次；全行程滚动 ≈ 3 ms/步；编模式行号重绘 ≈ 3 ms；100 笔笔迹 ≈ 10 ms。
-  - 显模式（离屏最坏值）：打字 ≈ 0.2 ms/键；缩放 ≈ 0.3 ms/次；滚动 ≈ 5 ms/步。
-  - **锚定缩放**（指哪大哪）：代价与锚点上方块数成正比——常规文档亚毫秒；2000 行文档末端 ≈ 15 ms/步，显模式因光晕强制重拍更高。这是"缩放前后鼠标下是同一行"的精确性代价。
-  - **已知边界**：单行十万字（巨型粘贴）时按键 ≈ 100 ms/次——QPlainTextEdit 的块级换行重排代价与行宽成正比，属 Qt 控件固有特性；正常换行的写作不受影响。
+- `--selftest`:几何与行为回归门禁,CI 三平台强制通过。
+- `--bench`:本地基准(离屏软件光栅;真机走 GPU 合成,数值更优):
+  2000 行文档打字 ≈ 0.5 ms/键,缩放 ≈ 0.2 ms/次,滚动 ≈ 3 ms/步;
+  模拟显像管下打字 ≈ 0.2 ms/键。锚定缩放的代价与锚点上方块数成正比。
+  已知边界:单行十万字(巨型粘贴)≈ 100 ms/次——QPlainTextEdit 的
+  块级重排固有特性,正常写作不受影响。
 
 ## 图标
 
-图标为**思源宋体 Heavy（Source Han Serif SC Heavy）**渲染的「無」字，黑底白字
-（SIL OFL 1.1 授权，见 `resources/icon/OFL.txt`）。已生成 `naught.icns`（macOS）、
-`naught.ico`（Windows 可执行文件）、`icons/naught.png`（运行时窗口图标）。
-
-重新生成：下载 `SourceHanSerifSC-Heavy.otf`（[adobe-fonts/source-han-serif](https://github.com/adobe-fonts/source-han-serif) 的 2.003R 发布包）后：
+「無」字图标由思源宋体 Heavy 渲染(黑底白字,SIL OFL 1.1,见
+`resources/icon/OFL.txt`)。重新生成:
 
     cmake --build build --target naught_icon_tool
     ./build/naught_icon_tool <SourceHanSerifSC-Heavy.otf> build/icons
 
-再把 `build/icons` 下的 `naught.icns`、`naught.ico`、`naught.png` 放回
-`resources/` 与 `resources/icons/` 对应位置。
+再把输出回填 `resources/` 与 `resources/icons/` 对应位置。
+
+## 设计文档
+
+- [docs/crt-filter.md](docs/crt-filter.md) —— 模拟显像管的配方与物理模型
+- [docs/fidelity-audit.md](docs/fidelity-audit.md) —— 各机型拟真度台账
+- [docs/roadmap.md](docs/roadmap.md) —— 里程碑与开工流程
 
 ## 许可证
 
-MIT © 2026 2liver（见 `LICENSE`）。图标所用字体的协议见 `resources/icon/OFL.txt`。
-「显」模式内置的缝合怪像素字体（Fusion Pixel）以 SIL OFL 1.1 授权，
-许可文本见 `resources/fonts/FusionPixel-OFL.txt`。
+MIT © 2026 2liver(见 `LICENSE`)。内置字体各自持 OFL 等许可,
+文本见 `resources/fonts/` 与 `resources/icon/OFL.txt`。

@@ -17,6 +17,10 @@ struct CrtConfig {
     const Crt::Palette *palette = nullptr; // 调色板（静态预设，指针稳定）
     int machine = 0;                      // 0 琥珀 / 1 绿磷 / 2 C64 / 3 白磷
     bool scrolling = false;               // 滚动中：快照降载信号
+    bool typing = false;                  // 输入突发期（打字/删除连发）：链节流
+    bool drawing = false;                 // 画刷会话中（涂/擦按住）：半分辨率回读
+    bool fading = false;                  // 滚动条淡出中：余晖清零（把手残影）
+    bool viewMoving = false;              // 鼠标移动中：余晖幽灵加速衰减
     bool viewLocked = true;               // 追随视角锁定（M1）
     bool screenEntity = false;            // 屏幕实体（曲率/边框；= 解锁态）
     QPointF lastMouse;                    // 人眼代理（反光视差）
@@ -35,6 +39,11 @@ public:
         QRect rect;
     };
     virtual SnapDirty consumeSnapshotDirty() = 0;
+    // 光标叠加（CrtView 顶层绘制——不进余晖历史，无残影）：
+    virtual QRect cursorCellRect() const = 0;   // 光标单元格（编辑器坐标）
+    virtual bool cursorOnGlyph() const = 0;     // 光标压在字符上（非空位）
+    virtual bool sourceHasText() const = 0;     // 文档有实际文字（诊断视口渲染空）
+    virtual bool cursorVisible() const = 0;     // 焦点 + 眨眼亮拍
     // 几何与挂载：CrtView 必须以编辑器为父窗口（alien 覆盖层）
     virtual QRect sourceRect() const = 0;
     virtual QSize sourceViewportSize() const = 0;

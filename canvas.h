@@ -34,6 +34,8 @@ public:
     {
         m_strokes = strokes;
         m_activePts.clear();
+        m_activeOutline = QPainterPath();
+        invalidateCache();
         update();
     }
 
@@ -48,6 +50,7 @@ public:
     void setInk(const QColor &c)
     {
         m_ink = c;
+        invalidateCache(); // 缓存按旧颜色烘的——换色必须重烘
         update();
     }
 
@@ -76,6 +79,8 @@ public:
     void setScrollOffset(const QPointF &o)
     {
         m_offset = o;
+        // 滚动只平移 blit，不重烘（审计风险 1：旧版每次滚动整窗重烘
+        // = 方向键/滚动卡顿的主因）
         update();
     }
 
@@ -83,6 +88,8 @@ public:
     {
         m_activePts.clear();
         m_activePts.append(docPos);
+        m_activeOutline = QPainterPath();
+        m_activeOutline.addEllipse(docPos, m_brush / 2.0, m_brush / 2.0);
         update();
     }
 
@@ -92,6 +99,12 @@ public:
             return;
         if (QLineF(m_activePts.last(), docPos).length() >= 2.0) {
             m_activePts.append(docPos);
+            // 增量轮廓：只描新管段并入缓存——平铺式来回画线不再
+            // 每帧重算整条轮廓（旧版 O(n²)：用户报"一根线来回画就会卡"）
+            QPainterPath seg;
+            seg.moveTo(m_activePts.at(m_activePts.size() - 2));
+            seg.lineTo(docPos);
+            m_activeOutline |= strokeOutline(seg, m_brush);
             update();
         }
     }
@@ -100,8 +113,10 @@ public:
     {
         if (m_activePts.isEmpty())
             return;
-        m_strokes.append(outlineOf(m_activePts, m_brush));
+        m_strokes.append(InkStroke{m_brush, m_activeOutline});
         m_activePts.clear();
+        m_activeOutline = QPainterPath();
+        bakeStroke(m_strokes.last()); // 增量烘焙：只烘新笔画覆盖的瓦片
     }
 
     void clearAll()
@@ -110,6 +125,13 @@ public:
             return;
         m_strokes.clear();
         m_activePts.clear();
+        m_activeOutline = QPainterPath();
+        // 复位擦除态（审计加固：清墨后残留 m_eraseActive/union/original
+        // 会让下一擦除会话用陈旧快照回滚）
+        m_eraseActive = false;
+        m_eraseUnion = QPainterPath();
+        m_eraseOriginal.clear();
+        invalidateCache();
         update();
     }
 
@@ -152,13 +174,24 @@ public:
             tube.addEllipse(c, m_brush / 2.0, m_brush / 2.0);
         }
         m_eraseLast = c;
+        if (!m_eraseActive)
+            m_eraseOriginal = m_strokes; // 会话起点快照
         m_eraseActive = true;
-        applyErase(tube);
+        // 会话累积并集 + 从起点快照重放全集：任何一步的结果 = 一次性
+        // 全集减法的结果（拆分后再减 ≠ 减后再拆——顺序拖动若在中间
+        // 碎片上继续减，后一段会把前一段打出的洞切碎填回，实心内部
+        // 穿孔失效的根因）
+        m_eraseUnion |= tube;
+        m_strokes = m_eraseOriginal;
+        applyErase(m_eraseUnion);
+        invalidateCache();
+        update();
     }
 
     void eraseEnd()
     {
         m_eraseActive = false;
+        m_eraseUnion = QPainterPath();
     }
 
     void applyErase(const QPainterPath &tube)
@@ -176,25 +209,33 @@ public:
             if (after == before)
                 continue;
             changed = true;
-            const QVector<QPainterPath> subs = splitSubpaths(after);
+            const QVector<QPainterPath> subs = splitSubpaths(after, before);
             m_strokes.removeAt(i);
             for (int k = subs.size() - 1; k >= 0; --k)
                 m_strokes.insert(i, InkStroke{width, subs.at(k)});
         }
-        if (changed)
+        if (changed) {
+            invalidateCache();
             update();
+        }
     }
 
-    // 保留曲线元素地把路径拆成子路径
-    static QVector<QPainterPath> splitSubpaths(const QPainterPath &p)
+    // 保留曲线元素地把路径拆成子路径，洞环条件并回（子代理几何审计
+    // 的修法）：只把"本次擦除新打出的洞"并回其容器——判定 = 洞环
+    // 探针点在擦除前(before)是否实心。既有空心（画出来的洞）在
+    // before 里是空心 → 不并回 → 保持独立成片填充 = 填实功能；
+    // 新打的洞在 before 里是实心 → 并回 → 奇偶填充保洞 = 实心内部
+    // 穿孔生效（用户报：实心内部无法直接擦除，只能外部入侵）。
+    static QVector<QPainterPath> splitSubpaths(const QPainterPath &p,
+                                               const QPainterPath &before)
     {
-        QVector<QPainterPath> out;
+        QVector<QPainterPath> loops;
         QPainterPath cur;
         for (int i = 0; i < p.elementCount(); ++i) {
             const QPainterPath::Element &e = p.elementAt(i);
             if (e.isMoveTo()) {
                 if (cur.elementCount() > 0)
-                    out.append(cur);
+                    loops.append(cur);
                 cur = QPainterPath();
                 cur.moveTo(e.x, e.y);
             } else if (e.isLineTo()) {
@@ -206,7 +247,37 @@ public:
             }
         }
         if (cur.elementCount() > 0)
-            out.append(cur);
+            loops.append(cur);
+        QVector<bool> merged(loops.size(), false);
+        QVector<QPainterPath> out;
+        for (int i = 0; i < loops.size(); ++i) {
+            if (merged[i])
+                continue;
+            QPainterPath host = loops.at(i);
+            for (int j = 0; j < loops.size(); ++j) {
+                if (i == j || merged[j])
+                    continue;
+                const QPointF probe = loops.at(j).boundingRect().center();
+                // 只并"闭环的新洞"（擦除前此处实心 + 环闭合）。判别：
+                // 穿孔 = 管段完全在实心内 → 减法产出完整闭合的洞界环；
+                // 填实的碎片 = 管段切碎既有洞界 → 开弧（首尾点分离）。
+                // 只并闭合环：穿孔保洞、填实保留（独立探针验证）
+                const QPainterPath::Element firstE = loops.at(j).elementAt(0);
+                const QPainterPath::Element lastE = loops.at(j).elementAt(
+                    loops.at(j).elementCount() - 1);
+                const bool closed = qAbs(firstE.x - lastE.x) < 1.0
+                                    && qAbs(firstE.y - lastE.y) < 1.0;
+                // 纯橡皮擦（用户五轮拍板：移除填实功能——橡皮擦就是
+                // 橡皮擦）：闭合洞界一律并回容器（并集语义 = 干净的切，
+                // 洞不打、空心不填）
+                const bool merge = closed && host.contains(probe);
+                if (merge) {
+                    host.addPath(loops.at(j));
+                    merged[j] = true;
+                }
+            }
+            out.append(host);
+        }
         return out;
     }
 
@@ -225,14 +296,23 @@ protected:
         p.setRenderHint(QPainter::Antialiasing);
         p.save();
         p.translate(QPointF(m_vpOffset) - m_offset); // 笔迹：文档坐标（随滚动）
-        // 可见区裁剪：只画与窗口相交的笔迹（滚动/打字时的大笔量文档关键）
-        const QRectF viewDoc{QPointF(m_offset), QSizeF(size())};
-        for (const InkStroke &s : m_strokes) {
-            if (!s.path.boundingRect().intersects(viewDoc))
-                continue;
-            p.setPen(Qt::NoPen);
-            p.setBrush(m_ink);
-            p.drawPath(s.path);
+        // 笔迹烘焙缓存（分块 tile）：paintEvent 只 blit 可见瓦片 + 画
+        // 活跃笔画——每帧成本 O(可见瓦片数)，不随笔画数线性增长
+        //（用户报：越画越卡）。瓦片按笔迹分布分块 = 内存有界（审查：
+        // 旧整幅烘焙在长文档上下各画一笔 = 全文高度 pixmap = OOM）
+        if (m_tiles.isEmpty() && !m_strokes.isEmpty())
+            rebuildCache();
+        {
+            const QRectF viewDoc = QRectF(QPointF(0, 0) - QPointF(m_vpOffset) + m_offset,
+                                          QSizeF(size()));
+            const int tx0 = qFloor(viewDoc.left() / kTile), tx1 = qFloor(viewDoc.right() / kTile);
+            const int ty0 = qFloor(viewDoc.top() / kTile), ty1 = qFloor(viewDoc.bottom() / kTile);
+            for (int ty = ty0; ty <= ty1; ++ty)
+                for (int tx = tx0; tx <= tx1; ++tx) {
+                    const auto it = m_tiles.constFind(QPoint(tx, ty));
+                    if (it != m_tiles.constEnd())
+                        p.drawPixmap(QPointF(tx * kTile, ty * kTile), it.value());
+                }
         }
         drawStroke(p, m_activePts, m_brush);
         p.restore();
@@ -256,14 +336,60 @@ protected:
     }
 
 private:
+    void invalidateCache() { m_tiles.clear(); }
+
+    // 瓦片重烘：清空后逐笔烘（restore/clearAll/擦除/换色路径用）
+    void rebuildCache()
+    {
+        m_tiles.clear();
+        for (const InkStroke &s : m_strokes)
+            bakeStroke(s);
+    }
+    // 增量烘焙：只烘该笔画覆盖的瓦片（endStroke 用——每笔成本 O(覆盖瓦片)）
+    void bakeStroke(const InkStroke &s)
+    {
+        const QRectF b = s.path.boundingRect().adjusted(-1, -1, 1, 1);
+        const int tx0 = qFloor(b.left() / kTile), tx1 = qFloor(b.right() / kTile);
+        const int ty0 = qFloor(b.top() / kTile), ty1 = qFloor(b.bottom() / kTile);
+        for (int ty = ty0; ty <= ty1; ++ty)
+            for (int tx = tx0; tx <= tx1; ++tx) {
+                QPixmap &pm = tileAt(QPoint(tx, ty));
+                QPainter p(&pm);
+                p.setRenderHint(QPainter::Antialiasing);
+                p.translate(-tileRect(QPoint(tx, ty)).topLeft()); // 笔迹是文档
+                // 坐标 → 平移到瓦片本地（用户报：画完一笔消失一半/整笔
+                // 消失——漏掉平移，文档坐标直接画进 512 瓦片 = 超出即裁）
+                p.setClipRect(tileRect(QPoint(tx, ty))); // 只画进本瓦片
+                p.setPen(Qt::NoPen);
+                p.setBrush(m_ink);
+                p.drawPath(s.path);
+            }
+    }
+    QRect tileRect(const QPoint &key) const
+    {
+        return QRect(key.x() * kTile, key.y() * kTile, kTile, kTile);
+    }
+    QPixmap &tileAt(const QPoint &key)
+    {
+        auto it = m_tiles.find(key);
+        if (it == m_tiles.end()) {
+            const qreal dpr = window() ? qreal(window()->devicePixelRatioF()) : 1.0;
+            QPixmap pm(QSize(qCeil(kTile * dpr), qCeil(kTile * dpr)));
+            pm.setDevicePixelRatio(dpr); // Retina：1× 烘焙会整片发糊（审查 R2）
+            pm.fill(Qt::transparent);
+            it = m_tiles.insert(key, pm);
+        }
+        return it.value();
+    }
+
     void drawStroke(QPainter &p, const QVector<QPointF> &pts, qreal width) const
     {
         if (pts.isEmpty())
             return;
-        // 与 outlineOf 同一轮廓：作画过程所见 = 松手后所提交，几何唯一
+        // 增量轮廓缓存：作画过程所见 = 松手后所提交，几何唯一且 O(1)
         p.setPen(Qt::NoPen);
         p.setBrush(m_ink);
-        p.drawPath(outlineOf(pts, width).path);
+        p.drawPath(m_activeOutline);
     }
 
     QColor m_ink = QColor(0, 0, 0);
@@ -272,7 +398,12 @@ private:
     QPoint m_vpOffset;
     QVector<InkStroke> m_strokes;
     QVector<QPointF> m_activePts;
+    QPainterPath m_activeOutline; // 活跃笔画增量轮廓缓存（O(1) 作画）
+    static constexpr int kTile = 512;      // 瓦片边长（逻辑像素）
+    QHash<QPoint, QPixmap> m_tiles;       // 笔迹烘焙瓦片（键 = 瓦片网格坐标）
     QPointF m_eraseLast;
+    QPainterPath m_eraseUnion; // 橡皮会话管段并集（从起点快照重放全集）
+    QVector<InkStroke> m_eraseOriginal; // 会话起点笔迹快照
     bool m_eraseActive = false;
     bool m_fpVisible = false;
     bool m_fpErase = false;

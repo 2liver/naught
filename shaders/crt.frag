@@ -1,42 +1,39 @@
 #version 450
+// crt.frag —— 「显」主着色器：内容（余晖合成结果纹理，最近邻采样=
+// 与旧存储缓冲逐纹素同值）→ 衍射/束斑/聚焦 → 辉光叠加（小图线性
+// 采样，与 Crt::phosphorBloom 的 max 叠加同模型）→ 屏幕空间栅网/
+// 扫描线/灰尘/玻璃/扫描时序/暖机/暗角。
 layout(location = 0) in vec2 v_uv;
 layout(location = 0) out vec4 frag;
 layout(std140, binding = 0) uniform buf {
     vec2 view;
     vec2 texSize;
     vec2 timeInfo;   // x = 运行秒数，y = 暖机毫秒（-1 = 非暖机期）
-    vec2 flags;      // x = 实验·屏幕实体，y = 保留
+    vec2 flags;      // x = 实验·屏幕实体，y = 机型
     vec4 scanTint;   // 扫描线暗行掺色（调色板）
     vec4 refl;       // 玻璃反光色（调色板）
     vec4 dustCol;    // 灰尘点色（调色板）
+    vec4 persist1;   // 余晖快分量（主着色器不用，块布局一致）
+    vec4 persist2;   // 余晖慢分量
+    vec4 glowInfo;   // x = 辉光 alpha，y/z = 1/小图宽高，w = 帧时差 ms
 } ubuf;
-layout(std430, binding = 1) buffer Pixels { uint p[]; } px;
-
-uint texel(uint x, uint y)
-{
-    return px.p[y * uint(ubuf.texSize.x) + x];
-}
+layout(binding = 1) uniform sampler2D content; // 余晖合成结果（最近邻）
+layout(binding = 2) uniform sampler2D glow;    // 辉光小图（线性）
 
 vec3 sampleAt(vec2 uv)
 {
-    uv = clamp(uv, 0.0, 1.0);
-    uint x = uint(uv.x * ubuf.texSize.x);
-    uint y = uint((1.0 - uv.y) * ubuf.texSize.y); // Metal 的 Y 翻转：屏幕顶=缓冲顶
-    x = min(x, uint(ubuf.texSize.x) - 1u); // 边缘钳位：uv=1.0 会越界一行
-    y = min(y, uint(ubuf.texSize.y) - 1u);
-    uint v = texel(x, y);
-    // RGBA8888 在 GPU 上按小端解释：R 在低字节
-    return vec3(float(v & 255u), float((v >> 8) & 255u), float((v >> 16) & 255u)) / 255.0;
+    return texture(content, clamp(uv, 0.0, 1.0)).rgb;
 }
 
 vec2 curve(vec2 uv) {
     vec2 c = uv - 0.5;
-    // 视差（鼠标即观察者）：左右——观察者侧的图像后退；上下——已确认为直觉同向
+    // 视差（鼠标即观察者）：左右——观察者侧的图像后退；上下——用户五轮
+    // 拍板对调方向（基点不变、左右不变）：鼠标向上 → 电子图像向下
+    //（旧版 c.y -= 观感反向）。铁律：不做桶形畸变（毁打字）——
+    // 视差只平移电子图像，不弯曲字形。
     c.x += ubuf.view.x * 0.032;
-    c.y -= ubuf.view.y * 0.032;
-    float r2 = dot(c, c);
-    float k = mix(0.05, 0.10, step(0.5, ubuf.flags.x)); // 实验·屏幕实体：曲率加倍
-    return c * (1.0 + k * r2) + 0.5;
+    c.y += ubuf.view.y * 0.032;
+    return c + 0.5;
 }
 
 float hash21(vec2 p)
@@ -66,12 +63,13 @@ float triadDot(vec2 sp, float phase)
 
 void main()
 {
-    // ---- 内容空间：弯曲的电子图像（含视差）。栅网/扫描线/玻璃都在
+    // ---- 内容空间：电子图像（含视差平移）。栅网/扫描线/玻璃都在
     // 屏幕空间——真机上它们是固定在玻璃上的，不随视差移动 ----
-    // 实验·屏幕实体：曲率加倍时输入内缩同步加大——内容永不越界（不裁字）
+    // 铁律：无桶形畸变 → 内容 1:1 采样、零内缩。旧内缩（0.965 缩放 +
+    // 0.0175 偏移）是桶形时代的防越界补丁：它把内容放大 3.6% 并把
+    // 顶部/左侧 ~5px 裁出屏外——顶部第一行文字被吃、整幅偏大（用户报）。
     float ent = step(0.5, ubuf.flags.x);
-    vec2 inuv = v_uv * mix(0.965, 0.93, ent) + mix(0.0175, 0.035, ent);
-    vec2 cuv = clamp(curve(inuv), 0.0, 1.0);
+    vec2 cuv = clamp(curve(v_uv), 0.0, 1.0);
     vec3 col = sampleAt(cuv);
 
     // 真衍射。单色机：亮边 ±1px R/B 微彩边（bright(x)−bright(x±1) 差分，
@@ -82,15 +80,15 @@ void main()
     // 亮度（能量）随距离衰减（二阶更弱）
     {
         const float px = 1.0 / ubuf.texSize.x;
-        vec3 lm = sampleAt(clamp(cuv - vec2(px, 0.0), 0.0, 1.0));
-        vec3 rp = sampleAt(clamp(cuv + vec2(px, 0.0), 0.0, 1.0));
+        vec3 lm = sampleAt(cuv - vec2(px, 0.0));
+        vec3 rp = sampleAt(cuv + vec2(px, 0.0));
         const vec3 w = vec3(0.333);
         bool c64disp = ubuf.flags.y > 1.5 && ubuf.flags.y < 2.5;
         if (c64disp) {
-            vec3 lm2 = sampleAt(clamp(cuv - vec2(px * 2.0, 0.0), 0.0, 1.0));
-            vec3 rp2 = sampleAt(clamp(cuv + vec2(px * 2.0, 0.0), 0.0, 1.0));
-            vec3 lmh = sampleAt(clamp(cuv - vec2(px * 0.5, 0.0), 0.0, 1.0));
-            vec3 rph = sampleAt(clamp(cuv + vec2(px * 0.5, 0.0), 0.0, 1.0));
+            vec3 lm2 = sampleAt(cuv - vec2(px * 2.0, 0.0));
+            vec3 rp2 = sampleAt(cuv + vec2(px * 2.0, 0.0));
+            vec3 lmh = sampleAt(cuv - vec2(px * 0.5, 0.0));
+            vec3 rph = sampleAt(cuv + vec2(px * 0.5, 0.0));
             float eR2 = max(0.0, dot(col, w) - dot(rp2, w));
             float eL2 = max(0.0, dot(col, w) - dot(lm2, w));
             float eR1 = max(0.0, dot(col, w) - dot(rp, w));
@@ -120,12 +118,12 @@ void main()
     // 饱和、四周变软变晕，暗处不动
     {
         const vec2 off = 1.0 / ubuf.texSize;
-        vec3 blur = (sampleAt(clamp(cuv + vec2( off.x, 0.0), 0.0, 1.0))
-                   + sampleAt(clamp(cuv - vec2( off.x, 0.0), 0.0, 1.0))) * 0.24
-                  + (sampleAt(clamp(cuv + vec2( off.x * 2.0, 0.0), 0.0, 1.0))
-                   + sampleAt(clamp(cuv - vec2( off.x * 2.0, 0.0), 0.0, 1.0))) * 0.14
-                  + (sampleAt(clamp(cuv + vec2(0.0,  off.y), 0.0, 1.0))
-                   + sampleAt(clamp(cuv + vec2(0.0, -off.y), 0.0, 1.0))) * 0.12;
+        vec3 blur = (sampleAt(cuv + vec2( off.x, 0.0))
+                   + sampleAt(cuv - vec2( off.x, 0.0))) * 0.24
+                  + (sampleAt(cuv + vec2( off.x * 2.0, 0.0))
+                   + sampleAt(cuv - vec2( off.x * 2.0, 0.0))) * 0.14
+                  + (sampleAt(cuv + vec2(0.0,  off.y))
+                   + sampleAt(cuv + vec2(0.0, -off.y))) * 0.12;
         col = clamp(col + blur * smoothstep(0.12, 0.85, lum) * 0.40, 0.0, 1.0);
     }
 
@@ -133,13 +131,30 @@ void main()
     // 微微发糊（屏幕空间锚定，随玻璃固定）
     {
         const vec2 off = 1.0 / ubuf.texSize;
-        vec3 blur4 = (sampleAt(clamp(cuv + vec2( off.x, 0.0), 0.0, 1.0))
-                    + sampleAt(clamp(cuv - vec2( off.x, 0.0), 0.0, 1.0))
-                    + sampleAt(clamp(cuv + vec2(0.0,  off.y), 0.0, 1.0))
-                    + sampleAt(clamp(cuv + vec2(0.0, -off.y), 0.0, 1.0))) * 0.25;
+        vec3 blur4 = (sampleAt(cuv + vec2( off.x, 0.0))
+                    + sampleAt(cuv - vec2( off.x, 0.0))
+                    + sampleAt(cuv + vec2(0.0,  off.y))
+                    + sampleAt(cuv + vec2(0.0, -off.y))) * 0.25;
         float corner = smoothstep(0.55, 0.85, length(v_uv - 0.5));
         col = mix(col, blur4, corner * 0.35);
     }
+
+    // 常驻字体光效（用户拍板保留的"Shift 笔刷发光"移植）：轻帐篷
+    // 模糊 18% 混合——像素字保持锐利核心的同时带一圈极淡光晕（旧
+    // Shift 会话半分辨率的朦胧质感；18% 不糊分辨率，用户后续微调）
+    {
+        const vec2 off = 1.0 / ubuf.texSize;
+        vec3 tent = sampleAt(cuv) * 0.5
+                  + (sampleAt(cuv + vec2( off.x, 0.0)) + sampleAt(cuv - vec2( off.x, 0.0))
+                   + sampleAt(cuv + vec2(0.0,  off.y)) + sampleAt(cuv + vec2(0.0, -off.y))) * 0.125;
+        col = mix(col, tent, 0.10);
+    }
+
+    // 辉光叠加：max(col, 小图线性采样 × alpha)——与 Crt::phosphorBloom
+    // 的 max 叠加同模型（CPU 版最近邻放大，此处线性放大更平滑）。
+    // 叠加发生在栅网之前：辉光与内容一同被掩膜/扫描线调制（与 CPU
+    // 烘拍顺序一致）
+    col = max(col, texture(glow, cuv).rgb * ubuf.glowInfo.x);
 
     // ---- 屏幕空间：固定不动的磷粉栅、扫描线（真玻璃结构）----
     vec2 sp = v_uv * ubuf.texSize; // 屏幕物理像素
@@ -149,8 +164,8 @@ void main()
     // ——逐通道调制，白字出 RGB 栅纹；单色机保持单栅
     {
         const float px = 1.0 / ubuf.texSize.x;
-        float lumL = dot(sampleAt(clamp(cuv - vec2(px, 0.0), 0.0, 1.0)), vec3(0.333));
-        float lumR = dot(sampleAt(clamp(cuv + vec2(px, 0.0), 0.0, 1.0)), vec3(0.333));
+        float lumL = dot(sampleAt(cuv - vec2(px, 0.0)), vec3(0.333));
+        float lumR = dot(sampleAt(cuv + vec2(px, 0.0)), vec3(0.333));
         float beamW = mix(0.12, 0.42, smoothstep(0.05, 0.9, lum));
         float grad = (lumL - lumR) * 0.5;
         bool c64 = ubuf.flags.y > 1.5 && ubuf.flags.y < 2.5;
@@ -186,9 +201,14 @@ void main()
         col += grain + dust * ubuf.dustCol.rgb * 0.10;
     }
 
-    // 玻璃反光带：一道对角淡白反光，随观察者移动（真玻璃反射）
+    // 玻璃反光带：一道对角淡白反光（charter：一次性预渲染覆盖层）。
+    // 反光带 = n·p ≈ 0.62 的斜线（±1/3.2 距离渐散）。基准角必须让
+    // 带落在屏内：n = normalize(0.30, 0.60)——锁定正对视角下带从
+    // (1, 0.19) 斜穿到 (0, 0.69)，+0.045 强度 ≈ +2.8 亮度（极淡，
+    // 玻璃微光；旧版误用 n=normalize(0.35,0.94) 使 dot=1.0 → 带
+    // 飞出屏外，反光凭空消失）
     {
-        vec2 n = normalize(vec2(ubuf.view.x * 0.8, 0.6));
+        vec2 n = normalize(vec2(0.30 + ubuf.view.x * 0.10, 0.60));
         float refl = pow(max(0.0, 1.0 - abs(dot(n, vec2(0.35, 0.94)) - 0.62) * 3.2), 2.0);
         col += ubuf.refl.rgb * refl * 0.045;
     }
@@ -227,16 +247,21 @@ void main()
         col *= wk;
     }
 
-    // 暗角（屏幕空间——玻璃固定）；实验·屏幕实体：暗角略强 + 边框
-    // 阴影带（压暗但不裁字——文字仍可见）+ 一道固定对角玻璃反光
-    float d = length(v_uv - 0.5) * 1.5;
-    col *= 1.0 - mix(0.14, 0.20, ent) * smoothstep(0.55, 1.0, d); // 暗角软化：真 CRT 的四角渐暗，但旧值在 C64 蓝底上显得简陋
+    // 暗角（屏幕空间——玻璃固定）：从半程起渐暗的连续径向渐变——
+    // 四角与边缘之间无接缝（旧版起步过早 + 边框带过窄过硬，观感
+    // 是"四个暗角之间有明显缝隙、像黑边框"——用户报）。
+    float d = length(v_uv - 0.5) * 1.35;
+    col *= 1.0 - mix(0.14, 0.17, ent) * smoothstep(0.50, 1.0, d);
     if (ent > 0.5) {
+        // 边框阴影带：宽 15% 的柔和渐散（旧版 7% 窄带 55% 压暗 = 硬黑边）。
+        // 压暗但不裁字——文字仍可见
         vec2 ed = abs(v_uv - 0.5) * 2.0; // 0 中心 → 1 边缘
-        float bezel = smoothstep(0.86, 1.0, max(ed.x, ed.y));
-        col *= 1.0 - 0.55 * bezel;
-        float gl = pow(max(0.0, 1.0 - abs(v_uv.x * 0.6 + v_uv.y * 0.8 - 0.55) * 3.0), 2.0);
-        col += ubuf.refl.rgb * gl * 0.03;
+        float bezel = smoothstep(0.70, 1.0, max(ed.x, ed.y));
+        col *= 1.0 - 0.30 * bezel;
+        // 旧版这里还有一道 ent 专属斜向玻璃反光 gl（0.03 浮点强度 =
+        // +19 亮度）——在暗底上是 +105% 的刺眼斜亮带，与四角暗角
+        // 拼出"黑边框感"（用户报：暗角之间有缝隙）。主反光带已
+        // 覆盖 charter 的"对角淡白反光"，此处删除
     }
 
     frag = vec4(clamp(col, 0.0, 1.0), 1.0);

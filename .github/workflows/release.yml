@@ -1,4 +1,4 @@
-name: build
+name: release
 
 on:
   push:
@@ -9,8 +9,28 @@ permissions:
   contents: write
 
 jobs:
+  # 门禁：只有指向 main 尖端的 tag 才走全量发布管线。历史补打的 tag
+  # （版本考古）触发即跳过——不浪费三平台构建，也不刷旧版 Release。
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.check.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch main tip
+        run: git fetch origin main --depth 1
+      - id: check
+        run: |
+          if [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
     name: ${{ matrix.os }}
+    needs: gate
+    if: needs.gate.outputs.publish == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -124,6 +144,10 @@ jobs:
         run: |
           windeployqt build\Release\naught.exe
           Copy-Item "$env:RUNNER_TEMP\kf6\bin\KF6SyntaxHighlighting.dll" build\Release\
+          # 砍 opengl32sw.dll（20.6MB）：Qt 的软件桌面 OpenGL 回退。
+          # 本应用的 QRhi 走 D3D11/12→ANGLE(GLES2)→Null，永不触碰
+          # 桌面 GL——zip 体积约减三分之一
+          Remove-Item build\Release\opengl32sw.dll -ErrorAction SilentlyContinue
           Compress-Archive -Path build\Release\* -DestinationPath naught-windows.zip
 
       - name: Package Linux (AppImage)

@@ -19,6 +19,7 @@ void SnapshotCompositor::paint(QImage &img) const
     // 块状反相光标：只在显模式、有焦点、眨眼"亮"拍时画（休眠 = 隐去，
     // 与原生光标同一节拍；见 syncNativeCaretWidth）。
     const bool cursorBlock = m_e.m_crt && m_e.hasFocus()
+        && !m_e.textCursor().hasSelection() // 选区激活时不叠加（防二次反相成洞）
         && m_e.m_blinkTimer.isActive() && m_e.m_blinkHalf % 2 == 0;
     {
         QPainter p(&img);
@@ -30,6 +31,10 @@ void SnapshotCompositor::paint(QImage &img) const
         // 有效缩放 = 画笔变换 × 图像 DPR），所以这里绝不能手动再
         // p.scale(dpr)——二次相乘会把内容放大推出画面（右侧滚动条把手
         // 完全消失、文字只剩左上象限的根源），逻辑坐标交给引擎映射。
+        // 强制文档布局就绪：QPlainTextEdit 的布局是惰性的——帧重拍
+        // 可能赶在布局完成前，视口渲染为空（快照失字、"黑屏一会"的
+        // 残因）。documentSize() 触发布局计算后再渲染视口
+        m_e.document()->documentLayout()->documentSize();
         if (m_e.viewport())
             m_e.viewport()->render(&p, m_e.viewport()->pos());
         paintExcitation(p); // 磷粉激发：新字符在文字之上加色增亮（900ms 内）
@@ -57,7 +62,9 @@ void SnapshotCompositor::paint(QImage &img) const
             p.restore();
         }
     } // 画家析构后直接回写像素，避免与光栅引擎缓存交错
-
+    // 光标回快照（审查结论：顶层叠加在已辉光帧上反相 → 光晕环窄线 +
+    // 阈值失准；快照内反相经辉光整体调制 = 稳定版观感）。残影改由
+    // persist 着色器的"光标区不进历史"掩膜根治
     if (cursorBlock)
         paintCursor(img);
 }
@@ -67,6 +74,7 @@ void SnapshotCompositor::paintRegion(QImage &img, const QRect &dirty) const
     if (dirty.isEmpty())
         return;
     const bool cursorBlock = m_e.m_crt && m_e.hasFocus()
+        && !m_e.textCursor().hasSelection() // 选区激活时不叠加（防二次反相成洞）
         && m_e.m_blinkTimer.isActive() && m_e.m_blinkHalf % 2 == 0;
     {
         QPainter p(&img);
@@ -96,7 +104,7 @@ void SnapshotCompositor::paintRegion(QImage &img, const QRect &dirty) const
         }
     }
     if (cursorBlock)
-        paintCursor(img);
+        paintCursor(img); // 光标回快照（掩膜防残影，见 paint()）
 }
 
 QRect SnapshotCompositor::computeDirty(int from, int removed, int added) const
@@ -125,6 +133,13 @@ QRect SnapshotCompositor::computeDirty(int from, int removed, int added) const
         below.setTop(firstR.top());
         dirty |= below;
     }
+    // 行号槽补全（用户报：⌘B 换行后的行号不显示，得再换一行前一行的
+    // 才出现）：块几何与"下方至底"都以视口为锚（x ≥ 槽宽），行号槽
+    // 本身永远不在脏区内——换行/插入后下方行号永不重绘，只有光标激发
+    // 光环偶尔擦进槽内，行号才"晚一步"出现。左缘拉到 0、垂直跨度
+    // 不变：行号槽随文字一起重绘（视口/画布在槽内本就无像素，无副作用）
+    if (!dirty.isNull())
+        dirty.setLeft(0);
     return dirty;
 }
 
@@ -157,14 +172,22 @@ void SnapshotCompositor::paintExcitation(QPainter &p) const
     p.setCompositionMode(QPainter::CompositionMode_Plus);
     p.setPen(Qt::NoPen);
     const Crt::Palette &pp = m_e.crtPalette();
-    const qreal amps[3] = { a, a * 0.45, a * 0.2 };
-    const int grow[3] = { 1, 3, 6 };
-    for (int i = 0; i < 3; ++i) {
-        p.setBrush(QColor(pp.cursorBlock.red(), pp.cursorBlock.green(),
-                          pp.cursorBlock.blue(), qRound(255.0 * amps[i])));
-        const int g = grow[i];
-        p.drawRoundedRect(cell.adjusted(-g, -g, g, g), 4 + g, 4 + g);
-    }
+    // 软径向渐变（用户报"字符色高光窄线"：旧版三个嵌套圆角矩形的
+    // 硬边在辉光衰减期退成字符色的锐利窄线，落在光标前刚打的字旁；
+    // 渐变无边 = 无窄线，且更接近磷粉的连续衰减）
+    const QPointF center = cell.center();
+    const qreal radius = qMax(cell.width(), cell.height()) * 0.5 + 8.0;
+    QRadialGradient grad(center, radius);
+    const auto glowCol = [&](qreal amp) {
+        return QColor(pp.cursorBlock.red(), pp.cursorBlock.green(),
+                      pp.cursorBlock.blue(), qRound(255.0 * amp));
+    };
+    grad.setColorAt(0.0, glowCol(a));
+    grad.setColorAt(0.35, glowCol(a * 0.4));
+    grad.setColorAt(0.7, glowCol(a * 0.12));
+    grad.setColorAt(1.0, glowCol(0.0));
+    p.setBrush(grad);
+    p.drawEllipse(center, radius, radius);
     p.restore();
 }
 
@@ -185,14 +208,32 @@ void SnapshotCompositor::paintCursor(QImage &img) const
     const int x0 = qFloor(cell.x() * dpr), y0 = qFloor(cell.y() * dpr);
     const int x1 = qCeil((cell.x() + cell.width()) * dpr);
     const int y1 = qCeil((cell.y() + cell.height()) * dpr);
-    // 双色反相：t = 像素亮度在 底→墨 间的归一位置；out = lerp(块, 底, t)
+    const int w = img.width(), h = img.height();
+    // IBM PC（机型 3）：真机 BIOS 文本光标 = 下划线（单元格底缘 2~3
+    // 扫描线的亮条，字形保持可见、无反相）。其余机型 = 整格反相块
+    //（Osborne 的块光标 / C64 的闪烁块——charter 记录；用户四轮考据
+    // 指正：并非所有机型都是块状）
     const Crt::Palette &pp = m_e.crtPalette();
+    if (m_e.machine() == 3 && !m_e.cursorOnGlyph()) {
+        const QColor ucol = m_e.m_codeMode ? QColor(0xE8, 0xE8, 0xE0) : pp.cursorBlock;
+        const int bandH = qMax(2, qCeil(cell.height() * dpr * 0.18));
+        for (int y = qMax(0, y1 - bandH); y < y1 && y < h; ++y) {
+            uchar *line = img.scanLine(y);
+            for (int x = qMax(0, x0); x < x1 && x < w; ++x) {
+                const int i = x * 4;
+                line[i + 2] = uchar(ucol.red());
+                line[i + 1] = uchar(ucol.green());
+                line[i] = uchar(ucol.blue());
+            }
+        }
+        return;
+    }
+    // 双色反相：t = 像素亮度在 底→墨 间的归一位置；out = lerp(块, 底, t)
     // 编模式（多彩语法高亮）下块光标用中性暖白：绿磷块在代码里太突兀
     const QColor block = m_e.m_codeMode ? QColor(0xE8, 0xE8, 0xE0) : pp.cursorBlock;
     const int bgSum = pp.bg.red() + pp.bg.green() + pp.bg.blue();
     const int inkSum = pp.ink.red() + pp.ink.green() + pp.ink.blue();
     const int span = qMax(1, inkSum - bgSum); // 防御除零（底=墨时）
-    const int w = img.width(), h = img.height();
     // 注意：ARGB32 内存布局为 BGRA，字节直接寻址（见 edgeDiff 同款注释）。
     // 光标可能滚出视口（cursorRect 变负）——循环必须裁剪到图像内，
     // 否则 scanLine(负y) 段错误（用户"插入图片后缩放闪退"的真凶）
