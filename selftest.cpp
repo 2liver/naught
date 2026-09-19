@@ -3545,6 +3545,69 @@ bool Editor::selftest()
             QApplication::processEvents();
             qInfo("FREEZE-EXIT");
         }
+        // ============ NAUGHT_CURPROBE：光标像素取证 ============
+        if (qEnvironmentVariableIsSet("NAUGHT_CURPROBE")) {
+            qInfo("CURPROBE-ENTER");
+            const auto settleMs = [&](int ms) {
+                QEventLoop sl;
+                QTimer::singleShot(ms, &sl, &QEventLoop::quit);
+                sl.exec();
+                QApplication::processEvents();
+            };
+            const auto snapView = [&](const char *tag) {
+                QImage img(e.size(), QImage::Format_ARGB32);
+                img.fill(Qt::black);
+                e.m_crtView->render(&img); // 触发 paintEvent（m_shown + 光标叠加）
+                img.save(QStringLiteral("/tmp/curprobe_%1.png").arg(QLatin1String(tag)));
+                qInfo("CURPROBE %s saved %dx%d", tag, img.width(), img.height());
+            };
+            e.toggleCrt();
+            QApplication::processEvents();
+            e.setPlainText(QStringLiteral("你好世界abc i l .\n"));
+            e.show();
+            e.setFocus();
+            e.resize(960, 720);
+            QApplication::processEvents();
+            settleMs(900);
+            e.m_blinkTimer.start();
+            e.m_blinkHalf = 0;
+            // 光标压在 CJK 字"好"上（位置 1）
+            {
+                QTextCursor c = e.textCursor();
+                c.setPosition(1);
+                e.setTextCursor(c);
+            }
+            QApplication::processEvents();
+            settleMs(150);
+            snapView("on-cjk");
+            // 光标压在窄字符 i 上（位置 7 = 好世 界abc 后的 i? 数一下：
+            // 你0好1世2界3a4b5c6空格7i8空格9l10.11）→ 位置 7
+            {
+                QTextCursor c = e.textCursor();
+                c.setPosition(7);
+                e.setTextCursor(c);
+            }
+            QApplication::processEvents();
+            settleMs(150);
+            snapView("on-i");
+            // 打字态：文末再打一个字符
+            {
+                QTextCursor c = e.textCursor();
+                c.movePosition(QTextCursor::End);
+                e.setTextCursor(c);
+            }
+            QApplication::processEvents();
+            {
+                QKeyEvent kt(QEvent::KeyPress, 0, Qt::NoModifier, QStringLiteral("x"));
+                QApplication::sendEvent(&e, &kt);
+            }
+            QApplication::processEvents();
+            settleMs(120);
+            snapView("typing");
+            e.toggleCrt();
+            QApplication::processEvents();
+            qInfo("CURPROBE-EXIT");
+        }
         // ============ NAUGHT_FUZZ：第六轮闪退复现/功能矩阵/暴力乱测 ============
         if (qEnvironmentVariableIsSet("NAUGHT_FUZZ")) {
             qInfo("FUZZ-ENTER");

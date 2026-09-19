@@ -74,10 +74,15 @@ public:
     QRect cursorCellRect() const override
     {
         QRect cell = cursorRect(textCursor());
-        // 满格块（对齐稳定版观感）：一律用字体标准格宽——旧实现用
-        // 光标位字符的推进宽，窄字符（i/l/标点）上块光标缩成细窄
-        // 竖条 = 用户报的"常规光标那种细窄高亮竖线"（非复古满格块）
-        cell.setWidth(qMax(1, qCeil(fontMetrics().horizontalAdvance(QLatin1Char('M')))));
+        // 块宽 = max(标准格宽, 光标位字符的推进宽)：窄字符（i/l/标点）
+        // 用满格块（防细窄竖条），宽字符（CJK 双格）整字覆盖（用户报
+        // "压在字上压不全、只有半边字"——旧版两版各错一边，取 max 两边都对）
+        const QChar ch = document()->characterAt(textCursor().position());
+        const qreal charAdv = (ch.isNull() || ch == QChar::ParagraphSeparator)
+                                  ? 0.0
+                                  : fontMetrics().horizontalAdvance(ch);
+        const qreal cellAdv = fontMetrics().horizontalAdvance(QLatin1Char('M'));
+        cell.setWidth(qMax(1, qCeil(qMax(cellAdv, charAdv))));
         return cell.translated(viewport()->pos());
     }
     bool cursorUnderline() const override { return m_machine == 3; }
@@ -1694,7 +1699,18 @@ public:
             // 不需要销毁、不需要摘除任何属性——事件分发天然恢复。
             if (m_crtView)
                 m_crtView->hide();
-            viewport()->releaseMouse(); // 防御：抓取会话不跨显模式残留
+            // 不在此处 releaseMouse（第五轮二分定位 + 八轮实机铁证
+            // vpLum=15：无抓取时强释放 → 视口渲染被破坏 → 快照失字 →
+            // 画面冻结/字隐形/删掉的字常驻）。收口与 toggleMode 同款：
+            // 会话终结，真机抓取由 keyReleaseEvent 的 Shift 分支统一释放
+            if (m_shiftInkActive) {
+                m_shiftInkActive = false;
+                if (m_mode == Mode::Draw)
+                    m_canvas->endStroke();
+                else if (m_mode == Mode::Erase)
+                    m_canvas->eraseEnd();
+                endInkSession();
+            }
             // 仅编模式恢复行号区：非编模式下它是隐藏的残留组件，
             // 无条件 show 会把旧几何的行号叠在首列文字上
             if (m_codeMode && m_lineNumberArea)
