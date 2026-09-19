@@ -2075,8 +2075,11 @@ protected:
                 c.setPosition(bottom);   // 先落锚点（下端）
                 c.setPosition(top, QTextCursor::KeepAnchor); // 光标到上端
             }
-            c.movePosition(QTextCursor::Up, QTextCursor::KeepAnchor);
             setTextCursor(c);
+            // 用控件级 moveCursor（视觉列感知）：换机后字体重排，裸
+            // QTextCursor::movePosition 按字符索引移动 = 与光标错位
+            //（用户报：⌘⇧M 后按住 Shift 上下选中行与光标不对齐）
+            moveCursor(QTextCursor::Up, QTextCursor::KeepAnchor);
             {
                 const QTextCursor post = c;
                 QFile f(QStringLiteral("/tmp/naught-selup-diag.log"));
