@@ -1301,9 +1301,10 @@ public:
         if (m_crtView)
             m_crtView->markDirty(true);
         m_settingAscii = prev;
-        // 换机自动对齐机型原生网格（用户要求：等同自动 ⌘0）——字体
-        // 尺寸随机型即刻正确（80/64/40 列网格公式），字体的实际应用
-        // 走下方合并定时器（重排只做一次）
+        // 换机自动对齐机型原生网格（自动 ⌘0 保留——用户明确不许移除）：
+        // 字号随机型即刻正确（80/64/40 列网格公式）。跨尺寸的行字符差
+        // 由 applyMachineSettle 的视觉重锚解决（重排后按同一屏幕点重落
+        // 光标/选区两端）
         if (m_crt) {
             m_size = crtGridSize();
             m_crtGridActive = true;
@@ -1316,12 +1317,42 @@ public:
 
     void applyMachineSettle()
     {
+        // 换机前的视觉点（自动 ⌘0 保留：每机型字号不同 → 重排 → 行
+        // 字符差。重排后按同一屏幕点命中测试重新落位光标/选区两端 =
+        // 跨机型对齐的根修——用户报"选中的字符与打字光标不对齐"）
+        QPointF curPt, otherPt;
+        const bool hadSel = textCursor().hasSelection();
+        {
+            const QRect r = cursorRect();
+            curPt = r.isValid() ? QPointF(r.center()) : QPointF(-1, -1);
+            if (hadSel) {
+                QTextCursor other = textCursor();
+                other.setPosition(other.anchor());
+                const QRect r2 = cursorRect(other);
+                otherPt = r2.isValid() ? QPointF(r2.center()) : QPointF(-1, -1);
+            }
+        }
         const bool prev = m_settingAscii;
         m_settingAscii = true;
         applyZoom(); // 字体随机器（重排只此一次）
         if (m_asciiActive)
             replaceAsciiArt(); // 画布在场 → 按新机器重印
         m_settingAscii = prev;
+        // 视觉重锚：光标/选区两端落到重排后同一屏幕点的字符
+        if (curPt.x() >= 0) {
+            QTextCursor ncur = cursorForPosition(curPt.toPoint());
+            if (hadSel && otherPt.x() >= 0) {
+                QTextCursor nother = cursorForPosition(otherPt.toPoint());
+                QTextCursor c = textCursor();
+                c.setPosition(nother.position());
+                c.setPosition(ncur.position(), QTextCursor::KeepAnchor);
+                setTextCursor(c);
+            } else if (textCursor().position() > 0) {
+                QTextCursor c = textCursor();
+                c.setPosition(ncur.position());
+                setTextCursor(c);
+            }
+        }
     }
 
     // 屏幕实体（原实验功能，M4.5 并入）：追随视角解锁（非锁定）时生效
