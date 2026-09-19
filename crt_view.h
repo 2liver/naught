@@ -37,6 +37,7 @@ public:
     ~CrtView() override;
     void markDirty(bool force = false);
     void syncGeometry();
+    void diagHeartbeat();
     // 自检闸门：管线可用（后端 + 着色器全部就绪）才跑 GPU 相关断言
     bool pipelineReady() const { return m_ps != nullptr; }
     // 同上，但 Null 后端不算可用（Null 对一切说"成功"却不产出真实帧）
@@ -124,6 +125,8 @@ private:
     QElapsedTimer m_rhiDeadAt;      // 置位时刻（超时后 ensureRhi 复活）
     QElapsedTimer m_darkSince;      // 黑帧拦截起始时刻（>1.5s 连续 = 放弃拦截，如实上传）
     QElapsedTimer m_lastLanded;     // 最近一次回读落地时刻（画面活性心跳）
+    QTimer m_diagTimer;             // 冻结诊断心跳（2s）
+    bool m_diagDumped = false;      // 每段冻结只落盘一次
     int m_readbackGen = 0; // 回读代次：看门狗复位后陈旧回调作废
     bool m_renderDirty = false;   // 脏驱动：有变化才整链渲染
     int m_histFrame = 0;  // 余晖历史帧计数：前 2 帧无历史（权重清零）

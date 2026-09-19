@@ -7,6 +7,7 @@
 
 #include "crt_source.h"
 
+#include <QAbstractScrollArea>
 #include <QDir>
 #include <QFile>
 #include <QPainter>
@@ -50,6 +51,8 @@ CrtView::CrtView(CrtSnapshotSource *source)
     // 帧循环：视差/光标闪烁/足迹圆点 30fps；快照上传由 80ms 节流
     m_frameTimer.setInterval(33);
     connect(&m_frameTimer, &QTimer::timeout, this, &CrtView::renderFrame);
+    m_diagTimer.setInterval(2000);
+    connect(&m_diagTimer, &QTimer::timeout, this, &CrtView::diagHeartbeat);
     m_clock.start(); // 运行秒数：噪声/滚动刷新带的时间源
 }
 
@@ -80,17 +83,95 @@ void CrtView::showEvent(QShowEvent *)
     ensureRhi();
     m_warmClock.start(); // 入场暖机：由暗到亮的一次预热脉冲
     m_frameTimer.start();
+    m_diagTimer.start();
 }
 
 void CrtView::hideEvent(QHideEvent *)
 {
     m_frameTimer.stop();
+    m_diagTimer.stop();
 }
 
 void CrtView::resizeEvent(QResizeEvent *)
 {
     // 纹理尺寸随窗口：重建推迟到帧边界（在途回读完成之后），
     // 避免释放正在被 Metal 命令缓冲引用的纹理
+    markDirty(true);
+}
+
+void CrtView::diagHeartbeat()
+{
+    // 冻结诊断（用户报：首行打删打删后画面冻结，离屏无法复现——真机
+    // 落盘取证）：回读 4s 不落地 = 冻结段。落盘：管线状态 + 源控件
+    // 视口裸渲染亮度（判"视口渲染为空"根因）+ 快照顶部亮度，
+    // 并顺手做自愈锤（视口 update + 快照作废 + 管线重置）
+    if (!m_lastLanded.isValid() || m_lastLanded.elapsed() < 4000)
+        return;
+    if (m_diagDumped)
+        return;
+    m_diagDumped = true;
+    long vpLum = -1, pendLum = -1;
+    QString vpSize = QStringLiteral("?");
+    if (m_source && m_source->sourceWidget()) {
+        QWidget *w = m_source->sourceWidget();
+        if (auto *sa = qobject_cast<QAbstractScrollArea *>(w)) {
+            if (QWidget *vp = sa->viewport()) {
+                vpSize = QStringLiteral("%1x%2").arg(vp->width()).arg(vp->height());
+                QImage probe(vp->size(), QImage::Format_ARGB32);
+                if (!probe.isNull()) {
+                    probe.fill(Qt::black);
+                    QPainter pp(&probe);
+                    vp->render(&pp);
+                    pp.end();
+                    long mx = 0;
+                    for (int y = 0; y < probe.height(); ++y)
+                        for (int x = 0; x < probe.width(); ++x) {
+                            const QRgb px = probe.pixel(x, y);
+                            mx = qMax<long>(mx, qRed(px) + qGreen(px) + qBlue(px));
+                        }
+                    vpLum = mx;
+                }
+            }
+        }
+    }
+    if (!m_pending.isNull()) {
+        long mx = 0;
+        for (int y = 0; y < m_pending.height() / 5; ++y)
+            for (int x = 2; x < m_pending.width() - 30; ++x) {
+                const QRgb px = m_pending.pixel(x, y);
+                mx = qMax<long>(mx, qRed(px) + qGreen(px) + qBlue(px));
+            }
+        pendLum = mx;
+    }
+    const QString line = QStringLiteral(
+        "FREEZE-DIAG stale=%1ms inFlight=%2 tex=%3x%4 pendingNull=%5 shownNull=%6 "
+        "unavail=%7 visible=%8 frameTimer=%9 vp=%10 vpLum=%11 pendingTopLum=%12\n")
+        .arg(qint64(m_lastLanded.elapsed()))
+        .arg(int(m_readbackInFlight))
+        .arg(m_texSize.width()).arg(m_texSize.height())
+        .arg(int(m_pending.isNull())).arg(int(m_shown.isNull()))
+        .arg(int(m_rhiUnavailable)).arg(int(isVisible()))
+        .arg(int(m_frameTimer.isActive()))
+        .arg(vpSize).arg(vpLum).arg(pendLum);
+    // 固定 /tmp：macOS 下 QDir::tempPath = /var/folders/.../T（用户找不到）
+    QFile f(QStringLiteral("/tmp/naught-freeze-diag.log"));
+    if (f.open(QIODevice::Append | QIODevice::Text)) {
+        f.write(line.toUtf8());
+        f.close();
+    }
+    qWarning("%s", qPrintable(line));
+    // 自愈锤：视口重绘（可能打破"视口渲染为空"）+ 快照作废全量重拍
+    // + 管线重置。若视口渲染真为空（vpLum 低），锤子也救不活根因——
+    // 但日志会把根因照出来
+    if (m_source && m_source->sourceWidget()) {
+        QWidget *w = m_source->sourceWidget();
+        if (auto *sa = qobject_cast<QAbstractScrollArea *>(w))
+            if (sa->viewport())
+                sa->viewport()->update();
+        w->update();
+    }
+    m_pending = QImage();
+    resetPipeline();
     markDirty(true);
 }
 
@@ -113,16 +194,56 @@ void CrtView::paintEvent(QPaintEvent *)
         p.drawImage(rect(), m_shown);
     }
     // 光标顶层叠加（用户报光标伪影：旧光标随余晖残留在旧位置——光标
-    // 不再进快照/余晖，画在 GPU 帧之上，永不产生残影）。Difference
-    // 合成 + 白色 = 逐像素反相（整格反相块 / 机型 3 底缘下划线亮条）
+    // 不再进快照/余晖，画在 GPU 帧之上，永不产生残影）。
+    // 分机型（用户六轮考据 + retrocomputing 考证）：
+    //  C64（机型 2）：真机无硬件光标，KERNAL 屏幕编辑器把光标位字符
+    //   在正常/反相间翻动（无硬光标机器的通行假光标做法）。C64 的
+    //   "反相" = 前景/背景色互换：字格填字符色（浅蓝），字形以底色
+    //   （深蓝）呈现——不是白负片；空格位 = 纯字符色实心块。
+    //  其它块光标机（0/1）：Difference 白反相（炽磷亮块，字形负片）。
+    //  机型 3（IBM PC 5150）：6845 硬光标默认 = 底缘 2-3 扫描线
+    //  下划线（真机 DOS 默认；块状只在插入模式）。
     if (m_source && m_source->cursorVisible()) {
         QRect cell = m_source->cursorCellRect();
         if (!cell.isEmpty()) {
-            if (m_source->cursorUnderline())
+            if (m_source->cursorUnderline()) {
                 cell = QRect(cell.x(), cell.bottom() - qMax(2, cell.height() * 18 / 100),
                              cell.width(), qMax(2, cell.height() * 18 / 100));
-            p.setCompositionMode(QPainter::CompositionMode_Difference);
-            p.fillRect(cell, Qt::white);
+                p.setCompositionMode(QPainter::CompositionMode_Difference);
+                p.fillRect(cell, Qt::white);
+            } else if (m_source->config().machine == 2) {
+                // C64 真机反相 = 色对调（亮字色填充字格、字形呈底色）
+                if (!m_shown.isNull()) {
+                    const qreal sx = qreal(m_shown.width()) / qMax(1, width());
+                    const qreal sy = qreal(m_shown.height()) / qMax(1, height());
+                    const QRect src = QRect(qFloor(cell.x() * sx), qFloor(cell.y() * sy),
+                                            qCeil(cell.width() * sx), qCeil(cell.height() * sy))
+                                          .intersected(m_shown.rect());
+                    if (!src.isEmpty()) {
+                        QImage sub = m_shown.copy(src);
+                        const Crt::Palette &pp = *m_source->config().palette;
+                        const int bgSum = pp.bg.red() + pp.bg.green() + pp.bg.blue();
+                        const int inkSum = pp.ink.red() + pp.ink.green() + pp.ink.blue();
+                        const int span = qMax(1, inkSum - bgSum);
+                        for (int y = 0; y < sub.height(); ++y) {
+                            uchar *line = sub.scanLine(y);
+                            for (int x = 0; x < sub.width(); ++x) {
+                                const int i = x * 4; // RGBA8888：R,G,B,A
+                                const int sum = line[i] + line[i + 1] + line[i + 2];
+                                // t=0（底色）→ 字符色；t=1（字形）→ 底色
+                                const qreal t = qBound(0.0, qreal(sum - bgSum) / qreal(span), 1.0);
+                                line[i] = uchar(pp.ink.red() + (pp.bg.red() - pp.ink.red()) * t);
+                                line[i + 1] = uchar(pp.ink.green() + (pp.bg.green() - pp.ink.green()) * t);
+                                line[i + 2] = uchar(pp.ink.blue() + (pp.bg.blue() - pp.ink.blue()) * t);
+                            }
+                        }
+                        p.drawImage(cell, sub);
+                    }
+                }
+            } else {
+                p.setCompositionMode(QPainter::CompositionMode_Difference);
+                p.fillRect(cell, Qt::white);
+            }
         }
     }
 }
@@ -436,6 +557,17 @@ void CrtView::ensureRhi()
 
 void CrtView::renderFrame()
 {
+    // 画面活性看门狗（帧定时器 33ms 恒跳 = 真心跳；paintEvent 心跳依赖
+    // 眨眼，眨眼 1.5s 后休眠 → 冻结时无心跳救不了）：回读长期不落地
+    // = 帧循环卡死 → 强制重置管线 + 快照作废全量重拍
+    if (m_lastLanded.isValid() && m_lastLanded.elapsed() > 6000) {
+        qWarning("CRT liveness watchdog fired (no readback for %lld ms) — "
+                 "force pipeline reset", qint64(m_lastLanded.elapsed()));
+        m_pending = QImage(); // 快照作废 → 下一帧全量重拍
+        resetPipeline();
+        markDirty(true);
+        m_lastLanded.invalidate(); // 防同帧重复触发
+    }
     if (!isVisible())
         return;
     ensureRhi();
@@ -731,6 +863,7 @@ void CrtView::renderFrame()
             m_maxReadbackMs = qMax(m_maxReadbackMs, int(m_readbackClock.elapsed()));
             m_readbackInFlight = false;
             m_lastLanded.restart(); // 画面活性心跳
+            m_diagDumped = false;
             delete rb;
             update();
         }, Qt::QueuedConnection);

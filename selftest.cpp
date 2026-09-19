@@ -67,6 +67,69 @@ bool Editor::selftest()
             }
         }
         Editor e;
+        // ============ NAUGHT_RECIPE：第七轮用户精确配方（首行 打删打删）
+        // 全新编辑器状态（其余闸未跑过）——用户报：CRT 首行打删打删
+        // 画面冻结；此探针放在闸群之前 = 最接近实机首启状态
+        if (qEnvironmentVariableIsSet("NAUGHT_RECIPE")) {
+            qInfo("RECIPE-ENTER");
+            const auto settleMs = [&](int ms) {
+                QEventLoop sl;
+                QTimer::singleShot(ms, &sl, &QEventLoop::quit);
+                sl.exec();
+                QApplication::processEvents();
+            };
+            e.toggleCrt();
+            QApplication::processEvents();
+            e.setPlainText(QString());
+            e.show();
+            e.setFocus();
+            e.resize(960, 720); // 与 main.mm 默认窗口同尺寸
+            QApplication::processEvents();
+            settleMs(700); // 暖机
+            const auto diag = [&](const char *tag, const QImage *base = nullptr) {
+                const QImage now = e.crtShownImage();
+                const bool changed = base && !selftestImgDiffers(*base, now);
+                qInfo("RECIPE %s landed=%d shownNull=%d pendingNull=%d unavail=%d textlen=%d",
+                      tag, int(changed), int(now.isNull()),
+                      int(e.m_crtView->frameImage().isNull()),
+                      int(e.m_crtView->rhiUnavailableForTest()),
+                      e.document()->characterCount());
+                return now;
+            };
+            const QImage base = diag("warm");
+            QTextCursor c0 = e.textCursor();
+            c0.movePosition(QTextCursor::Start);
+            e.setTextCursor(c0);
+            QApplication::processEvents();
+            for (int cycle = 1; cycle <= 3; ++cycle) {
+                for (const char *p = "abc"; *p; ++p) {
+                    QKeyEvent kt(QEvent::KeyPress, 0, Qt::NoModifier,
+                                 QString(QLatin1Char(*p)));
+                    QApplication::sendEvent(&e, &kt);
+                }
+                QApplication::processEvents();
+                settleMs(120);
+                const QImage t = diag(QStringLiteral("cycle%1-typed").arg(cycle).toLatin1(), &base);
+                for (int i = 0; i < 3; ++i) {
+                    QKeyEvent kb(QEvent::KeyPress, Qt::Key_Backspace, Qt::NoModifier);
+                    QApplication::sendEvent(&e, &kb);
+                }
+                // 用户配方关键：删到没字了还要继续删（光标顶格空删）
+                for (int i = 0; i < 5; ++i) {
+                    QKeyEvent kb(QEvent::KeyPress, Qt::Key_Backspace, Qt::NoModifier);
+                    QApplication::sendEvent(&e, &kb);
+                }
+                QApplication::processEvents();
+                settleMs(120);
+                const QImage d = diag(QStringLiteral("cycle%1-deleted").arg(cycle).toLatin1(), &t);
+                Q_UNUSED(d);
+            }
+            settleMs(400);
+            diag("final");
+            e.toggleCrt();
+            QApplication::processEvents();
+            qInfo("RECIPE-EXIT");
+        }
         qInfo("SELFTEST-EDITOR-CONSTRUCTED");
         e.setPlainText(QStringLiteral("無"));
         const QTextBlock block = e.document()->firstBlock();
