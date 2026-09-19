@@ -2067,6 +2067,18 @@ protected:
             // 容忍 ⌘（按键追踪取证：用户按 ⌘Z 后手指还压在 ⌘ 上，实际
             // 按键 = ⌘⇧↑——⌘ 是上一快捷键的残留，不得改变选区语义）
             QTextCursor c = textCursor();
+            // 光标已在首行且有选区 → 再按一下补到行首（用户拍板：先落
+            // 对齐位、再按才补首 = 保留一次选择权；旧版同按自动补首太急）
+            if (c.hasSelection()
+                && document()->findBlock(c.position()).blockNumber() == 0
+                && c.position() > 0) {
+                const int bottom = qMax(c.anchor(), c.position());
+                c.setPosition(bottom);
+                c.setPosition(0, QTextCursor::KeepAnchor);
+                setTextCursor(c);
+                wakeCaret();
+                return;
+            }
             // 真机取证（用户报：选区语义与离屏探针不符，反复确认全新
             // 进程仍复现——把每次 Shift+↑ 的前后状态落盘，供定位）
             {
@@ -2107,20 +2119,6 @@ protected:
             // QTextCursor::movePosition 按字符索引移动 = 与光标错位
             //（用户报：⌘⇧M 后按住 Shift 上下选中行与光标不对齐）
             moveCursor(QTextCursor::Up, QTextCursor::KeepAnchor);
-            // 到头行：选区补到行首（用户报：一行行加选区到首行有
-            // 一截选不上——靠近首字符那段）。锚点必须保持在下端，
-            // 否则选区只剩"行首到光标"那段（用户报漏行）
-            {
-                QTextCursor after = textCursor();
-                if (after.hasSelection()
-                    && document()->findBlock(after.selectionStart()).blockNumber() == 0
-                    && after.selectionStart() > 0) {
-                    const int bottom = qMax(after.anchor(), after.position());
-                    after.setPosition(bottom);   // 先落锚点（下端）
-                    after.setPosition(0, QTextCursor::KeepAnchor); // 光标到行首
-                    setTextCursor(after);
-                }
-            }
             {
                 const QTextCursor post = c;
                 QFile f(QStringLiteral("/tmp/naught-selup-diag.log"));
