@@ -1973,6 +1973,26 @@ protected:
 
     void keyPressEvent(QKeyEvent *event) override
     {
+        // 真机按键追踪（取证期临时埋点：定位"Shift+↑ 分支未执行"——
+        // 记录每个键 + 修饰符 + 应用路径，旋转保留最近 300 条）
+        {
+            static int keyCount = 0;
+            if (++keyCount % 50 == 1) {
+                QFile fk(QStringLiteral("/tmp/naught-keytrace.log"));
+                fk.open(QIODevice::WriteOnly | QIODevice::Truncate);
+                fk.close();
+                keyCount = 1;
+            }
+            QFile fk(QStringLiteral("/tmp/naught-keytrace.log"));
+            if (fk.open(QIODevice::Append | QIODevice::Text)) {
+                fk.write(QStringLiteral("KEY k=%1 mods=0x%2 auto=%3 app=%4\n")
+                    .arg(int(event->key()))
+                    .arg(int(event->modifiers()), 0, 16)
+                    .arg(int(event->isAutoRepeat()))
+                    .arg(QCoreApplication::applicationDirPath()).toUtf8());
+                fk.close();
+            }
+        }
         wakeCaret();
         if (event->key() == Qt::Key_Tab
             && !(event->modifiers() & (Qt::ControlModifier | Qt::MetaModifier | Qt::AltModifier))) {
