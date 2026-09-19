@@ -19,8 +19,8 @@ void SnapshotCompositor::paint(QImage &img) const
     // 块状反相光标：只在显模式、有焦点、眨眼"亮"拍时画（休眠 = 隐去，
     // 与原生光标同一节拍；见 syncNativeCaretWidth）。
     const bool cursorBlock = m_e.m_crt && m_e.hasFocus()
-        && (m_e.textCursor().hasSelection() // 选区期间常亮（见 cursorVisible 注释）
-            || (m_e.m_blinkTimer.isActive() && m_e.m_blinkHalf % 2 == 0));
+        && !m_e.textCursor().hasSelection() // 选区激活时不叠加（防二次反相成洞）
+        && m_e.m_blinkTimer.isActive() && m_e.m_blinkHalf % 2 == 0;
     {
         QPainter p(&img);
         if (!p.isActive())
@@ -74,8 +74,8 @@ void SnapshotCompositor::paintRegion(QImage &img, const QRect &dirty) const
     if (dirty.isEmpty())
         return;
     const bool cursorBlock = m_e.m_crt && m_e.hasFocus()
-        && (m_e.textCursor().hasSelection() // 选区期间常亮（见 cursorVisible 注释）
-            || (m_e.m_blinkTimer.isActive() && m_e.m_blinkHalf % 2 == 0));
+        && !m_e.textCursor().hasSelection() // 选区激活时不叠加（防二次反相成洞）
+        && m_e.m_blinkTimer.isActive() && m_e.m_blinkHalf % 2 == 0;
     {
         QPainter p(&img);
         if (!p.isActive())

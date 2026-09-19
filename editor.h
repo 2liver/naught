@@ -93,13 +93,12 @@ public:
     bool sourceHasText() const override { return document()->characterCount() > 2; }
     bool cursorVisible() const override
     {
-        // 选区期间光标常亮（用户报：Shift 选中时只有光标那一格"透视+
-        // 衣服缓慢渲染"——根因 = 光标眨眼 750ms 亮灭交替 + 两拍后休眠，
-        // 选区上光标时有时无被误读为渲染慢；选区 = 活跃编辑态，光标
-        // 常亮，选区结束后恢复眨眼）
-        return m_crt && hasFocus()
-               && (textCursor().hasSelection()
-                   || (m_blinkTimer.isActive() && m_blinkHalf % 2 == 0));
+        // 选区激活时光标不叠加（用户报：光标那格"透明的、没有选中该有
+        // 的样子"——块光标对已反相的选区二次反相 = 还原成普通字 = 亮块
+        // 里的洞；选区本身就是那一格该有的样子，光标退场，选区结束
+        // 后恢复眨眼块光标）
+        return m_crt && hasFocus() && !textCursor().hasSelection()
+               && m_blinkTimer.isActive() && m_blinkHalf % 2 == 0;
     }
     QSize sourceViewportSize() const override { return viewport() ? viewport()->size() : QSize(); }
     QWidget *sourceWidget() const override { return const_cast<Editor *>(this); }
