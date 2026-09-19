@@ -3878,9 +3878,10 @@ bool Editor::selftest()
                 QApplication::sendEvent(&e, &ks);
             }
             const QTextCursor sel = e.textCursor();
-            // 纯逐行粒度（用户拍板）：到头行即停（第三下 no-op），不跳行首
-            if (sel.selectionStart() != 4 || sel.selectionEnd() != 16) {
-                qWarning("selftest FAIL: upward selection wrong extent [%d,%d] (want 4,16)",
+            // 用户最新语义：首行再按 ↑ = 到行首（覆盖行首），不许锁死
+            //（16→10→4→0 每键有进展）
+            if (sel.selectionStart() != 0 || sel.selectionEnd() != 16) {
+                qWarning("selftest FAIL: upward selection wrong extent [%d,%d] (want 0,16)",
                          sel.selectionStart(), sel.selectionEnd());
                 return false;
             }
@@ -3898,9 +3899,10 @@ bool Editor::selftest()
             }
             {
                 const QTextCursor sel2 = e.textCursor();
-                // 空首行落点 = 换行符之后（下一行行首，用户 T3 拍板）
-                if (sel2.selectionStart() != 1 || sel2.selectionEnd() != 13) {
-                    qWarning("selftest FAIL: empty-first-line upward extent [%d,%d] (want 1,13)",
+                // 用户场景1：第 2 下落到换行符之后（1），第 3 下覆盖换行符
+                //（0），不许锁死在 1
+                if (sel2.selectionStart() != 0 || sel2.selectionEnd() != 13) {
+                    qWarning("selftest FAIL: empty-first-line upward extent [%d,%d] (want 0,13)",
                              sel2.selectionStart(), sel2.selectionEnd());
                     return false;
                 }
@@ -4180,6 +4182,50 @@ bool Editor::selftest()
                 qWarning("selftest FAIL: T3 not between newline and o (%d want 1)",
                          e.textCursor().position());
                 return false;
+            }
+            // 真机按键签名变体（按键追踪取证：用户方向键带 KeypadModifier；
+            // ⌘Z 后残留 ⌘ = Meta+Shift+Up）——同样必须落在 1
+            placeAt(QStringLiteral("100"));
+            key(Qt::Key_Up, Qt::ShiftModifier | Qt::KeypadModifier);
+            key(Qt::Key_Up, Qt::ShiftModifier | Qt::KeypadModifier);
+            if (e.textCursor().position() != 1) {
+                qWarning("selftest FAIL: T3 keypad variant not at 1 (%d)",
+                         e.textCursor().position());
+                return false;
+            }
+            placeAt(QStringLiteral("100"));
+            key(Qt::Key_Up, Qt::ShiftModifier | Qt::MetaModifier | Qt::KeypadModifier);
+            key(Qt::Key_Up, Qt::ShiftModifier | Qt::MetaModifier | Qt::KeypadModifier);
+            if (e.textCursor().position() != 1) {
+                qWarning("selftest FAIL: T3 meta variant not at 1 (%d)",
+                         e.textCursor().position());
+                return false;
+            }
+            // 场景1（用户最新）：到 1 后再按 Shift+↑ → 0（覆盖换行符），
+            // 不许锁死在 1
+            key(Qt::Key_Up, Qt::ShiftModifier);
+            {
+                QTextCursor g = e.textCursor();
+                if (g.position() != 0 || g.selectionStart() != 0) {
+                    qWarning("selftest FAIL: 4th Shift+Up not covering newline ([%d,%d] want [0,89])",
+                             g.selectionStart(), g.selectionEnd());
+                    return false;
+                }
+            }
+            // 场景2（用户最新）：去前导换行符，orders 在首行 → ↑×2 到
+            // "o" 前（0），不许锁死在首行列映射位
+            e.setPlainText(doc.mid(1));
+            placeAt(QStringLiteral("100")); // 无前导空行后 = 88
+            key(Qt::Key_Up, Qt::ShiftModifier);
+            key(Qt::Key_Up, Qt::ShiftModifier);
+            {
+                QTextCursor g = e.textCursor();
+                if (g.position() != 0 || g.selectionStart() != 0
+                    || g.selectionEnd() != 88) {
+                    qWarning("selftest FAIL: no-leading-newline up x2 not at o ([%d,%d] want [0,88])",
+                             g.selectionStart(), g.selectionEnd());
+                    return false;
+                }
             }
             qInfo("TEXT-EXIT");
         }

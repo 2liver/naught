@@ -2159,17 +2159,24 @@ protected:
                 m_selPath.append(bottom);
                 m_selPath.append(top);
             }
-            if (!c.hasSelection() && c.blockNumber() == 0 && c.position() > 0) {
-                // 首行 Shift+↑：上方无内容 → 选到行首（用户报"首行没选区"）
-                c.setPosition(c.position());
+            if (c.blockNumber() == 0 && c.position() > 0) {
+                // 首行 Shift+↑：上方无内容 → 选到行首（用户报"首行没选区"；
+                // 用户场景2：选区已在首行（无前导空行文档）再按 ↑ = 光标
+                // 到行首 0 = "o" 前，不许锁死在列映射位）。直接 KeepAnchor
+                // 到 0——先 setPosition(旧位) 会把锚点也收掉（实测选区变
+                // [0,4] 丢锚点）
                 c.setPosition(0, QTextCursor::KeepAnchor);
                 setTextCursor(c);
-                m_selPath.clear();
-                m_selPath.append(c.anchor());
-                m_selPath.append(c.position());
+                if (m_selPath.isEmpty()) { // 新链：基点 + 光标
+                    m_selPath.append(c.anchor());
+                    m_selPath.append(c.position());
+                } else if (c.position() != m_selPath.last()) {
+                    m_selPath.append(c.position()); // 续链：只追加，保持镜像
+                }
                 wakeCaret();
                 return;
             }
+            const int prePos = c.position(); // 上移前位置（空块调整的列门槛用）
             setTextCursor(c);
             if (m_selPath.isEmpty())
                 m_selPath.append(c.anchor()); // 链起点 = 锚点
@@ -2178,12 +2185,16 @@ protected:
             //（用户报：⌘⇧M 后按住 Shift 上下选中行与光标不对齐）
             moveCursor(QTextCursor::Up, QTextCursor::KeepAnchor);
             m_shiftSelDir = -1;
-            // 落在空块（如文档前导空行）→ 光标挪到换行符之后 = 下一行
-            // 行首（用户 T3："换行符与 o 之间"，不许停在换行符那行）
+            // 落在空块（如文档前导空行）且来源列 > 0 → 光标挪到换行符
+            // 之后 = 下一行行首（用户 T3："换行符与 o 之间"）；来源列
+            // == 0（已是块首/行首）→ 停在 0 覆盖换行符（用户场景1，
+            // 不许锁死）
             {
                 QTextCursor adj = textCursor();
                 const QTextBlock ab = document()->findBlock(adj.position());
-                if (ab.length() <= 1 && adj.position() == ab.position()) {
+                const QTextBlock pb = document()->findBlock(prePos);
+                if (ab.length() <= 1 && adj.position() == ab.position()
+                    && prePos > pb.position()) {
                     const int np = qMin(ab.position() + 1, document()->characterCount() - 1);
                     adj.setPosition(adj.anchor());
                     adj.setPosition(np, QTextCursor::KeepAnchor);
