@@ -2704,41 +2704,21 @@ bool Editor::selftest()
                 e.zoomReset();
                 QApplication::processEvents();
             }
-            // 光标残影闸（用户报：每个机型的伪影颜色不一样、输入字符很
-            // 明显——旧光标随余晖残留在旧位置。根修 = 光标改 CrtView
-            // 顶层叠加、永不进快照/余晖。闸 = 快照不随光标位置变化：
-            // 同内容两次全新快照必须逐像素相同（光标在 1 拍一次、
-            // 在 0 再拍一次）。旧实现光标进快照 → 两拍不同 = 残影进
-            // 余晖的根因；本闸把"光标进快照"直接锁死。激发辉光
-            // （真实时间的唯一跨拍变量）须先出尽（<0.02 截止 ≈1.7s）。
+            // 光标闸（光标回快照后的新契约——审查重写）：光标必须画在
+            // 快照内的当前格（块反相），移动后旧格复原、新格点亮。
+            // 残影（旧光标随余晖残留）由 persist 着色器的光标掩膜根治，
+            // 本闸锁"光标画对位置 + 双色反相"。激发辉光须先出尽
             {
                 if (!e.crtOn())
-                    e.toggleCrt(); // 闸必须在显模式下跑：旧实现光标进
-                // 快照只在显模式生效（cursorBlock = 显 && 焦点 && 亮拍）
+                    e.toggleCrt(); // 光标进快照只在显模式生效（cursorBlock）
                 QApplication::processEvents();
-                while (e.machine() != 3)
-                    e.toggleMachine(); // 下划线机型（伪影最明显）
+                while (e.machine() != 0)
+                    e.toggleMachine(); // 琥珀机块光标
                 QApplication::processEvents();
-                e.setPlainText(QStringLiteral("ab\n"));
+                e.setPlainText(QStringLiteral("cab\n"));
                 QTextCursor tc0 = e.textCursor();
-                tc0.setPosition(0);
+                tc0.setPosition(1); // 光标在 'a' 上
                 e.setTextCursor(tc0);
-                e.m_blinkTimer.start();
-                e.m_blinkHalf = 0;
-                QApplication::processEvents();
-                // 打字：光标从 0 移到 1
-                QTextCursor ins = e.textCursor();
-                ins.insertText(QStringLiteral("c"));
-                QApplication::processEvents();
-                // 等激发辉光出尽：辉光只在快照重拍时按真实时间重估，
-                // 出尽前两拍辉光强度不同 → 误报
-                for (int i = 0; i < 120 && e.m_exciteClock.elapsed() < 1800; ++i) {
-                    QEventLoop s4;
-                    QTimer::singleShot(20, &s4, &QEventLoop::quit);
-                    s4.exec();
-                }
-                // 两拍前强制"焦点 + 眨眼亮拍"：旧实现的光标进快照以
-                // 亮拍为前提，闸必须在该前提下比对才抓得住回归
                 e.setFocus();
                 e.m_blinkTimer.start();
                 e.m_blinkHalf = 0;
@@ -2746,24 +2726,42 @@ bool Editor::selftest()
                 QImage s0(e.size(), QImage::Format_ARGB32);
                 s0.setDevicePixelRatio(1.0);
                 e.paintTextSnapshot(s0); // 光标在 1
-                QTextCursor move0 = e.textCursor();
-                move0.setPosition(0);
-                e.setTextCursor(move0);
+                const auto cellCenterLum = [&](const QImage &img, int pos) {
+                    QTextCursor tmp = e.textCursor();
+                    tmp.setPosition(pos);
+                    QRect cell = e.cursorRect(tmp).translated(e.viewport()->pos());
+                    cell.setWidth(qMax(1, qCeil(e.fontMetrics()
+                        .horizontalAdvance(QLatin1Char('M')))));
+                    // 采样格角（背景区）：字形中心被反成底色（暗），
+                    // 块的亮色在格的背景区
+                    const QRgb px = img.pixel(cell.x() + 2, cell.y() + 2);
+                    return qRed(px) + qGreen(px) + qBlue(px);
+                };
+                const Crt::Palette &ap = e.crtPalette();
+                const int blockLum = ap.cursorBlock.red() + ap.cursorBlock.green()
+                                     + ap.cursorBlock.blue();
+                // 光标格中心 = 反相块亮色（≈块色，字形中心被反成底色）
+                const int c1 = cellCenterLum(s0, 1);
+                qInfo("CRT-CURSOR-GATE cursorCell=%d block=%d", c1, blockLum);
+                if (c1 < blockLum / 2) {
+                    qWarning("selftest FAIL: cursor block missing in snapshot (cell lum=%d)",
+                             c1);
+                    while (e.machine() != 0)
+                        e.toggleMachine();
+                    return false;
+                }
+                // 移走光标 → 旧格恢复普通文字（不再整格亮块）
+                QTextCursor mv = e.textCursor();
+                mv.setPosition(0);
+                e.setTextCursor(mv);
                 QApplication::processEvents();
                 QImage s1(e.size(), QImage::Format_ARGB32);
                 s1.setDevicePixelRatio(1.0);
                 e.paintTextSnapshot(s1); // 光标在 0
-                int snapDiff = 0;
-                // 滚动条区随淡出计时器衰减（两次 processEvents 间可能
-                // 走一拍），剔除不比对；其余必须逐像素相同
-                for (int y = 0; y < qMin(s0.height(), s1.height()) - 40; ++y)
-                    for (int x = 0; x < qMin(s0.width(), s1.width()) - 40; ++x)
-                        if (s0.pixel(x, y) != s1.pixel(x, y))
-                            ++snapDiff;
-                qInfo("CRT-CURSOR-GHOST snapDiff=%d (0 = 光标不在快照内)", snapDiff);
-                if (snapDiff > 0) {
-                    qWarning("selftest FAIL: cursor leaked into snapshot (snapDiff=%d) — 光标残影回归",
-                             snapDiff);
+                const int c1b = cellCenterLum(s1, 1);
+                qInfo("CRT-CURSOR-GATE moved oldCell=%d", c1b);
+                if (c1b >= blockLum / 2) {
+                    qWarning("selftest FAIL: old cursor cell not restored (lum=%d)", c1b);
                     while (e.machine() != 0)
                         e.toggleMachine();
                     return false;
@@ -3544,6 +3542,26 @@ bool Editor::selftest()
             e.toggleCrt();
             QApplication::processEvents();
             qInfo("FREEZE-EXIT");
+        }
+        // ============ NAUGHT_FONTCHECK：每机型字体核对 ============
+        if (qEnvironmentVariableIsSet("NAUGHT_FONTCHECK")) {
+            qInfo("FONTCHECK-ENTER");
+            e.toggleCrt();
+            QApplication::processEvents();
+            e.show();
+            QApplication::processEvents();
+            for (int m = 0; m < 4; ++m) {
+                while (e.machine() != m)
+                    e.toggleMachine();
+                QApplication::processEvents();
+                qInfo("FONTCHECK machine=%d family=%s user=%s factory=%s",
+                      m, qPrintable(e.document()->defaultFont().family()),
+                      qPrintable(e.machineUserFont()),
+                      qPrintable(Editor::factoryFontFor(m)));
+            }
+            e.toggleCrt();
+            QApplication::processEvents();
+            qInfo("FONTCHECK-EXIT");
         }
         // ============ NAUGHT_CURPROBE：光标像素取证 ============
         if (qEnvironmentVariableIsSet("NAUGHT_CURPROBE")) {

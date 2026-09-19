@@ -61,9 +61,11 @@ void SnapshotCompositor::paint(QImage &img) const
             p.restore();
         }
     } // 画家析构后直接回写像素，避免与光栅引擎缓存交错
-    // 光标不再进快照（用户报光标伪影：旧光标随余晖残留在旧位置——
-    // 光标 = 瞬态 UI，改由 CrtView 顶层叠加，永不进余晖历史）
-    Q_UNUSED(cursorBlock);
+    // 光标回快照（审查结论：顶层叠加在已辉光帧上反相 → 光晕环窄线 +
+    // 阈值失准；快照内反相经辉光整体调制 = 稳定版观感）。残影改由
+    // persist 着色器的"光标区不进历史"掩膜根治
+    if (cursorBlock)
+        paintCursor(img);
 }
 
 void SnapshotCompositor::paintRegion(QImage &img, const QRect &dirty) const
@@ -99,7 +101,8 @@ void SnapshotCompositor::paintRegion(QImage &img, const QRect &dirty) const
             p.restore();
         }
     }
-    Q_UNUSED(cursorBlock);
+    if (cursorBlock)
+        paintCursor(img); // 光标回快照（掩膜防残影，见 paint()）
 }
 
 QRect SnapshotCompositor::computeDirty(int from, int removed, int added) const
@@ -167,14 +170,22 @@ void SnapshotCompositor::paintExcitation(QPainter &p) const
     p.setCompositionMode(QPainter::CompositionMode_Plus);
     p.setPen(Qt::NoPen);
     const Crt::Palette &pp = m_e.crtPalette();
-    const qreal amps[3] = { a, a * 0.45, a * 0.2 };
-    const int grow[3] = { 1, 3, 6 };
-    for (int i = 0; i < 3; ++i) {
-        p.setBrush(QColor(pp.cursorBlock.red(), pp.cursorBlock.green(),
-                          pp.cursorBlock.blue(), qRound(255.0 * amps[i])));
-        const int g = grow[i];
-        p.drawRoundedRect(cell.adjusted(-g, -g, g, g), 4 + g, 4 + g);
-    }
+    // 软径向渐变（用户报"字符色高光窄线"：旧版三个嵌套圆角矩形的
+    // 硬边在辉光衰减期退成字符色的锐利窄线，落在光标前刚打的字旁；
+    // 渐变无边 = 无窄线，且更接近磷粉的连续衰减）
+    const QPointF center = cell.center();
+    const qreal radius = qMax(cell.width(), cell.height()) * 0.5 + 8.0;
+    QRadialGradient grad(center, radius);
+    const auto glowCol = [&](qreal amp) {
+        return QColor(pp.cursorBlock.red(), pp.cursorBlock.green(),
+                      pp.cursorBlock.blue(), qRound(255.0 * amp));
+    };
+    grad.setColorAt(0.0, glowCol(a));
+    grad.setColorAt(0.35, glowCol(a * 0.4));
+    grad.setColorAt(0.7, glowCol(a * 0.12));
+    grad.setColorAt(1.0, glowCol(0.0));
+    p.setBrush(grad);
+    p.drawEllipse(center, radius, radius);
     p.restore();
 }
 
@@ -201,7 +212,7 @@ void SnapshotCompositor::paintCursor(QImage &img) const
     //（Osborne 的块光标 / C64 的闪烁块——charter 记录；用户四轮考据
     // 指正：并非所有机型都是块状）
     const Crt::Palette &pp = m_e.crtPalette();
-    if (m_e.machine() == 3) {
+    if (m_e.machine() == 3 && !m_e.cursorOnGlyph()) {
         const QColor ucol = m_e.m_codeMode ? QColor(0xE8, 0xE8, 0xE0) : pp.cursorBlock;
         const int bandH = qMax(2, qCeil(cell.height() * dpr * 0.18));
         for (int y = qMax(0, y1 - bandH); y < y1 && y < h; ++y) {

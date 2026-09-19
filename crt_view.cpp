@@ -195,54 +195,6 @@ void CrtView::paintEvent(QPaintEvent *)
     if (!m_shown.isNull()) {
         p.drawImage(rect(), m_shown);
     }
-    // 光标顶层叠加（用户报光标伪影：旧光标随余晖残留在旧位置——光标
-    // 不再进快照/余晖，画在 GPU 帧之上，永不产生残影）。
-    // 样式对齐稳定版（用户拍板：稳定版每机型光标都是对的）：
-    //  块光标 = 双色反相（块色填格、字形呈底色——亮块里浮着深色字）；
-    //  5150（机型 3）= 空位下划线亮条、压在字上时仍走块效果（用户：
-    //  "并非下划线在字下"）。编模式块色 = 中性暖白。
-    if (m_source && m_source->cursorVisible()) {
-        QRect cell = m_source->cursorCellRect();
-        if (!cell.isEmpty()) {
-            const CrtConfig cfg = m_source->config();
-            const Crt::Palette &pp = *cfg.palette;
-            const bool underlineEmpty = cfg.machine == 3 && !m_source->cursorOnGlyph();
-            if (underlineEmpty) {
-                cell = QRect(cell.x(), cell.bottom() - qMax(2, cell.height() * 18 / 100),
-                             cell.width(), qMax(2, cell.height() * 18 / 100));
-                p.fillRect(cell, pp.cursorBlock); // 白磷满束流下划线亮条
-            } else if (!m_shown.isNull()) {
-                const qreal sx = qreal(m_shown.width()) / qMax(1, width());
-                const qreal sy = qreal(m_shown.height()) / qMax(1, height());
-                const QRect src = QRect(qFloor(cell.x() * sx), qFloor(cell.y() * sy),
-                                        qCeil(cell.width() * sx), qCeil(cell.height() * sy))
-                                      .intersected(m_shown.rect());
-                if (!src.isEmpty()) {
-                    QImage sub = m_shown.copy(src);
-                    const QColor block = m_source->cursorCodeMode()
-                                             ? QColor(0xE8, 0xE8, 0xE0)
-                                             : pp.cursorBlock;
-                    const int bgSum = pp.bg.red() + pp.bg.green() + pp.bg.blue();
-                    const int inkSum = pp.ink.red() + pp.ink.green() + pp.ink.blue();
-                    const int span = qMax(1, inkSum - bgSum);
-                    for (int y = 0; y < sub.height(); ++y) {
-                        uchar *line = sub.scanLine(y);
-                        for (int x = 0; x < sub.width(); ++x) {
-                            const int i = x * 4; // RGBA8888：R,G,B,A
-                            const int sum = line[i] + line[i + 1] + line[i + 2];
-                            // 双色反相（稳定版算法）：t=0 底色→块色；
-                            // t=1 字形→底色（亮块里浮着深色字）
-                            const qreal t = qBound(0.0, qreal(sum - bgSum) / qreal(span), 1.0);
-                            line[i] = uchar(block.red() + (pp.bg.red() - block.red()) * t);
-                            line[i + 1] = uchar(block.green() + (pp.bg.green() - block.green()) * t);
-                            line[i + 2] = uchar(block.blue() + (pp.bg.blue() - block.blue()) * t);
-                        }
-                    }
-                    p.drawImage(cell, sub);
-                }
-            }
-        }
-    }
 }
 
 void CrtView::releaseGpu()
@@ -463,7 +415,8 @@ void CrtView::ensureRhi()
 
     // 常量缓冲：view + texSize + timeInfo + flags + 调色板 + 余晖 + 辉光
     // （std140：12×vec4 = 192 字节）
-    m_ubuf = m_r->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, 192);
+    m_ubuf = m_r->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer,
+                            52 * 4); // 13×vec4 = 208 字节（含光标掩膜）
     m_ubuf->create();
 
     // SRB：主着色 ×3（内容 = 轮转历史）、余晖 ×3（快照 + 读二历史）、
@@ -690,6 +643,16 @@ void CrtView::renderFrame()
                         mx = qMax<long>(mx, qRed(pxx) + qGreen(pxx) + qBlue(pxx));
                     }
                 if (mx < 60 && m_pending.height() > 100) {
+                    // 文档有字而快照失字 = 源视口渲染坏了（实机 diag
+                    // vpLum=15 的同类）：锤视口重绘 + 布局强制，自愈
+                    if (m_source->sourceHasText()) {
+                        if (auto *w = m_source->sourceWidget()) {
+                            if (auto *sa = qobject_cast<QAbstractScrollArea *>(w))
+                                if (sa->viewport())
+                                    sa->viewport()->update();
+                            w->update();
+                        }
+                    }
                     // 拦截已知的百毫秒级布局瞬态（"松 Shift 黑屏一会"的
                     // 残因）；连续失字超过 1.5s = 快照真的坏了 → 如实
                     // 上传（用户报：画面冻结在旧帧、痕迹删不掉、换机
@@ -776,7 +739,23 @@ void CrtView::renderFrame()
     // 视图移动期：余晖幽灵 4 倍速衰减——视差把整段文字位移时，
     // 旧位置的幽灵快速退场，不留下用户报的"倒影"双影
     const float ghostDt = cfg.viewMoving ? m_dtMs * 4.0f : m_dtMs;
-    const float ub[48] = { float(view.x()), float(view.y()),
+    // 光标掩膜（UV 空间）：光标区不进余晖历史（残影根修——旧光标随
+    // 余晖残留在旧位置）；掩膜 = 当前光标格外扩一格，盖住打字/方向键
+    // 位移的旧光标位。光标不可见时 w<=0 = 掩膜空
+    float cursorMask[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    if (m_source && m_source->cursorVisible()) {
+        const QRect cell = m_source->cursorCellRect();
+        const QSize src = m_source->sourceRect().size();
+        const QRectF msk = QRectF(cell).adjusted(-cell.width(), -cell.height(),
+                                                 cell.width(), cell.height());
+        if (src.width() > 0 && src.height() > 0 && !cell.isEmpty()) {
+            cursorMask[0] = float(msk.x() / qreal(src.width()));
+            cursorMask[1] = float(msk.y() / qreal(src.height()));
+            cursorMask[2] = float(msk.width() / qreal(src.width()));
+            cursorMask[3] = float(msk.height() / qreal(src.height()));
+        }
+    }
+    const float ub[52] = { float(view.x()), float(view.y()),
                            float(m_texSize.width()), float(m_texSize.height()),
                            float(m_clock.elapsed() / 1000.0),
                            m_warmClock.isValid() ? float(m_warmClock.elapsed()) : -1.0f,
@@ -789,7 +768,12 @@ void CrtView::renderFrame()
                            k2[0], k2[1], k2[2], 1.0f,
                            skipGlow ? 0.0f : float(pal.glowAlpha),
                            1.0f / float(m_glowSize.width()), 1.0f / float(m_glowSize.height()),
-                           ghostDt };
+                           ghostDt,
+                           // 光标掩膜（UV 空间；空 = w<=0）：
+                           // 光标区不进余晖历史（残影根修）；含邻格边距
+                           // 盖住打字/方向键位移的旧光标位
+                           cursorMask[0], cursorMask[1],
+                           cursorMask[2], cursorMask[3] };
     u->updateDynamicBuffer(m_ubuf, 0, sizeof(ub), ub);
 
     const int cur = m_histFrame % 3;

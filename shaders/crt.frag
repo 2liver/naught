@@ -147,7 +147,7 @@ void main()
         vec3 tent = sampleAt(cuv) * 0.5
                   + (sampleAt(cuv + vec2( off.x, 0.0)) + sampleAt(cuv - vec2( off.x, 0.0))
                    + sampleAt(cuv + vec2(0.0,  off.y)) + sampleAt(cuv + vec2(0.0, -off.y))) * 0.125;
-        col = mix(col, tent, 0.18);
+        col = mix(col, tent, 0.10);
     }
 
     // 辉光叠加：max(col, 小图线性采样 × alpha)——与 Crt::phosphorBloom

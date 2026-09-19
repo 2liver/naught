@@ -332,9 +332,11 @@ private:
             bounds |= s.path.boundingRect();
         if (bounds.isEmpty())
             bounds = QRectF(QPointF(0, 0), QSizeF(size()));
-        const QSize cacheSz(qMax(1, int(bounds.width()) + 2),
-                            qMax(1, int(bounds.height()) + 2));
-        m_cache = QPixmap(cacheSz);
+        const QSize cacheSz(qMax(1, qCeil(bounds.width()) + 2),
+                            qMax(1, qCeil(bounds.height()) + 2));
+        const qreal dpr = window() ? qreal(window()->devicePixelRatioF()) : 1.0;
+        m_cache = QPixmap(QSize(qCeil(cacheSz.width() * dpr), qCeil(cacheSz.height() * dpr)));
+        m_cache.setDevicePixelRatio(dpr); // Retina：1× 烘焙会整片发糊（审查 R2）
         m_cache.fill(Qt::transparent);
         m_cacheOrigin = bounds.topLeft() - QPointF(1, 1);
         QPainter p(&m_cache);

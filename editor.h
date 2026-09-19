@@ -85,13 +85,12 @@ public:
         cell.setWidth(qMax(1, qCeil(qMax(cellAdv, charAdv))));
         return cell.translated(viewport()->pos());
     }
-    bool cursorUnderline() const override { return m_machine == 3; }
     bool cursorOnGlyph() const override
     {
         const QChar ch = document()->characterAt(textCursor().position());
         return !ch.isNull() && ch != QChar::ParagraphSeparator;
     }
-    bool cursorCodeMode() const override { return m_codeMode; }
+    bool sourceHasText() const override { return document()->characterCount() > 2; }
     bool cursorVisible() const override
     {
         return m_crt && hasFocus() && m_blinkTimer.isActive()
@@ -329,10 +328,12 @@ public:
                 // 日志同步清空（审计风险 2c：陈条目导致空撤）
                 m_undoOps.append(true);
                 m_redoOps.clear();
+                m_inkRedo.clear(); // 审查 P2：文字编辑后墨迹重做栈同步清
             } else if (!m_inUndoRedo && removed > 0
                        && document()->availableUndoSteps() == 0) {
                 m_undoOps.clear();
                 m_redoOps.clear();
+                m_inkRedo.clear();
             }
             // M3：手动编辑 = 字符画回归普通文本（程序打印/替换不受影响）
             if (!m_settingAscii && m_asciiActive) {
@@ -358,6 +359,13 @@ public:
             if (!m_settingAscii && cc > m_lastCharCount && textCursor().position() > 0) {
                 m_excitePos = textCursor().position() - 1;
                 m_exciteClock.start();
+            }
+            // 删除时辉光随字退场：激发位落在被删区间内即熄灭——否则
+            // 字删了辉光仍在原地亮 ~1.7s，形状像一个字符幽灵（用户报
+            // "空删后本该被删的字符常驻、渲染不消失"）
+            if (removed > 0 && m_exciteClock.isValid()
+                && m_excitePos >= from && m_excitePos < from + removed) {
+                m_exciteClock.invalidate();
             }
             m_lastCharCount = cc;
             m_snapDirty |= m_compositor.computeDirty(from, removed, added);
@@ -1202,12 +1210,13 @@ public:
         if (m_inkSession) {
             m_canvas->endStroke(); // 有活跃笔画先提交
             m_canvas->eraseEnd();  // 清擦除态（union/original 复位）
+            const bool hadGrab = m_shiftInkActive;
             if (m_shiftInkActive)
                 m_shiftInkActive = false;
-            // 不在此处 releaseMouse（二分定位：离屏平台 grab 不受支持
-            // 却仍强释放 → 视口后续渲染被破坏、快照失字）。真机的抓取
-            // 由 keyReleaseEvent 的 Shift 分支统一释放
-            //（抓取会话的终结语义不变）
+            // 真抓取过才释放（审查 R1：不释放会泄漏抓取；无抓取强释放
+            // 会破坏视口渲染——两者都错，只有"有抓取才释放"对）
+            if (hadGrab)
+                viewport()->releaseMouse();
             endInkSession();
         }
         m_mode = (m_mode == m) ? Mode::Normal : m;
@@ -1710,6 +1719,9 @@ public:
                 else if (m_mode == Mode::Erase)
                     m_canvas->eraseEnd();
                 endInkSession();
+                viewport()->releaseMouse(); // 真抓取过才释放（审查 R1：
+                // 置 false 后 Shift 释放分支不再放 → 抓取泄漏；此处补放，
+                // 与"无抓取强释放"的对偶都安全）
             }
             // 仅编模式恢复行号区：非编模式下它是隐藏的残留组件，
             // 无条件 show 会把旧几何的行号叠在首列文字上
@@ -1983,9 +1995,11 @@ protected:
                     toggleCrt(); // 显：T 是 Tube / Time——显像管，回到过去
                 return;
             case Qt::Key_M:
-                if (event->modifiers() & Qt::ShiftModifier)
+                if (event->modifiers() & Qt::ShiftModifier) {
                     toggleMachine(); // 显·切换计算机：M = Machine（琥珀 ↔ 绿磷）
-                return;
+                    return;
+                }
+                break; // 裸 ⌘M = 系统最小化，落回基类（同 ⌘A 病根，审查补漏）
             case Qt::Key_A:
                 if (event->modifiers() & Qt::ShiftModifier) {
                     declareArtFromSelection(); // 立为图：选区 → 字符画源图（可调画布）
