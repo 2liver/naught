@@ -4212,6 +4212,33 @@ bool Editor::selftest()
                     return false;
                 }
             }
+            // 用户最新：选中 "orders"（[1,7]）→ Shift+↓ → Shift+↑ 必须
+            // 回到原选区 [1,7]（基类轮子语义：下扩上缩回到原选区）
+            {
+                QTextCursor c(e.document());
+                c.setPosition(1);
+                c.setPosition(7, QTextCursor::KeepAnchor);
+                e.setTextCursor(c);
+                QApplication::processEvents();
+            }
+            key(Qt::Key_Down, Qt::ShiftModifier);
+            key(Qt::Key_Up, Qt::ShiftModifier);
+            {
+                QTextCursor g = e.textCursor();
+                if (g.selectionStart() != 1 || g.selectionEnd() != 7
+                    || g.position() != 7) {
+                    qWarning("selftest FAIL: orders down+up not back to [1,7] ([%d,%d] p=%d)",
+                             g.selectionStart(), g.selectionEnd(), g.position());
+                    return false;
+                }
+            }
+            // 再一下 ↑ = 消除原选区（收拢到锚点 1）
+            key(Qt::Key_Up, Qt::ShiftModifier);
+            if (e.textCursor().hasSelection() || e.textCursor().position() != 1) {
+                qWarning("selftest FAIL: second up not collapsing to anchor 1 (p=%d)",
+                         e.textCursor().position());
+                return false;
+            }
             // 场景2（用户最新）：去前导换行符，orders 在首行 → ↑×2 到
             // "o" 前（0），不许锁死在首行列映射位
             e.setPlainText(doc.mid(1));
