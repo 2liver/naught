@@ -198,12 +198,7 @@ public:
         m_crtSettleTimer.setSingleShot(true);
         m_machineSettle.setSingleShot(true);
         connect(&m_machineSettle, &QTimer::timeout, this, [this] {
-            const bool prev = m_settingAscii;
-            m_settingAscii = true;
-            applyZoom(); // 字体随机器（重排只此一次）
-            if (m_asciiActive)
-                replaceAsciiArt(); // 画布在场 → 按新机器重印
-            m_settingAscii = prev;
+            applyMachineSettle();
         });
         connect(&m_crtSettleTimer, &QTimer::timeout, this, [this] {
             if (m_crt && m_crtView)
@@ -312,6 +307,10 @@ public:
             // ③余晖冲刷（用户报：选区渲染像"先内衣后衣服"——余晖 max
             //   混合把选中前的旧文字压在新区上；选区 = 状态跳变清零）
             if (textCursor().hasSelection()) {
+                if (m_machineSettle.isActive()) {
+                    m_machineSettle.stop();
+                    applyMachineSettle(); // 选区启动前字体落定（列对齐）
+                }
                 const QTextCursor c = textCursor();
                 QTextCursor sa = c, sb = c;
                 sa.setPosition(c.selectionStart());
@@ -1312,6 +1311,16 @@ public:
         m_machineSettle.start(200);
     }
 
+    void applyMachineSettle()
+    {
+        const bool prev = m_settingAscii;
+        m_settingAscii = true;
+        applyZoom(); // 字体随机器（重排只此一次）
+        if (m_asciiActive)
+            replaceAsciiArt(); // 画布在场 → 按新机器重印
+        m_settingAscii = prev;
+    }
+
     // 屏幕实体（原实验功能，M4.5 并入）：追随视角解锁（非锁定）时生效
     // ——锁定时是干净"完美视角"，解锁后是沉浸的弯曲玻璃屏（不裁字）
     bool screenEntityOn() const { return m_crt && !m_viewLock; }
@@ -2010,12 +2019,11 @@ protected:
         }
         // 顶行再按上 = 跳文首；底行再按下 = 跳文末（用户要求的方向键
         // 边界跳跃：光标到最上行后继续按"上"→ 首行的首字符之前；
-        // 到最下行后继续按"下"→ 尾行的尾字符之后）。允许按住 Shift
-        //（用户报：选区操作后手没抬，按住 Shift 时功能不再触发——
-        // 无选区时 Shift 不影响跳跃；有选区仍走选区扩展分支）
+        // 到最下行后继续按"下"→ 尾行的尾字符之后）。仅裸方向键——
+        // Shift 情形归选区分支（用户最新要求：首行 Shift+↑ = 选区）
         if (event->key() == Qt::Key_Up
             && !(event->modifiers() & (Qt::ControlModifier | Qt::MetaModifier
-                                       | Qt::AltModifier))) {
+                                       | Qt::AltModifier | Qt::ShiftModifier))) {
             QTextCursor c = textCursor();
             if (!c.hasSelection() && c.blockNumber() == 0 && c.position() > 0) {
                 c.setPosition(0);
@@ -2026,7 +2034,7 @@ protected:
         }
         if (event->key() == Qt::Key_Down
             && !(event->modifiers() & (Qt::ControlModifier | Qt::MetaModifier
-                                       | Qt::AltModifier))) {
+                                       | Qt::AltModifier | Qt::ShiftModifier))) {
             QTextCursor c = textCursor();
             const int endPos = document()->characterCount() - 1;
             // 光标所在块之后没有内容块 = 光标已在最下行（稳健版：
@@ -2086,6 +2094,14 @@ protected:
                 c.setPosition(bottom);   // 先落锚点（下端）
                 c.setPosition(top, QTextCursor::KeepAnchor); // 光标到上端
             }
+            if (!c.hasSelection() && c.blockNumber() == 0 && c.position() > 0) {
+                // 首行 Shift+↑：上方无内容 → 选到行首（用户报"首行没选区"）
+                c.setPosition(c.position());
+                c.setPosition(0, QTextCursor::KeepAnchor);
+                setTextCursor(c);
+                wakeCaret();
+                return;
+            }
             setTextCursor(c);
             // 用控件级 moveCursor（视觉列感知）：换机后字体重排，裸
             // QTextCursor::movePosition 按字符索引移动 = 与光标错位
@@ -2103,6 +2119,33 @@ protected:
             }
             wakeCaret();
             return;
+        }
+        if (event->key() == Qt::Key_Down
+            && (event->modifiers() & Qt::ShiftModifier)
+            && !(event->modifiers() & Qt::MetaModifier)
+            && !(event->modifiers() & (Qt::ControlModifier | Qt::AltModifier))) {
+            // 纯 Shift+↓：尾行且无选区 → 选到文末（用户报"尾行没选区"）
+            QTextCursor c = textCursor();
+            if (!c.hasSelection()) {
+                const int endPos = document()->characterCount() - 1;
+                QTextBlock after = c.block().next();
+                bool hasContentAfter = false;
+                while (after.isValid()) {
+                    if (after.length() > 1) {
+                        hasContentAfter = true;
+                        break;
+                    }
+                    after = after.next();
+                }
+                if (!hasContentAfter && c.position() < endPos) {
+                    c.setPosition(c.position());
+                    c.setPosition(endPos, QTextCursor::KeepAnchor);
+                    setTextCursor(c);
+                    wakeCaret();
+                    return;
+                }
+            }
+            // 其余情形 = 基类（向下扩展/回缩）
         }
         if (event->key() == Qt::Key_Down
             && (event->modifiers() & Qt::ShiftModifier)

@@ -3738,6 +3738,42 @@ bool Editor::selftest()
                          e.textCursor().position(), endPos);
                 return false;
             }
+            // 边界选区腿（用户报：首行 Shift+↑ 没选区 / 尾行 Shift+↓ 没选区）
+            {
+                QTextCursor c = e.textCursor();
+                c.movePosition(QTextCursor::Start);
+                c.movePosition(QTextCursor::Right);
+                e.setTextCursor(c); // 首行第 2 列（位置 1）
+            }
+            {
+                QKeyEvent ks(QEvent::KeyPress, Qt::Key_Up, Qt::ShiftModifier);
+                QApplication::sendEvent(&e, &ks);
+            }
+            if (!e.textCursor().hasSelection()
+                || e.textCursor().selectionStart() != 0
+                || e.textCursor().selectionEnd() != 1) {
+                qWarning("selftest FAIL: first-line Shift+Up no [0,1] selection (%d,%d)",
+                         e.textCursor().selectionStart(), e.textCursor().selectionEnd());
+                return false;
+            }
+            // 尾行 Shift+↓ → 选到文末
+            {
+                QTextCursor c(e.document());
+                QTextBlock lb = e.document()->findBlockByNumber(e.document()->blockCount() - 2);
+                c.setPosition(lb.position());
+                e.setTextCursor(c);
+            }
+            {
+                QKeyEvent kd(QEvent::KeyPress, Qt::Key_Down, Qt::ShiftModifier);
+                QApplication::sendEvent(&e, &kd);
+            }
+            const int endP = e.document()->characterCount() - 1;
+            if (!e.textCursor().hasSelection()
+                || e.textCursor().selectionEnd() != endP) {
+                qWarning("selftest FAIL: last-line Shift+Down no to-end selection (%d,%d want end %d)",
+                         e.textCursor().selectionStart(), e.textCursor().selectionEnd(), endP);
+                return false;
+            }
             qInfo("ARROW-EDGE ok");
         }
         // ============ Shift+↑/↓ 行式选中闸（用户报：选中一行后 Shift+上
@@ -3786,6 +3822,53 @@ bool Editor::selftest()
                          sel3.selectionStart(), sel3.selectionEnd());
                 return false;
             }
+        }
+        // ============ NAUGHT_ALIGN：换机后 Shift 选区的列对齐取证 ============
+        if (qEnvironmentVariableIsSet("NAUGHT_ALIGN")) {
+            qInfo("ALIGN-ENTER");
+            const auto settleMs = [&](int ms) {
+                QEventLoop sl;
+                QTimer::singleShot(ms, &sl, &QEventLoop::quit);
+                sl.exec();
+                QApplication::processEvents();
+            };
+            e.toggleCrt();
+            QApplication::processEvents();
+            e.show();
+            e.setFocus();
+            e.resize(700, 400);
+            QApplication::processEvents();
+            e.setPlainText(QStringLiteral("aaaa\nbbbbb\nccccc\n"));
+            // 光标落在 c 的第 2 列（位置 13）
+            {
+                QTextCursor c(e.document());
+                c.setPosition(13);
+                e.setTextCursor(c);
+            }
+            QApplication::processEvents();
+            const QRect beforeCell = e.cursorRect();
+            qInfo("ALIGN before machine=%d font=%s cellX=%d",
+                  e.machine(), qPrintable(e.document()->defaultFont().family()),
+                  beforeCell.x());
+            // 换机（字体变宽/变窄 → 重排）
+            while (e.machine() != 1)
+                e.toggleMachine();
+            settleMs(400); // 字体应用落定（200ms 合并定时器）
+            const QRect afterCell = e.cursorRect();
+            qInfo("ALIGN after machine=%d font=%s cellX=%d",
+                  e.machine(), qPrintable(e.document()->defaultFont().family()),
+                  afterCell.x());
+            // Shift+↑ 选中上一行对应列
+            {
+                QKeyEvent ks(QEvent::KeyPress, Qt::Key_Up, Qt::ShiftModifier);
+                QApplication::sendEvent(&e, &ks);
+            }
+            const QTextCursor sel = e.textCursor();
+            const QRect selStartCell = e.cursorRect(sel);
+            qInfo("ALIGN sel=[%d,%d] cursorCellX=%d anchorX=%d",
+                  sel.selectionStart(), sel.selectionEnd(),
+                  e.cursorRect().x(), selStartCell.x());
+            qInfo("ALIGN-EXIT");
         }
         // ============ NAUGHT_EDGE：裸 Shift+↑ 选区 + 底行↓↓ 边界 ============
         if (qEnvironmentVariableIsSet("NAUGHT_EDGE")) {
