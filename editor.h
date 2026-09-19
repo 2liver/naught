@@ -2108,14 +2108,16 @@ protected:
             //（用户报：⌘⇧M 后按住 Shift 上下选中行与光标不对齐）
             moveCursor(QTextCursor::Up, QTextCursor::KeepAnchor);
             // 到头行：选区补到行首（用户报：一行行加选区到首行有
-            // 一截选不上——靠近首字符那段）
+            // 一截选不上——靠近首字符那段）。锚点必须保持在下端，
+            // 否则选区只剩"行首到光标"那段（用户报漏行）
             {
                 QTextCursor after = textCursor();
                 if (after.hasSelection()
                     && document()->findBlock(after.selectionStart()).blockNumber() == 0
                     && after.selectionStart() > 0) {
-                    after.setPosition(after.position());
-                    after.setPosition(0, QTextCursor::KeepAnchor);
+                    const int bottom = qMax(after.anchor(), after.position());
+                    after.setPosition(bottom);   // 先落锚点（下端）
+                    after.setPosition(0, QTextCursor::KeepAnchor); // 光标到行首
                     setTextCursor(after);
                 }
             }

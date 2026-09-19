@@ -3877,10 +3877,30 @@ bool Editor::selftest()
                 QApplication::sendEvent(&e, &ks);
             }
             const QTextCursor sel = e.textCursor();
-            if (sel.selectionStart() != 0) {
-                qWarning("selftest FAIL: upward selection not extended to line start (%d)",
-                         sel.selectionStart());
+            if (sel.selectionStart() != 0 || sel.selectionEnd() != 16) {
+                qWarning("selftest FAIL: upward selection wrong extent [%d,%d] (want 0,16)",
+                         sel.selectionStart(), sel.selectionEnd());
                 return false;
+            }
+            // 空首行变体（用户报：首行留空换行 → 跳过/单选错乱）：
+            // 首行为空行，从第二行上行两次 → 选区 = [0, 锚点]
+            e.setPlainText(QStringLiteral("\nbbbbb\nccccc\n"));
+            {
+                QTextCursor c(e.document());
+                c.setPosition(13); // ccccc 行内
+                e.setTextCursor(c);
+            }
+            for (int i = 0; i < 3; ++i) {
+                QKeyEvent ks(QEvent::KeyPress, Qt::Key_Up, Qt::ShiftModifier);
+                QApplication::sendEvent(&e, &ks);
+            }
+            {
+                const QTextCursor sel2 = e.textCursor();
+                if (sel2.selectionStart() != 0 || sel2.selectionEnd() != 13) {
+                    qWarning("selftest FAIL: empty-first-line upward extent [%d,%d] (want 0,13)",
+                             sel2.selectionStart(), sel2.selectionEnd());
+                    return false;
+                }
             }
             qInfo("ALIGN-GATE ok");
             while (e.machine() != 0)
