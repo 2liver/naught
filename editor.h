@@ -1394,6 +1394,8 @@ public:
     bool asciiArtActive() const { return m_asciiActive; } // 画布编辑态（立为图勾选）
     bool colorMachine() const { return m_machine == 2; }   // C64：字符画逐字符真彩
     bool asciiPrintingDbg() const { return m_asciiPrinting; }
+    // 冻结画布期望尺寸（闸对照用：立图时刻基准列/行数 × 倍率——字体无关）
+    int asciiArtTextSizeDbg() { return artText().size(); }
     // 取证：打印状态快照（CI 打印闸失败诊断用）
     QString asciiPrintDbg() const
     {
