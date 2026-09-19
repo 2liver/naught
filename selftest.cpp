@@ -3267,24 +3267,10 @@ bool Editor::selftest()
             // 回归（用户报：打印期间 Cmd+B 会删字符）：打印不等待，
             // 连续多次切编交错打印拍 → 画布必须一字不少
             {
-                e.setPlainText(QString());
-                // 等机器落定（字体应用经 200ms 合并定时器 + 滚动条瞬时态）：
-                // 基准打印必须与重印同条件——Windows CI 实测未落定时
-                // 视口 546/字宽 3.9 vs 落定后 560/4.12 → 基准列数 140 vs
-                // 136，两次打印画布尺寸不同 → 闸误报吃字
-                {
-                    QEventLoop slp;
-                    QTimer::singleShot(260, &slp, &QEventLoop::quit);
-                    slp.exec();
-                }
-                QApplication::processEvents();
-                e.loadAsciiImage(simg);
-                waitPrint();
-                const int fullLen = e.toPlainText().size(); // 参考全长
-                qInfo("TEXT-ART ref len=%d %s", fullLen, qPrintable(e.asciiPrintDbg()));
                 e.setPlainText(QStringLiteral("开头文字\n"));
                 e.moveCursor(QTextCursor::End);
                 e.loadAsciiImage(simg); // 打印开始——不等待
+                const int expect = e.asciiArtTextSizeDbg(); // 冻结期望（立图网格）
                 for (int i = 0; i < 10; ++i) {
                     QKeyEvent kb(QEvent::KeyPress, Qt::Key_B, Qt::ControlModifier);
                     QApplication::sendEvent(&e, &kb); // 打印期间切编
@@ -3293,10 +3279,14 @@ bool Editor::selftest()
                     lp.exec();
                 }
                 waitPrint();
+                // 对照冻结期望（立图时刻网格）——不再做第二次基准打印：
+                // Windows CI 上两次打印之间的滚动条/字号瞬时态会改变
+                // 基准列数（视口 546↔560 → crtGridSize 跟随），第二次
+                // 基准打印与正式打印条件不一致 = 闸自身失真
                 if (!e.m_asciiActive || !e.toPlainText().startsWith(QStringLiteral("开头文字\n"))
-                    || e.toPlainText().size() != fullLen + 5) {
+                    || e.toPlainText().size() != expect + 5) {
                     qWarning("selftest FAIL: rapid code toggles during print ate text (cc=%d want %d) %s tail=[%s]",
-                             int(e.toPlainText().size()), fullLen + 5,
+                             int(e.toPlainText().size()), expect + 5,
                              qPrintable(e.asciiPrintDbg()),
                              qPrintable(e.toPlainText().right(30)
                                             .replace(QLatin1Char('\n'), QLatin1Char('|'))));
