@@ -1059,6 +1059,66 @@ bool Editor::selftest()
             }
             e.toggleMode(Editor::Mode::Draw); // 退出模式
         }
+        // 瓦片烘焙远距闸（用户报：画完一笔消失一半/整笔消失——烘焙漏
+        // 平移，文档坐标直接画进 512 瓦片 = 超出即裁；近原点笔画全在
+        // 首瓦片内测不出来）。远距笔画（x≈900 跨越两块瓦片）必须完整
+        {
+            e.toggleMode(Editor::Mode::Draw);
+            QApplication::processEvents();
+            e.resize(1000, 400); // 画布跟随视口：必须 ≥900 宽才容下远距笔画
+            QApplication::processEvents();
+            QWidget *vp = e.viewport();
+            // 画布跟随视口滚动：先把视口滚到远处（内容铺长）再在
+            // 视口内落笔画 → 笔画文档坐标远离原点
+            e.setPlainText(QString());
+            for (int i = 0; i < 120; ++i)
+                e.insertPlainText(QStringLiteral("無無無無無無無無\n"));
+            QApplication::processEvents();
+            e.verticalScrollBar()->setValue(e.verticalScrollBar()->maximum());
+            QApplication::processEvents();
+            {
+                const QPointF p1(60, 80);
+                QMouseEvent pr(QEvent::MouseButtonPress, p1, vp->mapToGlobal(p1.toPoint()),
+                               Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                QApplication::sendEvent(vp, &pr);
+                for (int x = 64; x <= 900; x += 8) { // 横跨 512 瓦片边界
+                    const QPointF p2(x, 80);
+                    QMouseEvent mv(QEvent::MouseMove, p2, vp->mapToGlobal(p2.toPoint()),
+                                   Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                    QApplication::sendEvent(vp, &mv);
+                }
+                const QPointF p2(900, 80);
+                QMouseEvent re(QEvent::MouseButtonRelease, p2, vp->mapToGlobal(p2.toPoint()),
+                               Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+                QApplication::sendEvent(vp, &re); // 释放经事件过滤器提交笔画
+            }
+            QApplication::processEvents();
+            // 画布裸渲染：横线两端都必须有墨（旧 bug：x>512 段被裁掉）
+            QImage ip(e.m_canvas->size(), QImage::Format_ARGB32);
+            ip.fill(Qt::white);
+            e.m_canvas->render(&ip);
+            long leftInk = 0, rightInk = 0;
+            for (int y = 60; y < 100; ++y) {
+                const QRgb pl = ip.pixel(100, y);
+                const QRgb pr2 = ip.pixel(820, y);
+                if (qRed(pl) + qGreen(pl) + qBlue(pl) < 600)
+                    ++leftInk;
+                if (qRed(pr2) + qGreen(pr2) + qBlue(pr2) < 600)
+                    ++rightInk;
+            }
+            qInfo("TILE-FAR leftInk=%ld rightInk=%ld paths=%d canvas=%dx%d",
+                  leftInk, rightInk, int(e.inkPaths().size()),
+                  e.m_canvas->width(), e.m_canvas->height());
+            if (leftInk < 10 || rightInk < 10) {
+                qWarning("selftest FAIL: far stroke clipped by tile cache (L=%ld R=%ld)",
+                         leftInk, rightInk);
+                return false;
+            }
+            e.toggleMode(Editor::Mode::Draw); // 退出模式
+            e.clearInk();
+            e.setPlainText(QStringLiteral("無\n"));
+            QApplication::processEvents();
+        }
         // 擦除通道宽度 = 笔刷宽度：像素级验证
         {
             e.toggleCodeMode();

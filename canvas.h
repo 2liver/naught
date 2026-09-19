@@ -356,6 +356,9 @@ private:
                 QPixmap &pm = tileAt(QPoint(tx, ty));
                 QPainter p(&pm);
                 p.setRenderHint(QPainter::Antialiasing);
+                p.translate(-tileRect(QPoint(tx, ty)).topLeft()); // 笔迹是文档
+                // 坐标 → 平移到瓦片本地（用户报：画完一笔消失一半/整笔
+                // 消失——漏掉平移，文档坐标直接画进 512 瓦片 = 超出即裁）
                 p.setClipRect(tileRect(QPoint(tx, ty))); // 只画进本瓦片
                 p.setPen(Qt::NoPen);
                 p.setBrush(m_ink);
