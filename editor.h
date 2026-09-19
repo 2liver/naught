@@ -292,6 +292,9 @@ public:
         // P3：光标移动也纳入脏区（旧位置的块光标必须被擦掉——
         // 否则增量快照留下幽灵光标；箭头键移动不触发 contentsChange）
         connect(this, &QPlainTextEdit::cursorPositionChanged, this, [this] {
+            if (!textCursor().hasSelection())
+                m_shiftSelDir = 0; // 选区清空 → 方向记忆归零（不 gate 在显模式，
+            // 常规模式的方向记忆同样要复位）
             if (!m_crt)
                 return;
             // 子代理审计：方向键导航只标脏区、从不 markDirty——显模式
@@ -2067,6 +2070,15 @@ protected:
             // 容忍 ⌘（按键追踪取证：用户按 ⌘Z 后手指还压在 ⌘ 上，实际
             // 按键 = ⌘⇧↑——⌘ 是上一快捷键的残留，不得改变选区语义）
             QTextCursor c = textCursor();
+            // 回撤（用户报：从行中出发 Shift↓ 下移选区再 Shift↑ 返回，
+            // 没返回光标处而是奔更上行——选区围绕光标落点复原）：上一
+            // 次是下移 → 这次上移 = 原路返回（基类语义，光标即移动端）
+            if (m_shiftSelDir == 1 && c.hasSelection()) {
+                moveCursor(QTextCursor::Up, QTextCursor::KeepAnchor);
+                m_shiftSelDir = -1;
+                wakeCaret();
+                return;
+            }
             // 光标已在首行且有选区 → 再按一下补到行首（用户拍板：先落
             // 对齐位、再按才补首 = 保留一次选择权；旧版同按自动补首太急）
             if (c.hasSelection()
@@ -2076,6 +2088,7 @@ protected:
                 c.setPosition(bottom);
                 c.setPosition(0, QTextCursor::KeepAnchor);
                 setTextCursor(c);
+                m_shiftSelDir = -1;
                 wakeCaret();
                 return;
             }
@@ -2119,6 +2132,7 @@ protected:
             // QTextCursor::movePosition 按字符索引移动 = 与光标错位
             //（用户报：⌘⇧M 后按住 Shift 上下选中行与光标不对齐）
             moveCursor(QTextCursor::Up, QTextCursor::KeepAnchor);
+            m_shiftSelDir = -1;
             {
                 const QTextCursor post = c;
                 QFile f(QStringLiteral("/tmp/naught-selup-diag.log"));
@@ -2153,6 +2167,7 @@ protected:
                     c.setPosition(c.position());
                     c.setPosition(endPos, QTextCursor::KeepAnchor);
                     setTextCursor(c);
+                    m_shiftSelDir = 1;
                     wakeCaret();
                     return;
                 }
@@ -2167,6 +2182,7 @@ protected:
             QKeyEvent clone(QEvent::KeyPress, Qt::Key_Down, Qt::ShiftModifier,
                             event->text());
             QPlainTextEdit::keyPressEvent(&clone);
+            m_shiftSelDir = 1;
             wakeCaret();
             return;
         }
@@ -2627,11 +2643,28 @@ private:
             m_crtSettleTimer.start(400);
         }
         // 复位垂直移动的"期望列"（Qt 内部存储，换字体后陈旧 → 用户报
-        // "换机后 Shift+↑ 选区与光标不对齐，左右换字符才恢复"）：一次
-        // 守卫的水平微移（Left+Right 净位移零）重算期望列
-        if (!textCursor().hasSelection() && textCursor().position() > 0) {
-            moveCursor(QTextCursor::Left);
-            moveCursor(QTextCursor::Right);
+        // "换机后 Shift+↑ 选区与光标不对齐，左右换字符才恢复"；且全程
+        // 按住 Shift 选区中途换机同样错位 = 有选区也要复位）：一次水平
+        // 微移（Left+Right 净位移零）重算期望列，微移后恢复原选区与
+        // 方向记忆（微移的中间态会清选区/归零方向）
+        {
+            const int anchor = textCursor().anchor();
+            const int pos = textCursor().position();
+            const int dir = m_shiftSelDir;
+            if (pos > 0) {
+                // 真实按键路径左+右（净零位移）重算 Qt 内部期望列，
+                // 然后用锚点/位置重建选区——绝不能 setTextCursor(旧游标
+                // 副本)：副本携带陈旧的 x，复辟回去 = 复位白做（实证）
+                QKeyEvent kl(QEvent::KeyPress, Qt::Key_Left, Qt::NoModifier);
+                QKeyEvent kr(QEvent::KeyPress, Qt::Key_Right, Qt::NoModifier);
+                QApplication::sendEvent(this, &kl);
+                QApplication::sendEvent(this, &kr);
+                QTextCursor rebuilt = textCursor(); // 新游标 = 新 x
+                rebuilt.setPosition(anchor);
+                rebuilt.setPosition(pos, QTextCursor::KeepAnchor);
+                setTextCursor(rebuilt);
+                m_shiftSelDir = dir;
+            }
         }
     }
 
@@ -3155,6 +3188,9 @@ private:
     QVector<Canvas::InkStroke> m_inkBefore;
     bool m_inkSession = false;
     bool m_shiftInkActive = false;
+    int m_shiftSelDir = 0; // 最近一次 Shift 竖直移动方向：-1 上 / +1 下 / 0 无
+    //（选区围绕光标落点复原：Shift↓ 之后 Shift↑ 应原路返回，而非
+    // 又当新扩展重定向）
     QVector<bool> m_undoOps; // 统一撤销日志：true=文字步 false=墨迹步（时间序）
     QVector<bool> m_redoOps;
     bool m_inUndoRedo = false; // 撤销/重做重入保护：contentsChange 不入日志

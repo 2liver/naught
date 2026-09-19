@@ -3910,6 +3910,68 @@ bool Editor::selftest()
             e.setPlainText(QStringLiteral("無\n"));
             QApplication::processEvents();
         }
+        // ============ NAUGHT_XRESET：真实按键左右 vs API 微移的期望列复位对比 ============
+        if (qEnvironmentVariableIsSet("NAUGHT_XRESET")) {
+            qInfo("XRESET-ENTER");
+            const auto settleMs = [&](int ms) {
+                QEventLoop sl;
+                QTimer::singleShot(ms, &sl, &QEventLoop::quit);
+                sl.exec();
+                QApplication::processEvents();
+            };
+            e.toggleCrt();
+            QApplication::processEvents();
+            e.show();
+            e.setFocus();
+            e.resize(700, 400);
+            QApplication::processEvents();
+            e.setPlainText(QStringLiteral("aaaa\nbbbbb\nccccc\n"));
+            // 到 C64（宽字体——复现机型）
+            while (e.machine() != 2)
+                e.toggleMachine();
+            settleMs(400);
+            // 上一机型残留的期望列已陈旧（模拟刚换完机的状态）：
+            // 光标到尾行行尾
+            {
+                QTextCursor c(e.document());
+                c.setPosition(16);
+                e.setTextCursor(c);
+            }
+            QApplication::processEvents();
+            {
+                QKeyEvent ks(QEvent::KeyPress, Qt::Key_Up, Qt::ShiftModifier);
+                QApplication::sendEvent(&e, &ks);
+            }
+            QTextCursor s1 = e.textCursor();
+            QTextCursor t1(s1); t1.setPosition(s1.selectionStart());
+            qInfo("XRESET before-lr sel=[%d,%d] startX=%d curX=%d",
+                  s1.selectionStart(), s1.selectionEnd(),
+                  e.cursorRect(t1).x(), e.cursorRect().x());
+            // 清选区，真实按键左+右
+            {
+                QTextCursor c(e.document());
+                c.setPosition(16);
+                e.setTextCursor(c);
+            }
+            QApplication::processEvents();
+            {
+                QKeyEvent kl(QEvent::KeyPress, Qt::Key_Left, Qt::NoModifier);
+                QApplication::sendEvent(&e, &kl);
+                QKeyEvent kr(QEvent::KeyPress, Qt::Key_Right, Qt::NoModifier);
+                QApplication::sendEvent(&e, &kr);
+            }
+            QApplication::processEvents();
+            {
+                QKeyEvent ks(QEvent::KeyPress, Qt::Key_Up, Qt::ShiftModifier);
+                QApplication::sendEvent(&e, &ks);
+            }
+            QTextCursor s2 = e.textCursor();
+            QTextCursor t2(s2); t2.setPosition(s2.selectionStart());
+            qInfo("XRESET after-lr sel=[%d,%d] startX=%d curX=%d",
+                  s2.selectionStart(), s2.selectionEnd(),
+                  e.cursorRect(t2).x(), e.cursorRect().x());
+            qInfo("XRESET-EXIT");
+        }
         // ============ NAUGHT_ALIGN2：尾行行尾换机 + 上行选区对齐取证 ============
         if (qEnvironmentVariableIsSet("NAUGHT_ALIGN2")) {
             qInfo("ALIGN2-ENTER");
@@ -3999,6 +4061,47 @@ bool Editor::selftest()
                   sel.selectionStart(), sel.selectionEnd(),
                   e.cursorRect().x(), selStartCell.x());
             qInfo("ALIGN-EXIT");
+        }
+        // ============ NAUGHT_REVERSE：空顶行跳过 + 下移再上返 取证 ============
+        if (qEnvironmentVariableIsSet("NAUGHT_REVERSE")) {
+            qInfo("REVERSE-ENTER");
+            const auto dump = [&](const char *tag) {
+                QTextCursor c = e.textCursor();
+                qInfo("REVERSE %s sel=[%d,%d] anchor=%d pos=%d",
+                      tag, c.selectionStart(), c.selectionEnd(), c.anchor(), c.position());
+            };
+            // A：空顶行 + 从下行 Shift+↑
+            e.setPlainText(QStringLiteral("\nbbbbb\nccccc\n"));
+            {
+                QTextCursor c(e.document());
+                c.setPosition(9); // b 行中
+                e.setTextCursor(c);
+            }
+            dump("A-start");
+            for (int i = 0; i < 3; ++i) {
+                QKeyEvent ks(QEvent::KeyPress, Qt::Key_Up, Qt::ShiftModifier);
+                QApplication::sendEvent(&e, &ks);
+                dump("A-up");
+            }
+            // B：行中出发 ↓ 选中下移，再 ↑ 返回
+            e.setPlainText(QStringLiteral("aaaa\nbbbbb\nccccc\n"));
+            {
+                QTextCursor c(e.document());
+                c.setPosition(12); // c 行中
+                e.setTextCursor(c);
+            }
+            dump("B-start");
+            {
+                QKeyEvent kd(QEvent::KeyPress, Qt::Key_Down, Qt::ShiftModifier);
+                QApplication::sendEvent(&e, &kd);
+            }
+            dump("B-down");
+            for (int i = 0; i < 2; ++i) {
+                QKeyEvent ks(QEvent::KeyPress, Qt::Key_Up, Qt::ShiftModifier);
+                QApplication::sendEvent(&e, &ks);
+                dump("B-up");
+            }
+            qInfo("REVERSE-EXIT");
         }
         // ============ NAUGHT_EDGE：裸 Shift+↑ 选区 + 底行↓↓ 边界 ============
         if (qEnvironmentVariableIsSet("NAUGHT_EDGE")) {
