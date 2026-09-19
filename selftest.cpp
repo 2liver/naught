@@ -3689,6 +3689,41 @@ bool Editor::selftest()
             }
             qInfo("SEL-REVERSE ok");
         }
+        // ============ 方向键边界跳跃闸（用户要求：顶行再按上=文首；
+        // 底行再按下=文末尾字符之后）============
+        {
+            e.setPlainText(QStringLiteral("甲\n乙\n丙\n"));
+            // 上跳：光标到文首
+            {
+                QTextCursor c = e.textCursor();
+                c.movePosition(QTextCursor::Start);
+                e.setTextCursor(c);
+            }
+            QKeyEvent ku(QEvent::KeyPress, Qt::Key_Up, Qt::NoModifier);
+            QApplication::sendEvent(&e, &ku);
+            if (e.textCursor().position() != 0) {
+                qWarning("selftest FAIL: Up at top line not to pos 0 (%d)",
+                         e.textCursor().position());
+                return false;
+            }
+            // 下跳：光标到文末（尾字符之后）
+            {
+                QTextCursor c = e.textCursor();
+                c.movePosition(QTextCursor::Start);
+                e.setTextCursor(c);
+            }
+            for (int i = 0; i < 5; ++i) {
+                QKeyEvent kd(QEvent::KeyPress, Qt::Key_Down, Qt::NoModifier);
+                QApplication::sendEvent(&e, &kd);
+            }
+            const int endPos = e.document()->characterCount() - 1;
+            if (e.textCursor().position() != endPos) {
+                qWarning("selftest FAIL: Down at bottom not to end (%d want %d)",
+                         e.textCursor().position(), endPos);
+                return false;
+            }
+            qInfo("ARROW-EDGE ok");
+        }
         // ============ Shift+↑/↓ 行式选中闸（用户报：选中一行后 Shift+上
         // 得到半行——基类按列锚定；标准 = 选区扩展到整行）============
         {
@@ -3741,8 +3776,9 @@ bool Editor::selftest()
             qInfo("YANSEL-ENTER");
             const auto dump = [&](const char *tag) {
                 QTextCursor c = e.textCursor();
-                qInfo("YANSEL %s selStart=%d selEnd=%d hasSel=%d text=[%s]", tag,
-                      c.selectionStart(), c.selectionEnd(), int(c.hasSelection()),
+                qInfo("YANSEL %s selStart=%d selEnd=%d anchor=%d pos=%d hasSel=%d text=[%s]",
+                      tag, c.selectionStart(), c.selectionEnd(), c.anchor(), c.position(),
+                      int(c.hasSelection()),
                       qPrintable(e.toPlainText().replace(QLatin1Char('\n'), QLatin1Char('|'))));
             };
             e.setPlainText(QStringLiteral("甲\n乙\n丙\n"));
@@ -3786,6 +3822,33 @@ bool Editor::selftest()
                 QApplication::sendEvent(&e, &ks);
             }
             dump("ctrl-shiftup");
+            // 变体 B：部分选中（用户原话"选中最下行字符"）+ 言/撤回 + Shift 上下循环
+            e.setPlainText(QStringLiteral("甲甲甲甲\n乙乙乙乙乙\n丙丙丙丙\n"));
+            {
+                QTextCursor c(e.document());
+                c.setPosition(14); // 丙 的第 2 个字符
+                c.setPosition(16, QTextCursor::KeepAnchor); // 选 丙丙（列 2-3）
+                e.setTextCursor(c);
+            }
+            dump("B-sel-partial");
+            {
+                QKeyEvent kl(QEvent::KeyPress, Qt::Key_L, Qt::ControlModifier);
+                QApplication::sendEvent(&e, &kl);
+            }
+            dump("B-yan");
+            {
+                QKeyEvent kz(QEvent::KeyPress, Qt::Key_Z, Qt::ControlModifier);
+                QApplication::sendEvent(&e, &kz);
+            }
+            dump("B-undo");
+            for (int i = 0; i < 3; ++i) {
+                QKeyEvent ku(QEvent::KeyPress, Qt::Key_Up, Qt::ShiftModifier);
+                QApplication::sendEvent(&e, &ku);
+                dump("B-up");
+                QKeyEvent kd(QEvent::KeyPress, Qt::Key_Down, Qt::ShiftModifier);
+                QApplication::sendEvent(&e, &kd);
+                dump("B-down");
+            }
             qInfo("YANSEL-EXIT");
         }
         // ============ NAUGHT_FONTCHECK：每机型字体核对 ============

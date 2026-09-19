@@ -1988,6 +1988,33 @@ protected:
                 && document()->lastBlock().length() == 1)
                 return;
         }
+        // 顶行再按上 = 跳文首；底行再按下 = 跳文末（用户要求的方向键
+        // 边界跳跃：光标到最上行后继续按"上"→ 首行的首字符之前；
+        // 到最下行后继续按"下"→ 尾行的尾字符之后）
+        if (event->key() == Qt::Key_Up
+            && !(event->modifiers() & (Qt::ControlModifier | Qt::MetaModifier
+                                       | Qt::AltModifier | Qt::ShiftModifier))) {
+            QTextCursor c = textCursor();
+            if (!c.hasSelection() && c.blockNumber() == 0 && c.position() > 0) {
+                c.setPosition(0);
+                setTextCursor(c);
+                wakeCaret();
+                return;
+            }
+        }
+        if (event->key() == Qt::Key_Down
+            && !(event->modifiers() & (Qt::ControlModifier | Qt::MetaModifier
+                                       | Qt::AltModifier | Qt::ShiftModifier))) {
+            QTextCursor c = textCursor();
+            const int endPos = document()->characterCount() - 1;
+            if (!c.hasSelection() && c.blockNumber() == document()->blockCount() - 2
+                && c.position() < endPos) {
+                c.setPosition(endPos);
+                setTextCursor(c);
+                wakeCaret();
+                return;
+            }
+        }
         // Shift+↑ 选区扩展语义（用户拍板）：光标 = 移动端（上端），锚点
         // 锁在原选区**远端（下端）**——选区 = 上一行对应列起的半截 + 原
         // 来的整行。旧基类把光标留在原选区下端、锚点在上端 → 原选区被
