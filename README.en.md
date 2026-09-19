@@ -201,7 +201,7 @@ Launchpad). If GitHub is unreachable, set a proxy first, e.g.
 **Windows** (PowerShell one-liner; forces TLS 1.2, falls back through
 mirrors when the direct connection fails):
 
-    [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; $d='D:\naught'; md $d -Force|Out-Null; $base='https://github.com/2liver/naught/releases/download/v0.3.14/naught-windows.zip'; foreach($m in @('','https://gh-proxy.com/','https://ghproxy.net/','https://gh.ddlc.top/')){try{iwr ($m+$base) -OutFile "$d\n.zip" -ErrorAction Stop; break}catch{}}; Expand-Archive "$d\n.zip" -DestinationPath $d -Force
+    [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; $d='D:\naught'; md $d -Force|Out-Null; $base='https://github.com/2liver/naught/releases/download/v0.3.15/naught-windows.zip'; foreach($m in @('','https://gh-proxy.com/','https://ghproxy.net/','https://gh.ddlc.top/')){try{iwr ($m+$base) -OutFile "$d\n.zip" -ErrorAction Stop; break}catch{}}; Expand-Archive "$d\n.zip" -DestinationPath $d -Force
 
 **Linux** (single-file AppImage):
 
