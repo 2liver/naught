@@ -3794,15 +3794,14 @@ bool Editor::selftest()
                          sel.selectionStart(), sel.selectionEnd());
                 return false;
             }
-            // 反向：Shift+下 = 回撤一步收拢回落点（用户拍板：先"只有光标
-            // 无选区"，再按才是新扩展）
+            // 反向：Shift+下 = 一行一行消除（纯逐行粒度——用户最新拍板，
+            // 撤销"一步收拢"跳变），缩回 [4,5]
             QKeyEvent kd(QEvent::KeyPress, Qt::Key_Down, Qt::ShiftModifier);
             QApplication::sendEvent(&e, &kd);
             const QTextCursor sel2 = e.textCursor();
-            if (sel2.hasSelection() || sel2.position() != 5) {
-                qWarning("selftest FAIL: Shift+Down reversal not collapse-to-anchor "
-                         "[%d,%d] pos=%d (want no-sel pos=5)",
-                         sel2.selectionStart(), sel2.selectionEnd(), sel2.position());
+            if (sel2.selectionStart() != 4 || sel2.selectionEnd() != 5) {
+                qWarning("selftest FAIL: Shift+Down not line-by-line shrink [%d,%d] (want 4,5)",
+                         sel2.selectionStart(), sel2.selectionEnd());
                 return false;
             }
             // 列锚定腿（用户语义：上一行对应列起的半截 + 原来的整行）：
@@ -3879,8 +3878,9 @@ bool Editor::selftest()
                 QApplication::sendEvent(&e, &ks);
             }
             const QTextCursor sel = e.textCursor();
-            if (sel.selectionStart() != 0 || sel.selectionEnd() != 16) {
-                qWarning("selftest FAIL: upward selection wrong extent [%d,%d] (want 0,16)",
+            // 纯逐行粒度（用户拍板）：到头行即停（第三下 no-op），不跳行首
+            if (sel.selectionStart() != 4 || sel.selectionEnd() != 16) {
+                qWarning("selftest FAIL: upward selection wrong extent [%d,%d] (want 4,16)",
                          sel.selectionStart(), sel.selectionEnd());
                 return false;
             }

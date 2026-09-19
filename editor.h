@@ -292,9 +292,6 @@ public:
         // P3：光标移动也纳入脏区（旧位置的块光标必须被擦掉——
         // 否则增量快照留下幽灵光标；箭头键移动不触发 contentsChange）
         connect(this, &QPlainTextEdit::cursorPositionChanged, this, [this] {
-            if (!textCursor().hasSelection())
-                m_shiftSelDir = 0; // 选区清空 → 方向记忆归零（不 gate 在显模式，
-            // 常规模式的方向记忆同样要复位）
             if (!m_crt)
                 return;
             // 子代理审计：方向键导航只标脏区、从不 markDirty——显模式
@@ -2101,29 +2098,8 @@ protected:
             // 容忍 ⌘（按键追踪取证：用户按 ⌘Z 后手指还压在 ⌘ 上，实际
             // 按键 = ⌘⇧↑——⌘ 是上一快捷键的残留，不得改变选区语义）
             QTextCursor c = textCursor();
-            // 回撤（用户拍板：从别的选区回归光标，应先是一个"只有光标、
-            // 无选区"的状态——选区围绕光标落点复原，一步收拢回落点；
-            // 再按才是新的扩展）
-            if (m_shiftSelDir == 1 && c.hasSelection()) {
-                c.setPosition(c.anchor()); // 选区清空，光标回落点
-                setTextCursor(c);
-                m_shiftSelDir = 0;
-                wakeCaret();
-                return;
-            }
-            // 光标已在首行且有选区 → 再按一下补到行首（用户拍板：先落
-            // 对齐位、再按才补首 = 保留一次选择权；旧版同按自动补首太急）
-            if (c.hasSelection()
-                && document()->findBlock(c.position()).blockNumber() == 0
-                && c.position() > 0) {
-                const int bottom = qMax(c.anchor(), c.position());
-                c.setPosition(bottom);
-                c.setPosition(0, QTextCursor::KeepAnchor);
-                setTextCursor(c);
-                m_shiftSelDir = -1;
-                wakeCaret();
-                return;
-            }
+            // 纯逐行粒度（用户最新拍板：Shift+方向键 = 一行一行叠/消除，
+            // 不允许任何跳变——撤销"补行首"与"一步收拢"两处跳跃）
             // 真机取证（用户报：选区语义与离屏探针不符，反复确认全新
             // 进程仍复现——把每次 Shift+↑ 的前后状态落盘，供定位）
             {
@@ -2164,7 +2140,6 @@ protected:
             // QTextCursor::movePosition 按字符索引移动 = 与光标错位
             //（用户报：⌘⇧M 后按住 Shift 上下选中行与光标不对齐）
             moveCursor(QTextCursor::Up, QTextCursor::KeepAnchor);
-            m_shiftSelDir = -1;
             {
                 const QTextCursor post = c;
                 QFile f(QStringLiteral("/tmp/naught-selup-diag.log"));
@@ -2185,13 +2160,6 @@ protected:
             // 纯 Shift+↓：尾行且无选区 → 选到文末（用户报"尾行没选区"）；
             // 有选区且上一次是上移 = 回撤（整行粒度收拢，块尾到块尾）
             QTextCursor c = textCursor();
-            if (c.hasSelection() && m_shiftSelDir == -1) {
-                c.setPosition(c.anchor()); // 回撤：一步收拢回落点（同 Shift+↑）
-                setTextCursor(c);
-                m_shiftSelDir = 0;
-                wakeCaret();
-                return;
-            }
             if (!c.hasSelection()) {
                 const int endPos = document()->characterCount() - 1;
                 QTextBlock after = c.block().next();
@@ -2207,12 +2175,10 @@ protected:
                     c.setPosition(c.position());
                     c.setPosition(endPos, QTextCursor::KeepAnchor);
                     setTextCursor(c);
-                    m_shiftSelDir = 1;
                     wakeCaret();
                     return;
                 }
             }
-            m_shiftSelDir = 1; // 其余情形 = 基类（向下扩展），记方向
         }
         if (event->key() == Qt::Key_Down
             && (event->modifiers() & Qt::ShiftModifier)
@@ -2222,7 +2188,6 @@ protected:
             QKeyEvent clone(QEvent::KeyPress, Qt::Key_Down, Qt::ShiftModifier,
                             event->text());
             QPlainTextEdit::keyPressEvent(&clone);
-            m_shiftSelDir = 1;
             wakeCaret();
             return;
         }
@@ -2690,7 +2655,6 @@ private:
         {
             const int anchor = textCursor().anchor();
             const int pos = textCursor().position();
-            const int dir = m_shiftSelDir;
             if (pos > 0) {
                 // 真实按键路径左+右（净零位移）重算 Qt 内部期望列，
                 // 然后用锚点/位置重建选区——绝不能 setTextCursor(旧游标
@@ -2703,7 +2667,6 @@ private:
                 rebuilt.setPosition(anchor);
                 rebuilt.setPosition(pos, QTextCursor::KeepAnchor);
                 setTextCursor(rebuilt);
-                m_shiftSelDir = dir;
             }
         }
     }
@@ -3228,9 +3191,7 @@ private:
     QVector<Canvas::InkStroke> m_inkBefore;
     bool m_inkSession = false;
     bool m_shiftInkActive = false;
-    int m_shiftSelDir = 0; // 最近一次 Shift 竖直移动方向：-1 上 / +1 下 / 0 无
-    //（选区围绕光标落点复原：Shift↓ 之后 Shift↑ 应原路返回，而非
-    // 又当新扩展重定向）
+
     QVector<bool> m_undoOps; // 统一撤销日志：true=文字步 false=墨迹步（时间序）
     QVector<bool> m_redoOps;
     bool m_inUndoRedo = false; // 撤销/重做重入保护：contentsChange 不入日志
