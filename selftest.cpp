@@ -3327,6 +3327,150 @@ bool Editor::selftest()
                 return false;
             }
         }
+        // ============ NAUGHT_FREEZE：第七轮"打字+删除 → 画面冻结"复现 ============
+        if (qEnvironmentVariableIsSet("NAUGHT_FREEZE")) {
+            qInfo("FREEZE-ENTER");
+            const auto settleMs = [&](int ms) {
+                QEventLoop sl;
+                QTimer::singleShot(ms, &sl, &QEventLoop::quit);
+                sl.exec();
+                QApplication::processEvents();
+            };
+            const auto frameLanded = [&]() -> bool {
+                // 强制重拍后画面必须变化（除非画面本就该不变——用双拍比较）
+                const QImage a = e.crtShownImage();
+                e.m_crtView->markDirty(true);
+                settleMs(250);
+                settleMs(250);
+                const QImage b = e.crtShownImage();
+                return !selftestImgDiffers(a, b) ? false : true;
+            };
+            const auto diag = [&](const char *tag) {
+                qInfo("FREEZE %s unavail=%d inFlight=%d pendingNull=%d textlen=%d",
+                      tag, int(e.m_crtView ? e.m_crtView->rhiUnavailableForTest() : -1),
+                      int(e.m_crtView ? e.m_crtView->readbackIdle() ? 0 : 1 : -1),
+                      int(e.m_crtView ? e.m_crtView->frameImage().isNull() : -1),
+                      e.document()->characterCount());
+            };
+            e.toggleCrt();
+            QApplication::processEvents();
+            e.setPlainText(QString());
+            e.show();
+            e.setFocus();
+            e.resize(700, 500);
+            QApplication::processEvents();
+            settleMs(600); // 暖机
+            diag("warm");
+            const auto typeStr = [&](const char *txt) {
+                for (const char *p = txt; *p; ++p) {
+                    QKeyEvent kt(QEvent::KeyPress, 0, Qt::NoModifier,
+                                 QString(QLatin1Char(*p)));
+                    QApplication::sendEvent(&e, &kt);
+                }
+                QApplication::processEvents();
+            };
+            const auto backspaces = [&](int n) {
+                for (int i = 0; i < n; ++i) {
+                    QKeyEvent kb(QEvent::KeyPress, Qt::Key_Backspace, Qt::NoModifier);
+                    QApplication::sendEvent(&e, &kb);
+                }
+                QApplication::processEvents();
+            };
+            const auto deleteAll = [&]() {
+                QKeyEvent ka(QEvent::KeyPress, Qt::Key_A, Qt::MetaModifier);
+                QApplication::sendEvent(&e, &ka);
+                QKeyEvent kd(QEvent::KeyPress, Qt::Key_Delete, Qt::NoModifier);
+                QApplication::sendEvent(&e, &kd);
+                QApplication::processEvents();
+            };
+            // 配方 A：打字 → 逐字退格删光
+            typeStr("hello crt world 42 無無無");
+            settleMs(300);
+            diag("A-typed");
+            backspaces(24);
+            settleMs(300);
+            diag("A-deleted");
+            qInfo("FREEZE A frameLanded=%d", int(frameLanded()));
+            diag("A-afterForce");
+            // 配方 B：打字 → 全选删除
+            typeStr("second line of text here");
+            settleMs(300);
+            diag("B-typed");
+            deleteAll();
+            settleMs(300);
+            diag("B-deleted");
+            qInfo("FREEZE B frameLanded=%d", int(frameLanded()));
+            diag("B-afterForce");
+            // 配方 C：打字 → 空（kong）
+            typeStr("third line here");
+            settleMs(300);
+            {
+                QKeyEvent kn(QEvent::KeyPress, Qt::Key_N, Qt::MetaModifier);
+                QApplication::sendEvent(&e, &kn);
+            }
+            settleMs(300);
+            diag("C-kong");
+            qInfo("FREEZE C frameLanded=%d", int(frameLanded()));
+            diag("C-afterForce");
+            // 配方 D：打字 → 全选 → 覆盖输入
+            typeStr("fourth line");
+            settleMs(300);
+            deleteAll();
+            typeStr("z");
+            settleMs(300);
+            diag("D-replaced");
+            qInfo("FREEZE D frameLanded=%d", int(frameLanded()));
+            diag("D-afterForce");
+            // 配方 E：长串 → 退格一半 → 再打字
+            typeStr("abcdefghijklmnopqrstuvwxyz0123456789");
+            settleMs(300);
+            backspaces(18);
+            typeStr("XY");
+            settleMs(300);
+            diag("E-mixed");
+            qInfo("FREEZE E frameLanded=%d", int(frameLanded()));
+            diag("E-afterForce");
+            // 自愈负向验证：①rhiUnavailable 限时复活；②黑帧拦截连击
+            // 上限；③活性看门狗（6s 无回读落地 → 强制重置）
+            {
+                // ① 模拟管线创建失败 → 3s 后必须自动复活
+                e.m_crtView->m_rhiUnavailable = true;
+                e.m_crtView->m_rhiDeadAt.start();
+                e.m_crtView->markDirty(true);
+                settleMs(3400);
+                qInfo("FREEZE rhiRevived=%d (want 1)",
+                      int(!e.m_crtView->rhiUnavailableForTest()));
+                // ② 拦截时限上限：连续黑帧 >1.5s 后必须如实落地
+                const QImage pre = e.crtShownImage();
+                e.m_crtView->m_darkSince.start();
+                settleMs(1600);
+                e.setPlainText(QString());
+                e.m_crtView->markDirty(true);
+                settleMs(400);
+                settleMs(400);
+                const QImage post = e.crtShownImage();
+                qInfo("FREEZE darkCapLanded=%d (want 1)",
+                      int(!selftestImgDiffers(pre, post) ? 0 : 1));
+                // ③ 活性看门狗：伪造"6 秒无回读落地" → paintEvent 触发
+                //    重置（置空 m_pending 后重拍必须产出非空帧）
+                e.setPlainText(QStringLiteral("看门狗復活\n"));
+                e.m_crtView->m_lastLanded.start();
+                e.m_crtView->markDirty(true);
+                settleMs(300);
+                // 手动把心跳拨回 6.1s 前：QElapsedTimer 无法倒退——改为
+                // 直接调用看门狗同款路径验证 resetPipeline 后管线可用
+                e.m_crtView->resetPipeline();
+                e.m_crtView->markDirty(true);
+                settleMs(400);
+                settleMs(400);
+                qInfo("FREEZE resetSurvived=%d pipeline=%d",
+                      int(!e.m_crtView->frameImage().isNull()),
+                      int(e.m_crtView->pipelineUsable()));
+            }
+            e.toggleCrt();
+            QApplication::processEvents();
+            qInfo("FREEZE-EXIT");
+        }
         // ============ NAUGHT_FUZZ：第六轮闪退复现/功能矩阵/暴力乱测 ============
         if (qEnvironmentVariableIsSet("NAUGHT_FUZZ")) {
             qInfo("FUZZ-ENTER");

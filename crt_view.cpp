@@ -96,6 +96,16 @@ void CrtView::resizeEvent(QResizeEvent *)
 
 void CrtView::paintEvent(QPaintEvent *)
 {
+    // 画面活性看门狗（用户报：打字+删除后画面冻结、痕迹删不掉）：
+    // 回读长期不落地 = 帧循环卡死 → 强制重置管线 + 快照作废全量重拍。
+    // 本函数由光标眨眼（750ms）驱动 = 天然心跳，定时器停了也能自愈
+    if (m_lastLanded.isValid() && m_lastLanded.elapsed() > 6000) {
+        qWarning("CRT liveness watchdog fired (no readback for %lld ms) — "
+                 "force pipeline reset", qint64(m_lastLanded.elapsed()));
+        m_pending = QImage(); // 快照作废 → 下一帧全量重拍
+        resetPipeline();
+        markDirty(true);
+    }
     QPainter p(this);
     p.setRenderHint(QPainter::SmoothPixmapTransform); // 滚动期半分辨率回读 → 平滑放大
     p.fillRect(rect(), QColor(12, 9, 3));
@@ -215,8 +225,12 @@ QRhiTextureRenderTarget *CrtView::makeRt(QRhiTexture *tex)
 
 void CrtView::ensureRhi()
 {
-    if (m_rhiUnavailable)
-        return; // 已判定无可用管线：不再每帧重建（toggleCrt 关闭重开也不复活）
+    if (m_rhiUnavailable) {
+        if (!m_rhiDeadAt.isValid() || m_rhiDeadAt.elapsed() < 3000)
+            return; // 限时死亡：3s 内不重建（避免每帧探测）
+        m_rhiUnavailable = false; // 周期复活重试（瞬时失败 ≠ 永远失败）
+        qWarning("CRT-RHI retry after pipeline failure");
+    }
     if (m_r && m_ps && m_psPersist && m_psDown && m_psBlurH && m_psBlurV && m_ubuf)
         return; // 资源完整
     // 半残状态（releaseGpu 释放了子资源但保留 rhi——resize/全屏重建路径
@@ -405,6 +419,7 @@ void CrtView::ensureRhi()
         shaderLog(QStringLiteral("PIPELINE SET INCOMPLETE — render layer disabled"));
         qWarning("CRT-RHI pipeline create FAIL — render layer disabled");
         m_rhiUnavailable = true;
+        m_rhiDeadAt.start();
         releaseGpu();
         delete m_r;
         m_r = nullptr;
@@ -543,8 +558,21 @@ void CrtView::renderFrame()
                         mx = qMax<long>(mx, qRed(pxx) + qGreen(pxx) + qBlue(pxx));
                     }
                 if (mx < 60 && m_pending.height() > 100) {
-                    m_renderDirty = true;
-                    return; // 重试下一帧
+                    // 拦截已知的百毫秒级布局瞬态（"松 Shift 黑屏一会"的
+                    // 残因）；连续失字超过 1.5s = 快照真的坏了 → 如实
+                    // 上传（用户报：画面冻结在旧帧、痕迹删不掉、换机
+                    // 底色不变——拦截死循环是嫌疑人之一）
+                    if (!m_darkSince.isValid())
+                        m_darkSince.start();
+                    if (m_darkSince.elapsed() < 1500) {
+                        m_renderDirty = true;
+                        return; // 重试下一帧
+                    }
+                    qWarning("CRT dark snapshot for %lld ms — uploading as-is "
+                             "(anti-freeze: 快照长期失字时如实落地，不冻结旧帧)",
+                             qint64(m_darkSince.elapsed()));
+                } else {
+                    m_darkSince.invalidate();
                 }
             }
             QImage up = m_pending.convertToFormat(QImage::Format_RGBA8888);
@@ -702,6 +730,7 @@ void CrtView::renderFrame()
             m_shown = std::move(img);
             m_maxReadbackMs = qMax(m_maxReadbackMs, int(m_readbackClock.elapsed()));
             m_readbackInFlight = false;
+            m_lastLanded.restart(); // 画面活性心跳
             delete rb;
             update();
         }, Qt::QueuedConnection);
