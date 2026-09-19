@@ -323,6 +323,13 @@ void CrtView::ensureRhi()
                                       .split(QLatin1Char(','), Qt::SkipEmptyParts);
         for (const QString &p : parts)
             s.insert(p.trimmed().toLower());
+#ifdef Q_OS_MACOS
+        // Qt 6.9 已无桌面 OpenGL；macOS 上 gles2 的 create 直接崩在
+        // Qt 内部（QSurfaceFormat 空指针解引用）——无 GPU 环境（CI/
+        // Metal 不可用）探测链落到 gles2 即段错误。macOS 有效后端 =
+        // Metal 或 Null，gles2 恒跳过（真机 Metal 永远优先，无感知）
+        s.insert(QStringLiteral("gles2"));
+#endif
         return s;
     }();
     const struct { QRhi::Implementation impl; const char *name; } backends[] = {
