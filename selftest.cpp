@@ -96,33 +96,44 @@ bool Editor::selftest()
                       e.document()->characterCount());
                 return now;
             };
-            const QImage base = diag("warm");
+            QImage base = diag("warm");
             QTextCursor c0 = e.textCursor();
             c0.movePosition(QTextCursor::Start);
             e.setTextCursor(c0);
             QApplication::processEvents();
-            for (int cycle = 1; cycle <= 3; ++cycle) {
-                for (const char *p = "abc"; *p; ++p) {
+            // 用户配方（第二轮澄清）：空删后继续输字 → 删到空删 → 再空删
+            // 一会 → 再输再删，循环直到复现——大量空删 + 多轮循环
+            const int cycles = qEnvironmentVariableIntValue("NAUGHT_RECIPE_CYCLES") > 0
+                                   ? qEnvironmentVariableIntValue("NAUGHT_RECIPE_CYCLES") : 20;
+            for (int cycle = 1; cycle <= cycles; ++cycle) {
+                for (const char *p = "abcde"; *p; ++p) {
                     QKeyEvent kt(QEvent::KeyPress, 0, Qt::NoModifier,
                                  QString(QLatin1Char(*p)));
                     QApplication::sendEvent(&e, &kt);
                 }
                 QApplication::processEvents();
-                settleMs(120);
+                settleMs(30);
                 const QImage t = diag(QStringLiteral("cycle%1-typed").arg(cycle).toLatin1(), &base);
-                for (int i = 0; i < 3; ++i) {
-                    QKeyEvent kb(QEvent::KeyPress, Qt::Key_Backspace, Qt::NoModifier);
-                    QApplication::sendEvent(&e, &kb);
-                }
-                // 用户配方关键：删到没字了还要继续删（光标顶格空删）
                 for (int i = 0; i < 5; ++i) {
                     QKeyEvent kb(QEvent::KeyPress, Qt::Key_Backspace, Qt::NoModifier);
                     QApplication::sendEvent(&e, &kb);
                 }
                 QApplication::processEvents();
-                settleMs(120);
+                settleMs(30);
+                // 空删一大段（模拟按住删除键自动重复 ~2s）
+                for (int i = 0; i < 60; ++i) {
+                    QKeyEvent kb(QEvent::KeyPress, Qt::Key_Backspace, Qt::NoModifier);
+                    kb.setAccepted(false);
+                    QApplication::sendEvent(&e, &kb);
+                }
+                QApplication::processEvents();
+                settleMs(30);
                 const QImage d = diag(QStringLiteral("cycle%1-deleted").arg(cycle).toLatin1(), &t);
                 Q_UNUSED(d);
+                base = t;
+                if (cycle % 10 == 0)
+                    qInfo("RECIPE cycle %d/%d done, textlen=%d", cycle, cycles,
+                          e.document()->characterCount());
             }
             settleMs(400);
             diag("final");

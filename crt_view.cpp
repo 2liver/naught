@@ -145,14 +145,16 @@ void CrtView::diagHeartbeat()
     }
     const QString line = QStringLiteral(
         "FREEZE-DIAG stale=%1ms inFlight=%2 tex=%3x%4 pendingNull=%5 shownNull=%6 "
-        "unavail=%7 visible=%8 frameTimer=%9 vp=%10 vpLum=%11 pendingTopLum=%12\n")
+        "unavail=%7 visible=%8 frameTimer=%9 vp=%10 vpLum=%11 pendingTopLum=%12 "
+        "wdFires=%13 wdStreak=%14\n")
         .arg(qint64(m_lastLanded.elapsed()))
         .arg(int(m_readbackInFlight))
         .arg(m_texSize.width()).arg(m_texSize.height())
         .arg(int(m_pending.isNull())).arg(int(m_shown.isNull()))
         .arg(int(m_rhiUnavailable)).arg(int(isVisible()))
         .arg(int(m_frameTimer.isActive()))
-        .arg(vpSize).arg(vpLum).arg(pendLum);
+        .arg(vpSize).arg(vpLum).arg(pendLum)
+        .arg(m_watchdogFires).arg(m_watchdogStreak);
     // 固定 /tmp：macOS 下 QDir::tempPath = /var/folders/.../T（用户找不到）
     QFile f(QStringLiteral("/tmp/naught-freeze-diag.log"));
     if (f.open(QIODevice::Append | QIODevice::Text)) {
