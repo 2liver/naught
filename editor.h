@@ -301,8 +301,14 @@ public:
                 m_crtView->markDirty();
             // 选区变化 → 全量重拍（用户报：Shift 多行选中时选区高亮
             // 一个方块一个方块从中间出来——增量脏区逐块补 = 渲染不连续）
-            if (textCursor().hasSelection())
+            // + 余晖冲刷（用户报：选中的渲染"慢一拍"像先内衣后衣服——
+            // 余晖 max 混合把选中前的旧文字压在新区上，旧字衰减完才露
+            // 出干净反白；选区 = 状态跳变，与换机/视角跳变同款清零）
+            if (textCursor().hasSelection()) {
                 markSnapshotFullDirty();
+                if (m_crtView)
+                    m_crtView->flushHistory();
+            }
             const int halo = qCeil(fontMetrics().horizontalAdvance(QLatin1Char('M'))) + 12;
             m_snapDirty |= m_lastCursorRect;
             m_lastCursorRect = cursorRect().translated(viewport()->pos())
