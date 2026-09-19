@@ -3591,6 +3591,44 @@ bool Editor::selftest()
             QApplication::processEvents();
             qInfo("FREEZE-EXIT");
         }
+        // ============ 选区反相闸（用户问：选中样式按机型拟真没） ============
+        {
+            // 各机型选区 = 本机墨色反相（块=墨、字=底）；常规 = 标准蓝
+            if (!e.crtOn())
+                e.toggleCrt(); // 反相选区只在显模式生效
+            QApplication::processEvents();
+            for (int m = 0; m < 4; ++m) {
+                while (e.machine() != m)
+                    e.toggleMachine();
+                QApplication::processEvents();
+                {
+                    QEventLoop sl;
+                    QTimer::singleShot(260, &sl, &QEventLoop::quit);
+                    sl.exec();
+                    QApplication::processEvents();
+                }
+                const QColor hl = e.palette().color(QPalette::Highlight);
+                const QColor ht = e.palette().color(QPalette::HighlightedText);
+                const Crt::Palette &pp = e.crtPalette();
+                if (hl.red() != pp.ink.red() || hl.green() != pp.ink.green()
+                    || hl.blue() != pp.ink.blue() || ht != pp.bg) {
+                    qWarning("selftest FAIL: machine %d selection not reverse-video (%d,%d,%d / %d,%d,%d)",
+                             m, hl.red(), hl.green(), hl.blue(),
+                             ht.red(), ht.green(), ht.blue());
+                    return false;
+                }
+            }
+            // 退出显 → 常规选区回归标准蓝（不继承琥珀残留）
+            e.toggleCrt();
+            QApplication::processEvents();
+            const QColor nh = e.palette().color(QPalette::Highlight);
+            if (nh.red() > 0x60 || nh.green() > 0x9C || nh.blue() < 0xC0) {
+                qWarning("selftest FAIL: normal-mode selection leaked CRT color (%d,%d,%d)",
+                         nh.red(), nh.green(), nh.blue());
+                return false;
+            }
+            qInfo("SEL-REVERSE ok");
+        }
         // ============ NAUGHT_FONTCHECK：每机型字体核对 ============
         if (qEnvironmentVariableIsSet("NAUGHT_FONTCHECK")) {
             qInfo("FONTCHECK-ENTER");

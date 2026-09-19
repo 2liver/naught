@@ -2356,16 +2356,25 @@ private:
             pal.setColor(QPalette::Window, pp.bg);
             pal.setColor(QPalette::Base, pp.bg);
             pal.setColor(QPalette::Text, pp.ink);
-            pal.setColor(QPalette::Highlight, QColor(0x5C, 0x3E, 0x00, 0xB0));
-            pal.setColor(QPalette::HighlightedText, pp.ink);
+            // 选区 = 反相视频（真机时代的标记/反白约定，与光标同哲学）：
+            // 块 = 本机墨色、字 = 本机底色——按机型拟真（旧版固定暗琥珀
+            // 0x5C3E00 全机通用，且退出显后泄漏到常规模式 = 用户报）
+            pal.setColor(QPalette::Highlight,
+                         QColor(pp.ink.red(), pp.ink.green(), pp.ink.blue(), 220));
+            pal.setColor(QPalette::HighlightedText, pp.bg);
         } else if (m_dark) {
             pal.setColor(QPalette::Window, QColor(0, 0, 0));
             pal.setColor(QPalette::Base, QColor(0, 0, 0));
             pal.setColor(QPalette::Text, QColor(255, 255, 255));
+            // 常规模式 = 系统标准蓝选区（不再继承显模式的琥珀残留）
+            pal.setColor(QPalette::Highlight, QColor(0x4A, 0x8C, 0xFF, 0xC0));
+            pal.setColor(QPalette::HighlightedText, QColor(255, 255, 255));
         } else {
             pal.setColor(QPalette::Window, QColor(255, 255, 255));
             pal.setColor(QPalette::Base, QColor(255, 255, 255));
             pal.setColor(QPalette::Text, QColor(0, 0, 0));
+            pal.setColor(QPalette::Highlight, QColor(0x4A, 0x8C, 0xFF, 0xC0));
+            pal.setColor(QPalette::HighlightedText, QColor(0, 0, 0));
         }
         setPalette(pal);
 
