@@ -3268,6 +3268,16 @@ bool Editor::selftest()
             // 连续多次切编交错打印拍 → 画布必须一字不少
             {
                 e.setPlainText(QString());
+                // 等机器落定（字体应用经 200ms 合并定时器 + 滚动条瞬时态）：
+                // 基准打印必须与重印同条件——Windows CI 实测未落定时
+                // 视口 546/字宽 3.9 vs 落定后 560/4.12 → 基准列数 140 vs
+                // 136，两次打印画布尺寸不同 → 闸误报吃字
+                {
+                    QEventLoop slp;
+                    QTimer::singleShot(260, &slp, &QEventLoop::quit);
+                    slp.exec();
+                }
+                QApplication::processEvents();
                 e.loadAsciiImage(simg);
                 waitPrint();
                 const int fullLen = e.toPlainText().size(); // 参考全长
