@@ -3849,6 +3849,36 @@ bool Editor::selftest()
                 QApplication::sendEvent(&e, &kd);
                 dump("B-down");
             }
+            // 变体 C：长行软换行（用户真实文档形态——窗口宽度折行，
+            // "上一行" = 视觉行）。选最下视觉行的字符 → 言 → 撤 → Shift上
+            e.setPlainText(QStringLiteral("第一行很短\n第二行是一段很长的文字内容它会在窗口宽度处自动折行成为多个视觉行这是模拟用户的真实写作场景\n第三行也很长同样会折行成为多个视觉行用来测试选区行为\n"));
+            {
+                QTextCursor c(e.textCursor());
+                c.setPosition(70); // 第三行的中段（折行视觉行内）
+                c.movePosition(QTextCursor::Right, QTextCursor::KeepAnchor, 3);
+                e.setTextCursor(c); // 选 3 字符
+            }
+            dump("C-sel");
+            {
+                QKeyEvent kl(QEvent::KeyPress, Qt::Key_L, Qt::ControlModifier);
+                QApplication::sendEvent(&e, &kl);
+            }
+            dump("C-yan");
+            {
+                QKeyEvent kz(QEvent::KeyPress, Qt::Key_Z, Qt::ControlModifier);
+                QApplication::sendEvent(&e, &kz);
+            }
+            dump("C-undo");
+            {
+                QKeyEvent ku(QEvent::KeyPress, Qt::Key_Up, Qt::ShiftModifier);
+                QApplication::sendEvent(&e, &ku);
+            }
+            dump("C-up");
+            {
+                QKeyEvent kd(QEvent::KeyPress, Qt::Key_Down, Qt::ShiftModifier);
+                QApplication::sendEvent(&e, &kd);
+            }
+            dump("C-down");
             qInfo("YANSEL-EXIT");
         }
         // ============ NAUGHT_FONTCHECK：每机型字体核对 ============

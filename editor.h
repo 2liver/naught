@@ -2023,6 +2023,27 @@ protected:
         if (event->key() == Qt::Key_Up
             && event->modifiers() == Qt::ShiftModifier) {
             QTextCursor c = textCursor();
+            // 真机取证（用户报：选区语义与离屏探针不符，反复确认全新
+            // 进程仍复现——把每次 Shift+↑ 的前后状态落盘，供定位）
+            {
+                const QTextCursor pre = c;
+                const QTextBlock bPre = document()->findBlock(pre.selectionStart());
+                const QTextBlock bPreE = document()->findBlock(pre.selectionEnd());
+                QFile f(QStringLiteral("/tmp/naught-selup-diag.log"));
+                if (f.open(QIODevice::Append | QIODevice::Text)) {
+                    f.write(QStringLiteral(
+                        "SELUP wrap=%1 blocks=%2 cc=%3 before=[%4,%5 a=%6 p=%7] "
+                        "beforeBlocks=[%8..%9] line1=%10 line2=%11\n")
+                        .arg(int(lineWrapMode())).arg(document()->blockCount())
+                        .arg(document()->characterCount())
+                        .arg(pre.selectionStart()).arg(pre.selectionEnd())
+                        .arg(pre.anchor()).arg(pre.position())
+                        .arg(bPre.blockNumber()).arg(bPreE.blockNumber())
+                        .arg(bPre.text().left(12)).arg(bPreE.text().left(12))
+                        .toUtf8());
+                    f.close();
+                }
+            }
             if (c.hasSelection()) {
                 const int bottom = qMax(c.anchor(), c.position());
                 const int top = qMin(c.anchor(), c.position());
@@ -2031,6 +2052,16 @@ protected:
             }
             c.movePosition(QTextCursor::Up, QTextCursor::KeepAnchor);
             setTextCursor(c);
+            {
+                const QTextCursor post = c;
+                QFile f(QStringLiteral("/tmp/naught-selup-diag.log"));
+                if (f.open(QIODevice::Append | QIODevice::Text)) {
+                    f.write(QStringLiteral("SELUP after=[%1,%2 a=%3 p=%4]\n")
+                        .arg(post.selectionStart()).arg(post.selectionEnd())
+                        .arg(post.anchor()).arg(post.position()).toUtf8());
+                    f.close();
+                }
+            }
             wakeCaret();
             return;
         }
