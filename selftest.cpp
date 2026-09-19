@@ -3284,8 +3284,11 @@ bool Editor::selftest()
                 waitPrint();
                 if (!e.m_asciiActive || !e.toPlainText().startsWith(QStringLiteral("开头文字\n"))
                     || e.toPlainText().size() != fullLen + 5) {
-                    qWarning("selftest FAIL: rapid code toggles during print ate text (cc=%d want %d)",
-                             int(e.toPlainText().size()), fullLen + 5);
+                    qWarning("selftest FAIL: rapid code toggles during print ate text (cc=%d want %d) %s tail=[%s]",
+                             int(e.toPlainText().size()), fullLen + 5,
+                             qPrintable(e.asciiPrintDbg()),
+                             qPrintable(e.toPlainText().right(30)
+                                            .replace(QLatin1Char('\n'), QLatin1Char('|'))));
                     return false;
                 }
                 e.setPlainText(QStringLiteral("無\n"));
