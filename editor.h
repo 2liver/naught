@@ -1566,6 +1566,12 @@ public:
         const QFontMetricsF fm(activeFont());
         const qreal cw = qMax(1.0, fm.horizontalAdvance(QLatin1Char('M')));
         m_asciiBaseCols = qMax(2, int(viewport()->width() / cw));
+        // 网格几何冻结：行数按立图时刻的字体宽高比定格——切编/换机
+        // 重印不得改变画布尺寸（Windows 实测：重印时字体度量漂移 →
+        // 行数 31→30、画布缩水 261 字符）
+        m_asciiBaseRows = qMax(2, int(m_asciiBaseCols
+                                      * (qreal(img.height()) / qMax(1, img.width()))
+                                      * (cw / qMax(1.0, fm.height()))));
         setLineWrapMode(QPlainTextEdit::NoWrap); // 永不重排（防叠行）
         QTextCursor c = textCursor();
         m_asciiStart = c.position();
@@ -1586,8 +1592,9 @@ public:
         // 画布列数 = 倍率 × 基准；上限 = 源图原生分辨率（防爆炸）
         const int maxCols = qMax(m_asciiBaseCols, m_asciiImage.width());
         int cols = qBound(2, int(m_asciiBaseCols * m_asciiScale), maxCols);
-        int rows = qMax(2, int(cols * (qreal(m_asciiImage.height()) / m_asciiImage.width())
-                                * (cw / ch)));
+        // 行数 = 冻结基准行数 × 列数比例（字体无关——见 loadAsciiImage）
+        int rows = qMax(2, int(qreal(m_asciiBaseRows > 0 ? m_asciiBaseRows : 2)
+                               * cols / qMax(2, m_asciiBaseCols)));
         // 总量护栏：任何路径（拖图/缩放/立为图）画布 ≤ 20 万字符——
         // 等比缩回（真机一屏 80×25 = 2000 字符，20 万已是百屏）
         if (qint64(cols) * rows > 200000) {
@@ -3333,6 +3340,7 @@ private:
     bool m_asciiReprintPending = false; // 打印中收到重印请求 → 收尾后补一次 // 程序替换期间置位（抑制反激活）
     qreal m_asciiScale = 1.0;    // 画布倍率（网格行列随倍率）
     int m_asciiBaseCols = 0;     // 插入时刻的基准列数（视口宽/字宽）
+    int m_asciiBaseRows = 0;     // 插入时刻的基准行数（网格几何冻结——重印/缩放字体无关）
     int m_asciiStart = 0;        // 字符画在文档中的起止位置（原位替换用）
     int m_asciiEnd = 0;
     QTimer m_asciiSettleTimer;   // 画布缩放尾拍兜底
