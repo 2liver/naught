@@ -2107,6 +2107,18 @@ protected:
             // QTextCursor::movePosition 按字符索引移动 = 与光标错位
             //（用户报：⌘⇧M 后按住 Shift 上下选中行与光标不对齐）
             moveCursor(QTextCursor::Up, QTextCursor::KeepAnchor);
+            // 到头行：选区补到行首（用户报：一行行加选区到首行有
+            // 一截选不上——靠近首字符那段）
+            {
+                QTextCursor after = textCursor();
+                if (after.hasSelection()
+                    && document()->findBlock(after.selectionStart()).blockNumber() == 0
+                    && after.selectionStart() > 0) {
+                    after.setPosition(after.position());
+                    after.setPosition(0, QTextCursor::KeepAnchor);
+                    setTextCursor(after);
+                }
+            }
             {
                 const QTextCursor post = c;
                 QFile f(QStringLiteral("/tmp/naught-selup-diag.log"));
@@ -2613,6 +2625,13 @@ private:
         if (m_crtView) {
             m_crtView->markDirty(true); // 缩放强制重拍（节流会让新旧帧交叠）
             m_crtSettleTimer.start(400);
+        }
+        // 复位垂直移动的"期望列"（Qt 内部存储，换字体后陈旧 → 用户报
+        // "换机后 Shift+↑ 选区与光标不对齐，左右换字符才恢复"）：一次
+        // 守卫的水平微移（Left+Right 净位移零）重算期望列
+        if (!textCursor().hasSelection() && textCursor().position() > 0) {
+            moveCursor(QTextCursor::Left);
+            moveCursor(QTextCursor::Right);
         }
     }
 

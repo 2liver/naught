@@ -3823,6 +3823,116 @@ bool Editor::selftest()
                 return false;
             }
         }
+        // ============ 换机列对齐闸（用户报：尾行行尾换机后 Shift+↑
+        // 选区与光标不对齐——Qt 期望列陈旧，左右键才重算）============
+        {
+            e.toggleCrt();
+            QApplication::processEvents();
+            e.show();
+            e.setFocus();
+            e.resize(700, 400);
+            QApplication::processEvents();
+            e.setPlainText(QStringLiteral("aaaa\nbbbbb\nccccc\n"));
+            const auto settleMachine = [&]() {
+                QEventLoop sl;
+                QTimer::singleShot(260, &sl, &QEventLoop::quit);
+                sl.exec();
+                QApplication::processEvents();
+            };
+            for (int round = 0; round < 4; ++round) {
+                {
+                    QTextCursor c(e.document());
+                    c.setPosition(16); // 尾行行尾
+                    e.setTextCursor(c);
+                }
+                QApplication::processEvents();
+                e.toggleMachine();
+                settleMachine();
+                const QRect curCell = e.cursorRect();
+                {
+                    QKeyEvent ks(QEvent::KeyPress, Qt::Key_Up, Qt::ShiftModifier);
+                    QApplication::sendEvent(&e, &ks);
+                }
+                const QTextCursor sel = e.textCursor();
+                QTextCursor startC(sel);
+                startC.setPosition(sel.selectionStart());
+                const QRect startCell = e.cursorRect(startC);
+                if (qAbs(curCell.x() - startCell.x()) > 2) {
+                    qWarning("selftest FAIL: machine-switch column misaligned (round=%d "
+                             "curX=%d startX=%d)",
+                             round, curCell.x(), startCell.x());
+                    while (e.machine() != 0)
+                        e.toggleMachine();
+                    return false;
+                }
+            }
+            // 连续上行扩展到头行：选区必须补到行首（用户报一截选不上）
+            {
+                QTextCursor c(e.document());
+                c.setPosition(16);
+                e.setTextCursor(c);
+            }
+            for (int i = 0; i < 3; ++i) {
+                QKeyEvent ks(QEvent::KeyPress, Qt::Key_Up, Qt::ShiftModifier);
+                QApplication::sendEvent(&e, &ks);
+            }
+            const QTextCursor sel = e.textCursor();
+            if (sel.selectionStart() != 0) {
+                qWarning("selftest FAIL: upward selection not extended to line start (%d)",
+                         sel.selectionStart());
+                return false;
+            }
+            qInfo("ALIGN-GATE ok");
+            while (e.machine() != 0)
+                e.toggleMachine();
+            e.toggleCrt();
+            QApplication::processEvents();
+            e.setPlainText(QStringLiteral("無\n"));
+            QApplication::processEvents();
+        }
+        // ============ NAUGHT_ALIGN2：尾行行尾换机 + 上行选区对齐取证 ============
+        if (qEnvironmentVariableIsSet("NAUGHT_ALIGN2")) {
+            qInfo("ALIGN2-ENTER");
+            const auto settleMs = [&](int ms) {
+                QEventLoop sl;
+                QTimer::singleShot(ms, &sl, &QEventLoop::quit);
+                sl.exec();
+                QApplication::processEvents();
+            };
+            e.toggleCrt();
+            QApplication::processEvents();
+            e.show();
+            e.setFocus();
+            e.resize(700, 400);
+            QApplication::processEvents();
+            e.setPlainText(QStringLiteral("aaaa\nbbbbb\nccccc\n"));
+            for (int round = 0; round < 3; ++round) {
+                // 光标 = 尾行行尾（ccccc 的尾字符右边）
+                {
+                    QTextCursor c(e.document());
+                    c.setPosition(16); // ccccc 的尾字符右边（行尾）
+                    e.setTextCursor(c);
+                }
+                QApplication::processEvents();
+                // 换机（循环各机型）
+                e.toggleMachine();
+                settleMs(400);
+                const QRect curCell = e.cursorRect();
+                // Shift+↑
+                {
+                    QKeyEvent ks(QEvent::KeyPress, Qt::Key_Up, Qt::ShiftModifier);
+                    QApplication::sendEvent(&e, &ks);
+                }
+                const QTextCursor sel = e.textCursor();
+                QTextCursor startC(sel);
+                startC.setPosition(sel.selectionStart());
+                const QRect startCell = e.cursorRect(startC);
+                qInfo("ALIGN2 round=%d machine=%d sel=[%d,%d] curX=%d startX=%d delta=%d",
+                      round, e.machine(), sel.selectionStart(), sel.selectionEnd(),
+                      curCell.x(), startCell.x(), curCell.x() - startCell.x());
+            }
+            qInfo("ALIGN2-EXIT");
+        }
         // ============ NAUGHT_ALIGN：换机后 Shift 选区的列对齐取证 ============
         if (qEnvironmentVariableIsSet("NAUGHT_ALIGN")) {
             qInfo("ALIGN-ENTER");
