@@ -1397,10 +1397,14 @@ public:
     // 取证：打印状态快照（CI 打印闸失败诊断用）
     QString asciiPrintDbg() const
     {
-        return QStringLiteral("printing=%1 idx=%2 lines=%3 pos=%4 end=%5 pending=%6 active=%7")
+        return QStringLiteral("printing=%1 idx=%2 lines=%3 pos=%4 end=%5 pending=%6 active=%7 baseCols=%8 baseRows=%9 scale=%10 vpw=%11 cw=%12 code=%13")
             .arg(int(m_asciiPrinting)).arg(m_asciiPrintIdx)
             .arg(m_asciiPrintLines.size()).arg(m_asciiPrintPos).arg(m_asciiEnd)
-            .arg(int(m_asciiReprintPending)).arg(int(m_asciiActive));
+            .arg(int(m_asciiReprintPending)).arg(int(m_asciiActive))
+            .arg(m_asciiBaseCols).arg(m_asciiBaseRows).arg(m_asciiScale)
+            .arg(viewport()->width())
+            .arg(QFontMetricsF(activeFont()).horizontalAdvance(QLatin1Char('M')))
+            .arg(int(m_codeMode));
     }
 
     // ---- 字体管理（「项」·字体区）：用户字体文件夹 + 上/下一个 ----

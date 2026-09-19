@@ -3271,6 +3271,7 @@ bool Editor::selftest()
                 e.loadAsciiImage(simg);
                 waitPrint();
                 const int fullLen = e.toPlainText().size(); // 参考全长
+                qInfo("TEXT-ART ref len=%d %s", fullLen, qPrintable(e.asciiPrintDbg()));
                 e.setPlainText(QStringLiteral("开头文字\n"));
                 e.moveCursor(QTextCursor::End);
                 e.loadAsciiImage(simg); // 打印开始——不等待
