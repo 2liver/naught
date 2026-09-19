@@ -292,6 +292,10 @@ public:
         // P3：光标移动也纳入脏区（旧位置的块光标必须被擦掉——
         // 否则增量快照留下幽灵光标；箭头键移动不触发 contentsChange）
         connect(this, &QPlainTextEdit::cursorPositionChanged, this, [this] {
+            if (!textCursor().hasSelection()) {
+                m_shiftSelDir = 0; // 选区清空 → 方向记忆归零
+                m_selPath.clear(); // 位置栈一并清空
+            }
             if (!m_crt)
                 return;
             // 子代理审计：方向键导航只标脏区、从不 markDirty——显模式
@@ -2098,8 +2102,30 @@ protected:
             // 容忍 ⌘（按键追踪取证：用户按 ⌘Z 后手指还压在 ⌘ 上，实际
             // 按键 = ⌘⇧↑——⌘ 是上一快捷键的残留，不得改变选区语义）
             QTextCursor c = textCursor();
-            // 纯逐行粒度（用户最新拍板：Shift+方向键 = 一行一行叠/消除，
-            // 不允许任何跳变——撤销"补行首"与"一步收拢"两处跳跃）
+            // 位置栈镜像（用户最新拍板：Shift+方向键 = 一行一行叠/消除，
+            // 无跳变）：每次延伸把光标真实文本位置入栈，反方向严格按栈
+            // 逐行回弹——列锚定在换机字体重排后必然漂移，栈 = 原路。
+            if (c.hasSelection() && m_shiftSelDir == 1) {
+                // 下移链回撤：按栈逐行上弹（T1/T2：上键严格回到上一行）
+                if (m_selPath.size() >= 2) {
+                    m_selPath.pop_back();
+                    const int back = m_selPath.last();
+                    if (m_selPath.size() == 1) {
+                        c.setPosition(c.anchor()); // 回到底 → 收拢
+                        m_selPath.clear();
+                        m_shiftSelDir = 0;
+                    } else {
+                        c.setPosition(back, QTextCursor::KeepAnchor);
+                    }
+                    setTextCursor(c);
+                    wakeCaret();
+                    return;
+                }
+                // 栈耗尽（罕见）：基类原路回缩
+                moveCursor(QTextCursor::Up, QTextCursor::KeepAnchor);
+                wakeCaret();
+                return;
+            }
             // 真机取证（用户报：选区语义与离屏探针不符，反复确认全新
             // 进程仍复现——把每次 Shift+↑ 的前后状态落盘，供定位）
             {
@@ -2121,32 +2147,58 @@ protected:
                     f.close();
                 }
             }
-            if (c.hasSelection()) {
+            if (c.hasSelection() && m_shiftSelDir == 0) {
+                // 翻转只对"新鲜选区"（dir==0：⌘Z 恢复/刚建立——用户原案
+                // "半截+整行"）；方向明确后（dir==±1）= 位置栈镜像
                 const int bottom = qMax(c.anchor(), c.position());
                 const int top = qMin(c.anchor(), c.position());
                 c.setPosition(bottom);   // 先落锚点（下端）
                 c.setPosition(top, QTextCursor::KeepAnchor); // 光标到上端
+                setTextCursor(c);
+                m_selPath.clear();       // 翻转基线 = [锚点, 光标]
+                m_selPath.append(bottom);
+                m_selPath.append(top);
             }
             if (!c.hasSelection() && c.blockNumber() == 0 && c.position() > 0) {
                 // 首行 Shift+↑：上方无内容 → 选到行首（用户报"首行没选区"）
                 c.setPosition(c.position());
                 c.setPosition(0, QTextCursor::KeepAnchor);
                 setTextCursor(c);
+                m_selPath.clear();
+                m_selPath.append(c.anchor());
+                m_selPath.append(c.position());
                 wakeCaret();
                 return;
             }
             setTextCursor(c);
+            if (m_selPath.isEmpty())
+                m_selPath.append(c.anchor()); // 链起点 = 锚点
             // 用控件级 moveCursor（视觉列感知）：换机后字体重排，裸
             // QTextCursor::movePosition 按字符索引移动 = 与光标错位
             //（用户报：⌘⇧M 后按住 Shift 上下选中行与光标不对齐）
             moveCursor(QTextCursor::Up, QTextCursor::KeepAnchor);
+            m_shiftSelDir = -1;
+            // 落在空块（如文档前导空行）→ 光标挪到换行符之后 = 下一行
+            // 行首（用户 T3："换行符与 o 之间"，不许停在换行符那行）
             {
-                const QTextCursor post = c;
+                QTextCursor adj = textCursor();
+                const QTextBlock ab = document()->findBlock(adj.position());
+                if (ab.length() <= 1 && adj.position() == ab.position()) {
+                    const int np = qMin(ab.position() + 1, document()->characterCount() - 1);
+                    adj.setPosition(adj.anchor());
+                    adj.setPosition(np, QTextCursor::KeepAnchor);
+                    setTextCursor(adj);
+                }
+            }
+            {
+                const QTextCursor now = textCursor();
+                if (now.position() != m_selPath.last())
+                    m_selPath.append(now.position()); // 入栈 = 镜像回弹依据
                 QFile f(QStringLiteral("/tmp/naught-selup-diag.log"));
                 if (f.open(QIODevice::Append | QIODevice::Text)) {
                     f.write(QStringLiteral("SELUP after=[%1,%2 a=%3 p=%4]\n")
-                        .arg(post.selectionStart()).arg(post.selectionEnd())
-                        .arg(post.anchor()).arg(post.position()).toUtf8());
+                        .arg(now.selectionStart()).arg(now.selectionEnd())
+                        .arg(now.anchor()).arg(now.position()).toUtf8());
                     f.close();
                 }
             }
@@ -2157,9 +2209,31 @@ protected:
             && (event->modifiers() & Qt::ShiftModifier)
             && !(event->modifiers() & Qt::MetaModifier)
             && !(event->modifiers() & (Qt::ControlModifier | Qt::AltModifier))) {
-            // 纯 Shift+↓：尾行且无选区 → 选到文末（用户报"尾行没选区"）；
-            // 有选区且上一次是上移 = 回撤（整行粒度收拢，块尾到块尾）
+            // 纯 Shift+↓：位置栈回撤 / 尾行到文末 / 向下扩展（入栈）
             QTextCursor c = textCursor();
+            if (c.hasSelection() && m_shiftSelDir == -1) {
+                // 上移链回撤：按栈逐行下弹（跨机型字体重排后列锚定必然
+                // 漂移，栈 = 每步真实文本位置 → 严格原路镜像；栈只剩
+                // 基点 → 收拢回锚点 = 用户 T4"按两下回尾符"）
+                if (m_selPath.size() >= 2) {
+                    m_selPath.pop_back();
+                    const int back = m_selPath.last();
+                    if (m_selPath.size() == 1) {
+                        c.setPosition(c.anchor()); // 回到底 → 收拢
+                        m_selPath.clear();
+                        m_shiftSelDir = 0;
+                    } else {
+                        c.setPosition(back, QTextCursor::KeepAnchor);
+                    }
+                    setTextCursor(c);
+                    wakeCaret();
+                    return;
+                }
+                // 栈耗尽（罕见）：基类原路回缩
+                moveCursor(QTextCursor::Down, QTextCursor::KeepAnchor);
+                wakeCaret();
+                return;
+            }
             if (!c.hasSelection()) {
                 const int endPos = document()->characterCount() - 1;
                 QTextBlock after = c.block().next();
@@ -2172,23 +2246,39 @@ protected:
                     after = after.next();
                 }
                 if (!hasContentAfter && c.position() < endPos) {
+                    // 尾行无选区 → 选到文末（用户报"尾行没选区"）
+                    if (m_selPath.isEmpty())
+                        m_selPath.append(c.anchor());
                     c.setPosition(c.position());
                     c.setPosition(endPos, QTextCursor::KeepAnchor);
                     setTextCursor(c);
+                    m_selPath.append(endPos);
+                    m_shiftSelDir = 1;
                     wakeCaret();
                     return;
                 }
             }
+            if (m_selPath.isEmpty())
+                m_selPath.append(c.anchor()); // 链起点 = 锚点
+            m_shiftSelDir = 1; // 向下扩展，方向 = 下
+            moveCursor(QTextCursor::Down, QTextCursor::KeepAnchor);
+            {
+                const QTextCursor now = textCursor();
+                if (now.position() != m_selPath.last())
+                    m_selPath.append(now.position());
+            }
+            wakeCaret();
+            return;
         }
         if (event->key() == Qt::Key_Down
             && (event->modifiers() & Qt::ShiftModifier)
             && (event->modifiers() & Qt::MetaModifier)
             && !(event->modifiers() & (Qt::ControlModifier | Qt::AltModifier))) {
-            // ⌘⇧↓：⌘ 残留剥离 → 按纯 Shift+↓ 的基类语义（向下扩展/回缩）
+            // ⌘⇧↓：⌘ 残留剥离 → 重发纯 Shift+↓ 走本类分支（位置栈镜像
+            // 同纯 Shift+↓；直调基类会绕过入栈/回弹 → 栈失同步）
             QKeyEvent clone(QEvent::KeyPress, Qt::Key_Down, Qt::ShiftModifier,
                             event->text());
-            QPlainTextEdit::keyPressEvent(&clone);
-            wakeCaret();
+            QApplication::sendEvent(this, &clone);
             return;
         }
         if (event->key() == Qt::Key_Escape && (m_mode != Mode::Normal || m_codeMode)) {
@@ -2655,7 +2745,7 @@ private:
         {
             const int anchor = textCursor().anchor();
             const int pos = textCursor().position();
-            if (pos > 0) {
+            if (pos > 0 && m_shiftSelDir == 0) { // 新鲜光标才复位；选区链保持镜像
                 // 真实按键路径左+右（净零位移）重算 Qt 内部期望列，
                 // 然后用锚点/位置重建选区——绝不能 setTextCursor(旧游标
                 // 副本)：副本携带陈旧的 x，复辟回去 = 复位白做（实证）
@@ -3191,6 +3281,8 @@ private:
     QVector<Canvas::InkStroke> m_inkBefore;
     bool m_inkSession = false;
     bool m_shiftInkActive = false;
+    int m_shiftSelDir = 0; // 最近一次 Shift 竖直方向：-1 上 / +1 下 / 0 无
+    QVector<int> m_selPath; // Shift 竖直链位置栈：每步光标文本位置（含基点），反方向逐行回弹
 
     QVector<bool> m_undoOps; // 统一撤销日志：true=文字步 false=墨迹步（时间序）
     QVector<bool> m_redoOps;

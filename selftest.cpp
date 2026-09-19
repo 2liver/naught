@@ -3898,8 +3898,9 @@ bool Editor::selftest()
             }
             {
                 const QTextCursor sel2 = e.textCursor();
-                if (sel2.selectionStart() != 0 || sel2.selectionEnd() != 13) {
-                    qWarning("selftest FAIL: empty-first-line upward extent [%d,%d] (want 0,13)",
+                // 空首行落点 = 换行符之后（下一行行首，用户 T3 拍板）
+                if (sel2.selectionStart() != 1 || sel2.selectionEnd() != 13) {
+                    qWarning("selftest FAIL: empty-first-line upward extent [%d,%d] (want 1,13)",
                              sel2.selectionStart(), sel2.selectionEnd());
                     return false;
                 }
@@ -4063,6 +4064,124 @@ bool Editor::selftest()
                   sel.selectionStart(), sel.selectionEnd(),
                   e.cursorRect().x(), selStartCell.x());
             qInfo("ALIGN-EXIT");
+        }
+        // ============ NAUGHT_TEXT：用户给定文本四段流程逐键落点 ============
+        if (qEnvironmentVariableIsSet("NAUGHT_TEXT")) {
+            qInfo("TEXT-ENTER");
+            const auto dump = [&](const char *tag) {
+                QTextCursor c = e.textCursor();
+                const int p = c.position();
+                QString before = e.toPlainText().mid(qMax(0, p - 12), 12);
+                QString after = e.toPlainText().mid(p, 6);
+                qInfo("TEXT %s pos=%d sel=[%d,%d] ctx=[%s|%s]",
+                      tag, p, c.selectionStart(), c.selectionEnd(),
+                      qPrintable(before.replace(QStringLiteral("\n"), QStringLiteral("⏎"))),
+                      qPrintable(after.replace(QStringLiteral("\n"), QStringLiteral("⏎"))));
+            };
+            const auto key = [&](Qt::Key k, Qt::KeyboardModifiers m) {
+                QKeyEvent ke(QEvent::KeyPress, k, m);
+                QApplication::sendEvent(&e, &ke);
+                QApplication::processEvents();
+            };
+            const auto placeAt = [&](const QString &needle) {
+                const int idx = e.toPlainText().indexOf(needle);
+                QTextCursor c(e.document());
+                c.setPosition(idx);
+                e.setTextCursor(c);
+                QApplication::processEvents();
+                return idx;
+            };
+            const QString doc = QStringLiteral(
+                "\norders = [(\"张三\", 99.5), (\"李四\", 150.0), (\"王五\", 88.0)]\n"
+                "big = [o for o in orders if o[1] > 100]      # 函数式筛选\n"
+                "big_sorted = sorted(big, key=lambda o: -o[1])  # 按金额降序\n"
+                "print(big_sorted)   # [('李四', 150.0)]\n");
+            e.setPlainText(doc);
+            e.toggleCrt();
+            QApplication::processEvents();
+            e.show();
+            e.setFocus();
+            // 模拟用户真机宽度：offscreen 屏仅 800px → C64 公式
+            // min(screenW/50,16)×ratio 只给 40 列 → 长行换行（真机
+            // ≥1040px 屏恒为 72+ 列不换行）。窗口加宽到 1440 使
+            // ratio 封顶 1.0 = 真机全屏字号 → 换行行为与真机一致
+            e.resize(1440, 480);
+            QApplication::processEvents();
+            qInfo("TEXT doc len=%d", e.document()->characterCount());
+            // 流程1：光标在"函"前 → Shift↓×2 → Shift↑
+            placeAt(QStringLiteral("函数式"));
+            dump("T1-start");
+            key(Qt::Key_Down, Qt::ShiftModifier); dump("T1-down1");
+            key(Qt::Key_Down, Qt::ShiftModifier); dump("T1-down2");
+            key(Qt::Key_Up, Qt::ShiftModifier); dump("T1-up1");
+            // 流程2：光标在"100"前 → Shift↓×2 → Shift↑×2
+            placeAt(QStringLiteral("100"));
+            dump("T2-start");
+            key(Qt::Key_Down, Qt::ShiftModifier); dump("T2-down1");
+            key(Qt::Key_Down, Qt::ShiftModifier); dump("T2-down2");
+            key(Qt::Key_Up, Qt::ShiftModifier); dump("T2-up1");
+            key(Qt::Key_Up, Qt::ShiftModifier); dump("T2-up2");
+            // 流程3：光标在"100"前 → Shift↑×2 → 应到换行符与 o 之间
+            placeAt(QStringLiteral("100"));
+            dump("T3-start");
+            key(Qt::Key_Up, Qt::ShiftModifier); dump("T3-up1");
+            key(Qt::Key_Up, Qt::ShiftModifier); dump("T3-up2");
+            // 流程4：光标在"150.0)]"的"]"后 → Shift↑×2 → 换机(C64) →
+            // Shift↓×2（回尾符刷新锚点）→ Shift↑×2 → 应落在"100]"的末0上
+            placeAt(QStringLiteral("150.0)]"));
+            {
+                QTextCursor c = e.textCursor();
+                c.setPosition(c.position() + 7); // "150.0)]" 共 7 字 → ] 之后
+                e.setTextCursor(c);
+            }
+            dump("T4-start");
+            key(Qt::Key_Up, Qt::ShiftModifier); dump("T4-up1");
+            key(Qt::Key_Up, Qt::ShiftModifier); dump("T4-up2");
+            while (e.machine() != 2)
+                e.toggleMachine();
+            QApplication::processEvents();
+            {
+                QEventLoop sl;
+                QTimer::singleShot(400, &sl, &QEventLoop::quit);
+                sl.exec();
+                QApplication::processEvents();
+            }
+            dump("T4-c64");
+            key(Qt::Key_Down, Qt::ShiftModifier); dump("T4-down1");
+            key(Qt::Key_Down, Qt::ShiftModifier); dump("T4-down2");
+            key(Qt::Key_Up, Qt::ShiftModifier); dump("T4-up1b");
+            key(Qt::Key_Up, Qt::ShiftModifier); dump("T4-up2b");
+            // 负向回归闸：用户配方逐键落点（任何一步漂移 = selftest FAIL）
+            {
+                QTextCursor f = e.textCursor();
+                if (f.position() != 91 || f.selectionStart() != 91
+                    || f.selectionEnd() != 199) {
+                    qWarning("selftest FAIL: T4 final Shift+Up x2 not on last 0 of 100] ([%d,%d] want [91,199])",
+                             f.selectionStart(), f.selectionEnd());
+                    return false;
+                }
+            }
+            // T2 往返：↓×2 → ↑×2 必须回到"100"前（89）
+            placeAt(QStringLiteral("100"));
+            key(Qt::Key_Down, Qt::ShiftModifier);
+            key(Qt::Key_Down, Qt::ShiftModifier);
+            key(Qt::Key_Up, Qt::ShiftModifier);
+            key(Qt::Key_Up, Qt::ShiftModifier);
+            if (e.textCursor().hasSelection() || e.textCursor().position() != 89) {
+                qWarning("selftest FAIL: T2 round-trip not back before 100 (%d want 89)",
+                         e.textCursor().position());
+                return false;
+            }
+            // T3：↑×2 必须落在换行符与 o 之间（1）
+            placeAt(QStringLiteral("100"));
+            key(Qt::Key_Up, Qt::ShiftModifier);
+            key(Qt::Key_Up, Qt::ShiftModifier);
+            if (e.textCursor().position() != 1) {
+                qWarning("selftest FAIL: T3 not between newline and o (%d want 1)",
+                         e.textCursor().position());
+                return false;
+            }
+            qInfo("TEXT-EXIT");
         }
         // ============ NAUGHT_EXACT：用户原话配方逐字复现 ============
         if (qEnvironmentVariableIsSet("NAUGHT_EXACT")) {
