@@ -115,11 +115,18 @@ jobs:
         run: |
           $env:QT_QPA_PLATFORM = 'offscreen'
           $env:NAUGHT_CI = '1'
-          $env:NAUGHT_RHI_SKIP = 'vulkan,d3d11,d3d12,gles2'
+          # 只跳过真正拿不到的后端（vulkan/gles2 在跑者上无 loader/GLES
+          # 驱动）；d3d11/d3d12 必须真跑——那正是 Windows 用户按 ⌘T 走的
+          # 那条路。旧配置把 d3d11/d3d12 一并跳过 → 探测链只能落到 Null →
+          # 这个发版工作流一路全绿地把"Windows 进「显」闪退"的包发了出去
+          $env:NAUGHT_RHI_SKIP = 'vulkan,gles2'
+          # 硬闸：后端悄悄退回 Null 即判失败（Null 不产出真帧却让断言全过）
+          $env:NAUGHT_REQUIRE_GPU = '1'
           $env:QT_ASSUME_STDERR_HAS_CONSOLE = '1'
           # KF6 从源码构建安装在 RUNNER_TEMP——selftest 加载 KF6SyntaxHighlighting.dll 需上 PATH
           $env:PATH = "$env:RUNNER_TEMP\kf6\bin;$env:PATH"
           $p = Start-Process -FilePath '.\build\Release\naught.exe' -ArgumentList '--selftest' -Wait -PassThru -RedirectStandardOutput selftest.out -RedirectStandardError selftest.err
+          Get-Content selftest.err -ErrorAction SilentlyContinue | Select-String -Pattern 'CRT-RHI' | ForEach-Object { "::notice::$_" }
           "::error::SELFTEST raw exit code: $($p.ExitCode)"
           if (Test-Path selftest.err) { Get-Content selftest.err -Tail 6 | ForEach-Object { "::warning::$_" } }
           if (Test-Path selftest.out) { Get-Content selftest.out -Tail 6 | ForEach-Object { "::warning::$_" } }

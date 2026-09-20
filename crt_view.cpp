@@ -16,6 +16,116 @@
 #include <rhi/qrhi.h>
 #include <rhi/qshader.h>
 
+// ---- RHI 后端构造参数 --------------------------------------------------
+// 铁律：QRhi::create(impl, params) 的后端构造函数**无条件解引用 params**
+// （Qt 6.9 源码：qrhivulkan.cpp `inst = params->inst;`；qrhid3d11.cpp /
+// qrhid3d12.cpp `debugLayer = params->enableDebugLayer;`；qrhigles2.cpp
+// `requestedFormat = params->format;`）。旧版对所有后端一律传 nullptr，
+// 于是任何真正走到这些分支的机器都在 Qt6Gui.dll 内部空指针闪退：
+// Windows 上 QT_FEATURE_metal = -1（Metal create 直接返回 nullptr），
+// 探测链第二站就是 Vulkan —— 按下「显」当场 0xC0000005。
+// 现在每个后端都给真实 InitParams；拿不到参数的构建直接跳过该后端，
+// 绝不把 nullptr 递给 create。
+//
+// Vulkan 额外持有 QVulkanInstance，实例必须活过 QRhi；GLES2 的
+// fallbackSurface 同理。管线随重建反复走 ensureRhi，故两者都用进程级
+// 单例承载（只建一次，随进程退出回收）。
+#if QT_CONFIG(vulkan) && __has_include(<vulkan/vulkan.h>)
+#include <QVulkanInstance>
+#define NAUGHT_RHI_HAVE_VULKAN 1
+#else
+#define NAUGHT_RHI_HAVE_VULKAN 0
+#endif
+
+#if QT_CONFIG(opengl)
+#include <QOffscreenSurface>
+#endif
+
+namespace {
+
+#if NAUGHT_RHI_HAVE_VULKAN
+QVulkanInstance *naughtVulkanInstance()
+{
+    static QVulkanInstance *inst = []() -> QVulkanInstance * {
+        QVulkanInstance *v = new QVulkanInstance;
+        if (v->create())
+            return v;
+        delete v; // 无 loader / 无驱动：本平台放弃 Vulkan
+        return nullptr;
+    }();
+    return inst;
+}
+#endif
+
+#if QT_CONFIG(opengl)
+QOffscreenSurface *naughtGles2FallbackSurface()
+{
+    static QOffscreenSurface *surf = nullptr;
+    if (!surf)
+        surf = QRhiGles2InitParams::newFallbackSurface();
+    return surf;
+}
+#endif
+
+// 后端 → 构造参数；nullptr = 本平台/本次构建拿不到参数 = 跳过该后端
+QRhiInitParams *naughtRhiParams(QRhi::Implementation impl)
+{
+    switch (impl) {
+    case QRhi::Metal: {
+#if QT_CONFIG(metal)
+        static QRhiMetalInitParams p;
+        return &p;
+#else
+        return nullptr; // 非 Apple 构建：create 会打印警告并返回 nullptr
+#endif
+    }
+    case QRhi::D3D11: {
+#if defined(Q_OS_WIN)
+        static QRhiD3D11InitParams p;
+        return &p;
+#else
+        return nullptr;
+#endif
+    }
+    case QRhi::D3D12: {
+#if defined(Q_OS_WIN)
+        static QRhiD3D12InitParams p;
+        return &p;
+#else
+        return nullptr;
+#endif
+    }
+    case QRhi::Vulkan: {
+#if NAUGHT_RHI_HAVE_VULKAN
+        QVulkanInstance *inst = naughtVulkanInstance();
+        if (!inst)
+            return nullptr;
+        static QRhiVulkanInitParams p;
+        p.inst = inst;
+        return &p;
+#else
+        return nullptr; // 构建期无 vulkan/vulkan.h：QRhiVulkanInitParams 不存在
+#endif
+    }
+    case QRhi::OpenGLES2: {
+#if QT_CONFIG(opengl)
+        static QRhiGles2InitParams p;
+        p.fallbackSurface = naughtGles2FallbackSurface();
+        return &p;
+#else
+        return nullptr;
+#endif
+    }
+    case QRhi::Null: {
+        static QRhiNullInitParams p;
+        return &p;
+    }
+    }
+    return nullptr;
+}
+
+} // namespace
+
 static void shaderLog(const QString &s)
 {
     // 轮转：日志超 64KB 截断重来（防无限增长）
@@ -80,6 +190,13 @@ void CrtView::syncGeometry()
 
 void CrtView::showEvent(QShowEvent *)
 {
+    // 新一轮「显」会话：上一会话的活性/在途状态全部作废。否则退出「显」
+    // 超过 6s 再进来（⌘T → 写一会 → ⌘T），第一帧就撞上"回读 N 秒未
+    // 落地"的活性看门狗：白做一次整管线重建（用户可见的入场顿挫/黑闪），
+    // 且 paintEvent 与 renderFrame 两处看门狗会各触发一次 = 重建两遍。
+    m_lastLanded.invalidate();
+    m_readbackClock.invalidate();
+    m_readbackInFlight = false; // 上一会话若被隐藏打断，在途标志不得拖住新会话
     ensureRhi();
     m_warmClock.start(); // 入场暖机：由暗到亮的一次预热脉冲
     m_frameTimer.start();
@@ -191,6 +308,7 @@ void CrtView::paintEvent(QPaintEvent *)
         m_pending = QImage(); // 快照作废 → 下一帧全量重拍
         resetPipeline();
         markDirty(true);
+        m_lastLanded.invalidate(); // 与 renderFrame 同款：防两处看门狗各重建一遍
     }
     QPainter p(this);
     p.setRenderHint(QPainter::SmoothPixmapTransform); // 滚动期半分辨率回读 → 平滑放大
@@ -311,10 +429,12 @@ void CrtView::ensureRhi()
     // 帧循环从此冻结（全屏后画面冻死的根因）。
     delete m_r;
     m_r = nullptr;
-    // 后端探测回退：Metal → Vulkan → OpenGL → Null（跨平台——
-    // 旧版硬编码 Metal 且依赖私有头 qrhimetal_p.h，Windows/Linux
-    // 直接编译不过）。默认参数即可（Metal 无参 = 系统默认设备）
-    // Qt 6.9 已移除桌面 OpenGL 后端；平台不适配的项 create 会快速失败
+    // 后端探测回退：平台首选后端在前（本机原生、最可靠），逐级回退，
+    // Null 兜底（Null 对一切说"成功"却不产出真实帧，只保证不崩）。
+    // 旧版硬编码 Metal 且依赖私有头 qrhimetal_p.h —— 那版 Windows/Linux
+    // 直接编译不过；这一版跨三平台，靠平台宏挑链 + naughtRhiParams 供参数。
+    // macOS 有效后端 = Metal 或 Null：Qt 6.9 已无桌面 OpenGL，且 gles2 的
+    // create 会崩在 Qt 内部（QSurfaceFormat 空指针解引用）——不进候选。
     // NAUGHT_RHI_SKIP=metal,vulkan：环境逃生阀（无 GPU CI 上软件
     // Vulkan/lavapipe 可能崩在 Qt 内部，探测期无法防御——跳过即可）
     const QSet<QString> skipSet = [] {
@@ -323,24 +443,37 @@ void CrtView::ensureRhi()
                                       .split(QLatin1Char(','), Qt::SkipEmptyParts);
         for (const QString &p : parts)
             s.insert(p.trimmed().toLower());
-#ifdef Q_OS_MACOS
-        // Qt 6.9 已无桌面 OpenGL；macOS 上 gles2 的 create 直接崩在
-        // Qt 内部（QSurfaceFormat 空指针解引用）——无 GPU 环境（CI/
-        // Metal 不可用）探测链落到 gles2 即段错误。macOS 有效后端 =
-        // Metal 或 Null，gles2 恒跳过（真机 Metal 永远优先，无感知）
-        s.insert(QStringLiteral("gles2"));
-#endif
         return s;
     }();
-    const struct { QRhi::Implementation impl; const char *name; } backends[] = {
-        { QRhi::Metal, "metal" }, { QRhi::Vulkan, "vulkan" },
-        { QRhi::D3D11, "d3d11" }, { QRhi::D3D12, "d3d12" },
-        { QRhi::OpenGLES2, "gles2" }, { QRhi::Null, "null" },
+#ifdef Q_OS_MACOS
+    static const struct { QRhi::Implementation impl; const char *name; } backends[] = {
+        { QRhi::Metal, "metal" }, { QRhi::Null, "null" },
     };
+#elif defined(Q_OS_WIN)
+    // Windows：D3D11 是 QRhi 在本平台的原生后端（Win10+ 恒可用，含 WARP
+    // 软件光栅），D3D12 次之。Vulkan/GLES2 只在构建期拿到参数时才进
+    // 候选（见 naughtRhiParams）——拿不到就跳过，不再空指针闪退。
+    static const struct { QRhi::Implementation impl; const char *name; } backends[] = {
+        { QRhi::D3D11, "d3d11" }, { QRhi::D3D12, "d3d12" },
+        { QRhi::Vulkan, "vulkan" }, { QRhi::OpenGLES2, "gles2" },
+        { QRhi::Null, "null" },
+    };
+#else
+    static const struct { QRhi::Implementation impl; const char *name; } backends[] = {
+        { QRhi::Vulkan, "vulkan" }, { QRhi::OpenGLES2, "gles2" },
+        { QRhi::Null, "null" },
+    };
+#endif
     for (const auto &b : backends) {
         if (skipSet.contains(QLatin1String(b.name)))
             continue;
-        m_r = QRhi::create(b.impl, nullptr);
+        QRhiInitParams *params = naughtRhiParams(b.impl);
+        if (!params) {
+            qWarning("CRT-RHI skip backend %s (no init params in this build)",
+                     b.name);
+            continue;
+        }
+        m_r = QRhi::create(b.impl, params);
         if (m_r) {
             qWarning("CRT-RHI backend: %s", b.name);
             break;
@@ -652,21 +785,25 @@ void CrtView::renderFrame()
                         const QRgb pxx = m_pending.pixel(x, y);
                         mx = qMax<long>(mx, qRed(pxx) + qGreen(pxx) + qBlue(pxx));
                     }
-                // 拦截只针对"从亮突然变暗"（布局瞬态/视口渲染坏）；
+                // 拦截只针对"有字的文档从亮突然变暗"（布局瞬态/视口渲染坏）；
                 // 本来就暗的合法帧（空文档/顶部无字）直接放行——
-                // 审查 P3：旧实现按绝对亮度拦 1.5s = 合法暗文档被冻结
-                const bool suddenDark = m_prevTopLum >= 60 && mx < 60;
+                // 审查 P3：旧实现按绝对亮度拦 1.5s = 合法暗文档被冻结。
+                // Windows 实测补漏：只按亮度阈值判还有两类误报——①进「显」
+                // 时"阳"（白底）换肤成暗底，②空文档下块光标眨眼让顶部采样
+                // 在亮/暗之间跳。两者都被当成"视口渲染坏了"：入场先冻结
+                // 1.5s（用户看到黑屏一会儿），之后每帧刷一条告警。加
+                // sourceHasText() 语义闸——文档真没字时不存在"失字"这回事。
+                const bool suddenDark = m_prevTopLum >= 60 && mx < 60
+                                        && m_source->sourceHasText();
                 m_prevTopLum = mx >= 60 ? int(mx) : (suddenDark ? m_prevTopLum : int(mx));
                 if (suddenDark && m_pending.height() > 100) {
                     // 文档有字而快照失字 = 源视口渲染坏了（实机 diag
                     // vpLum=15 的同类）：锤视口重绘 + 布局强制，自愈
-                    if (m_source->sourceHasText()) {
-                        if (auto *w = m_source->sourceWidget()) {
-                            if (auto *sa = qobject_cast<QAbstractScrollArea *>(w))
-                                if (sa->viewport())
-                                    sa->viewport()->update();
-                            w->update();
-                        }
+                    if (auto *w = m_source->sourceWidget()) {
+                        if (auto *sa = qobject_cast<QAbstractScrollArea *>(w))
+                            if (sa->viewport())
+                                sa->viewport()->update();
+                        w->update();
                     }
                     // 拦截已知的百毫秒级布局瞬态（"松 Shift 黑屏一会"的
                     // 残因）；连续失字超过 1.5s = 快照真的坏了 → 如实
@@ -681,6 +818,12 @@ void CrtView::renderFrame()
                     qWarning("CRT dark snapshot for %lld ms — uploading as-is "
                              "(anti-freeze: 快照长期失字时如实落地，不冻结旧帧)",
                              qint64(m_darkSince.elapsed()));
+                    // 时限到了就认这份暗为新的基线：旧实现只上传不更新
+                    // 基线，m_prevTopLum 永远停在亮值 → 此后每帧都命中
+                    // suddenDark、每帧刷一条告警（Windows 实测空文档下
+                    // 无限刷屏），拦截器再也回不到正常态。
+                    m_prevTopLum = int(mx);
+                    m_darkSince.invalidate();
                 } else {
                     m_darkSince.invalidate();
                 }

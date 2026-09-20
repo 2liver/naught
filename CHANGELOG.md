@@ -1,5 +1,41 @@
 # 变更日志
 
+## 0.3.16（Windows「显」闪退修复）
+
+Windows 用户按 `Ctrl+T` 进「显」当场闪退的根修，外加两处跨平台「显」缺陷。
+
+- **修复（致命）：Windows/Linux 进「显」空指针闪退。** `CrtView::ensureRhi()`
+  的后端探测链对所有后端一律 `QRhi::create(impl, nullptr)`，而 QRhi 各后端
+  的构造函数**无条件解引用 params**（Qt 6.9 源码：`qrhivulkan.cpp`
+  `inst = params->inst;`、`qrhid3d11.cpp`/`qrhid3d12.cpp`
+  `debugLayer = params->enableDebugLayer;`、`qrhigles2.cpp`
+  `requestedFormat = params->format;`）。Windows 上 `QT_FEATURE_metal = -1`
+  （Metal `create` 直接返回 nullptr），探测链第二站就是 Vulkan → 按 `Ctrl+T`
+  在 `Qt6Gui.dll` 内 `0xC0000005` 崩溃（实测偏移 `Qt6Gui.dll+0x4d79e6`，
+  与用户实机崩溃记录逐字节一致）。现在每个后端配自己的 `InitParams`
+  （Vulkan 另配进程级 `QVulkanInstance`、GLES2 配 `fallbackSurface`），
+  拿不到参数的构建直接跳过该后端——**绝不把 nullptr 递给 create**。
+  探测链同时改为平台原生优先：Windows = D3D11 → D3D12 →（有头文件才
+  Vulkan）→ GLES2 → Null；macOS = Metal → Null；其余 = Vulkan → GLES2 → Null。
+- **修复：「显」入场黑屏 1.5s + 每帧刷告警。** 黑帧拦截器只按亮度阈值判
+  "从亮突然变暗"，于是「阳」（白底）换肤成暗底、以及空文档下块光标眨眼
+  都被当成"视口渲染坏了"：入场先冻结 1.5s，之后 `m_prevTopLum` 基线永不
+  回落 → 每帧命中、每帧刷一条 `CRT dark snapshot` 告警。加
+  `sourceHasText()` 语义闸（文档没字就不存在"失字"），并在拦截时限到期
+  后把这份暗认作新基线（拦截器回到正常态）。
+- **修复：退出「显」>6s 再进来白做一次（两次）整管线重建。** 活性看门狗的
+  `m_lastLanded` 跨会话残留，重新 `show()` 后第一帧就撞上"回读 30s 未落地"，
+  触发全量重建；且 `paintEvent` 与 `renderFrame` 两处看门狗各触发一次 =
+  重建两遍（用户可见的入场顿挫）。`showEvent` 现在开新会话（活性时钟、
+  在途回读标志全部作废），`paintEvent` 的看门狗补上与 `renderFrame` 同款
+  的 `invalidate()`。
+- **CI 补洞（本次事故的真正成因）**：`build.yml` 与 `release.yml` 的 Windows
+  自检把 `vulkan,d3d11,d3d12,gles2` 全部跳过 → 探测链只能落到 Null（对一切
+  说"成功"却不产出真帧）→ 后端闪退在 CI 全绿的情况下发版。现只跳过跑者上
+  真拿不到的 `vulkan,gles2`，并新增 `NAUGHT_REQUIRE_GPU=1` 硬闸：后端一旦
+  悄悄退回 Null 即判失败。
+- **自检新增**：`NAUGHT_REQUIRE_GPU` 硬闸（见上）。
+
 ## 0.3.15（正式版转正）
 
 预览工作线 50+ 提交合并回 main：Shift+方向键选区语义全面重做 + CRT 修复沉淀。
