@@ -1703,6 +1703,20 @@ bool Editor::selftest()
             // 无可用 RHI 后端（无 GPU 的无头机器 / 所有后端被环境跳过）：
             // GPU 相关断言整体豁免——渲染层优雅降级为无画面，CPU 检查照跑
             const bool gpuOk = !ciSmoke && e.m_crtView && e.m_crtView->pipelineUsable();
+            // GPU 硬闸（NAUGHT_REQUIRE_GPU=1）：这台机器上 CRT 管线必须真
+            // 跑在真后端上。旧 Windows CI 用 NAUGHT_RHI_SKIP 把
+            // vulkan/d3d11/d3d12/gles2 全部跳过 → 探测链只能落到 Null（对
+            // 一切说"成功"却不产出真帧）→ "按 ⌘T 在 Qt6Gui 内部空指针闪退"
+            // 这类后端问题在 CI 全绿的情况下直接发到用户手里。设了这个
+            // 变量就要求真后端；完全没有 GPU 的机器不要设。
+            if (qEnvironmentVariableIsSet("NAUGHT_REQUIRE_GPU")
+                && e.m_crtView && !e.m_crtView->pipelineUsable()) {
+                qWarning("selftest FAIL: NAUGHT_REQUIRE_GPU is set but the CRT "
+                         "pipeline is not usable (backend fell back to Null or "
+                         "pipeline creation failed) — see the 'CRT-RHI backend:' "
+                         "line above");
+                return false;
+            }
             // 光标反相块会压住顶部字形、吃掉琥珀（有焦点时）——光标
             // 挪到文末，顶部断言照旧测文字本身（与后续快照检查同款）
             {

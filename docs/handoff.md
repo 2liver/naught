@@ -12,6 +12,14 @@ macOS 写作应用「無」(naught),C++/Qt 6.9.3。核心卖点 = 「显」(Cmd+
 设计宪章 = docs/crt-filter.md(零 UI、单一模式、纯画面拟真、不毁打字)。
 
 **用户钦定的四项目标(最高优先级,高于一切优化):流畅、无 bug、显示正确、功能稳定。**
+
+## 0. 项目冻结（v0.3.16 收官）
+
+- **冻结生效**：用户 Mac 送修中。回来后分两台机子做分发：**本机（Intel Mac）= 继续负责 macOS**；**修好的电脑 = 负责 Windows 和 Linux**。M1/arm64 架构暂不考虑。
+- **归档待办（先不做，已记）**：
+  1. **分辨率自适应**：按电脑分辨率自动调整字体尺寸（跨显示器的自动 ⌘0）。
+  2. **跨平台「项」入口 + 鼠标适配性**：Windows/Linux 没有打开「项」（偏好）的地方；鼠标交互（与键盘交互）适配未做。Windows 目前右键菜单是唯一功能入口。
+- **Windows 方交接**（`windows方测试结果/` 文件夹）：Windows 11 实机 + 真 GUI 按键实测——「显」闪退真根因 = `QRhi::create(impl, nullptr)` 空参数（各后端构造函数无条件解引用；macOS 因 Metal 优先从未触发，Linux 同样必崩）。修复（已 `git am` 并入 `39511c3`）：每后端配真实 InitParams / 探测链平台原生优先 / 黑帧拦截加语义闸 + 到期接受新基线 / showEvent 开新会话 + paintEvent 看门狗对称 invalidate / CI Windows 不再全跳真后端 + `NAUGHT_REQUIRE_GPU=1` 硬闸。Windows 实测矩阵 9 项全过（完整自检真 D3D11/D3D12、CI 冒烟、DPR1.5/2.0、stress/bench、真实 GUI 全套场景）；macOS 三模式 + ASAN 复验过。**遗留观察**（未改，防御性记录）：①`m_readbackGen` 在 `resetPipeline()` 不自增（迟到回读会画一帧旧内容，暂无害）；②回读回调 `QRhiReadbackResult*` 在回调永不触发时会泄漏（实测未触发）；③`d3dcompiler_47.dll` 是 Windows 运行期硬依赖（手工拼包勿漏）。
 体积优化/性能优化/模块化都以不伤害这四条为前提——任何"为了 KPI 的优化"都会被骂。
 
 ## 1. 仓库与分支现状(2026-09,重要)

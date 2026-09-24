@@ -64,9 +64,19 @@ jobs:
         run: |
           $env:QT_QPA_PLATFORM = 'offscreen'
           $env:NAUGHT_CI = '1'
-          $env:NAUGHT_RHI_SKIP = 'vulkan,d3d11,d3d12,gles2'
+          # 只跳过真正拿不到的后端：vulkan/gles2 在跑者上没有 loader/GLES
+          # 驱动。d3d11/d3d12 必须真的跑起来——它们正是 Windows 用户按 ⌘T
+          # 走的那条路。旧配置把 d3d11/d3d12 一并跳过 → 探测链落到 Null，
+          # 于是"Windows 进「显」闪退"在 CI 全绿的情况下发版。
+          $env:NAUGHT_RHI_SKIP = 'vulkan,gles2'
+          # 硬闸：后端一旦悄悄退回 Null 就判失败（Null 不产出真帧，
+          # 却让所有断言"通过"）。跑者无 GPU 时靠 DXGI 的 WARP 适配器。
+          # 若未来跑者真的没有 D3D11：撤掉这一行，而不是把 d3d11 加回
+          # NAUGHT_RHI_SKIP（那等于取消对「显」管线的 CI 覆盖）
+          $env:NAUGHT_REQUIRE_GPU = '1'
           $env:QT_ASSUME_STDERR_HAS_CONSOLE = '1'
           $p = Start-Process -FilePath '.\build\Release\naught.exe' -ArgumentList '--selftest' -Wait -PassThru -RedirectStandardOutput selftest.out -RedirectStandardError selftest.err
+          Get-Content selftest.err -ErrorAction SilentlyContinue | Select-String -Pattern 'CRT-RHI' | ForEach-Object { "::notice::$_" }
           "::error::SELFTEST raw exit code: $($p.ExitCode)"
           if (Test-Path selftest.err) { Get-Content selftest.err -Tail 6 | ForEach-Object { "::warning::$_" } }
           if (Test-Path selftest.out) { Get-Content selftest.out -Tail 6 | ForEach-Object { "::warning::$_" } }
