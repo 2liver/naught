@@ -48,6 +48,8 @@
 // 必须作为真正的登录项应用运行。
 
 #ifdef Q_OS_MACOS
+static void naughtAgentPurgeLoginItems(const QString &keepPath); // 前向声明
+
 // 安装程序（替代 zip 解压安装）：布署 naught-agent.app 登录项 +
 // LaunchServices 注册主应用 + 清理旧 launchd 代理。幂等：重跑 = 重装。
 static int installNaught()
@@ -64,8 +66,11 @@ static int installNaught()
     // 2) 清理旧版"并排"代理（迁移）
     const QString agentOld = QFileInfo(bundle).dir().filePath(QStringLiteral("naught-agent.app"));
     QDir(agentOld).removeRecursively();
-    // 3) 代理 = 嵌套在 Resources 内（不进启动台）；直接注册登录项
+    // 3) 代理 = 嵌套在 Resources 内（不进启动台）；直接注册登录项。
+    //    插入前先清掉历史条目（独立代理/构建目录/旧预览版残留）
     const QString agentPath = bundle + QStringLiteral("/Contents/Resources/naught-agent.app");
+    naughtAgentPurgeLoginItems(
+        QFileInfo(agentPath).canonicalFilePath());
     CFURLRef agentUrl = CFURLCreateWithFileSystemPath(
         nullptr, agentPath.toCFString(), kCFURLPOSIXPathStyle, true);
     bool loginItemOk = false;
@@ -101,13 +106,49 @@ static int installNaught()
     return 0;
 }
 
+// 本应用嵌套代理的规范路径
+static QString naughtAgentPath()
+{
+    return QFileInfo(QDir(QCoreApplication::applicationDirPath())
+                         .absoluteFilePath(QStringLiteral("../Resources/naught-agent.app")))
+        .canonicalFilePath();
+}
+
+// 清理历史登录项：只保留指向当前应用嵌套代理的那一条。多版本时代
+// 反复安装累积了 4 条 naught-agent（独立代理 / 构建目录 / 已删预览版
+// 的条目都没人删）——启动台登录项列表里一排重名即此因
+static void naughtAgentPurgeLoginItems(const QString &keepPath)
+{
+    LSSharedFileListRef list = LSSharedFileListCreate(
+        nullptr, kLSSharedFileListSessionLoginItems, nullptr);
+    if (!list)
+        return;
+    CFArrayRef snapshot = LSSharedFileListCopySnapshot(list, nullptr);
+    if (snapshot) {
+        for (CFIndex i = 0; i < CFArrayGetCount(snapshot); ++i) {
+            LSSharedFileListItemRef item =
+                (LSSharedFileListItemRef)CFArrayGetValueAtIndex(snapshot, i);
+            CFURLRef url = nullptr;
+            if (LSSharedFileListItemResolve(item, kLSSharedFileListNoUserInteraction,
+                                            &url, nullptr) == noErr && url) {
+                const QString path = QUrl::fromCFURL(url).toLocalFile();
+                if (path.contains(QStringLiteral("naught-agent"))
+                    && path != keepPath) {
+                    LSSharedFileListItemRemove(list, item);
+                }
+                CFRelease(url);
+            }
+        }
+        CFRelease(snapshot);
+    }
+    CFRelease(list);
+}
+
 // 登录项是否已指向本代理（启动自检：缺失则静默补装——打包分发
 // 后首启即具备重生能力，无需手工跑安装程序）
 static bool naughtAgentLoginItemInstalled()
 {
-    const QString agentPath = QFileInfo(QDir(QCoreApplication::applicationDirPath())
-                                            .absoluteFilePath(QStringLiteral("../Resources/naught-agent.app")))
-                                   .canonicalFilePath();
+    const QString agentPath = naughtAgentPath();
     bool found = false;
     LSSharedFileListRef list = LSSharedFileListCreate(
         nullptr, kLSSharedFileListSessionLoginItems, nullptr);
@@ -414,6 +455,7 @@ int main(int argc, char **argv)
         return Editor::selftest() ? 0 : 1;
     }
 #ifdef Q_OS_MACOS
+    naughtAgentPurgeLoginItems(naughtAgentPath()); // 清历史多版本残留
     if (!naughtAgentLoginItemInstalled()) // 首启/代理丢失：静默补装（重生能力随包装分发）
         installNaught();
 #endif
